@@ -1,10 +1,22 @@
 #include <editline/readline.h>
 #include <cstdlib>
+#include <cstdio>
+#include "ROOTureApp.h"
 #include "Rtypes.h"
+#include "TClass.h"
 #include "TApplication.h"
+#include "TMethodCall.h"
 #include "TSysEvtHandler.h"
 #include "TROOT.h"
+#include "TSystem.h"
+#include "TVirtualX.h"
+#include "TVirtualPad.h"
 #include "Getline.h"
+#include "TStopwatch.h"
+#include "TException.h"
+#include "TInterpreter.h"
+#include "TMethod.h"
+#include <iostream>
 
 extern "C"
 {
@@ -12,8 +24,8 @@ extern "C"
 }
 
 /* Create Enumeration of Possible lval Types */
-enum { LVAL_ERR, LVAL_NUM,   LVAL_SYM, LVAL_STR, 
-       LVAL_FUN, LVAL_SEXPR, LVAL_QEXPR };
+enum { LVAL_ERR, LVAL_NUM,  LVAL_FLOAT, LVAL_SYM, LVAL_STR,
+       LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR };
 
 struct lval;
 struct lenv;
@@ -23,6 +35,9 @@ lval* lval_copy(lval* v);
 lval* lval_err(const char* fmt, ...);
 lval* lval_eval(lenv* e, lval* v);
 lval* lval_eval_sexpr(lenv* e, lval* v);
+lval* lval_str(const char *s);
+lval* lenv_get(lenv *e, lval* v);
+void lenv_put(lenv *e, lval* k, lval* v);
 lval* builtin_eval(lenv *e, lval* a);
 lval* builtin_list(lenv *e, lval* a);
 lval* builtin_op(lenv* e, lval* a, const char* op);
@@ -35,10 +50,15 @@ struct lval {
   int type;
 
   /* Basic */
-  long num;
+  long   num;
+  double floating;
   char* err;
   char* sym;
   char* str;
+  /* TObject related */
+  TObject *obj;
+  TMethodCall *method;
+  char *methodArgs;
 
   /* Function */
   lbuiltin builtin;
@@ -53,6 +73,7 @@ struct lval {
 
 /* Parsers */
 mpc_parser_t* Number; 
+mpc_parser_t* Floating; 
 mpc_parser_t* Symbol; 
 mpc_parser_t* String; 
 mpc_parser_t* Comment;
@@ -90,18 +111,21 @@ void lenv_del(lenv* e) {
 }
 
 lval* lenv_get(lenv* e, lval* k) {
-
+  /* Linear search of symbol in current context */
   for (int i = 0; i < e->count; i++) {
     if (strcmp(e->syms[i], k->sym) == 0) {
       return lval_copy(e->vals[i]);
     }
   }
 
-  /* If no symbol check in parent otherwise error */
+  /* If no symbol check in parent. If we are at top level then we bind a
+     symbol to a string which has the same value. */
   if (e->par) {
     return lenv_get(e->par, k);
   } else {
-    return lval_err("Unbound Symbol '%s'", k->sym);
+    lval *v = lval_str(k->sym);
+    lenv_put(e, k, v);
+    return v;
   }
 }
 
@@ -171,6 +195,23 @@ lval* lval_fun(lbuiltin func) {
   return v;
 }
 
+/* Create a new TObject lval */
+lval* lval_tobj(TObject *obj) {
+  lval* v = (lval*)malloc(sizeof(lval));
+  v->type = LVAL_TOBJ;
+  v->obj = obj;
+  return v;
+}
+
+/* Create a new TMethodCall lval */
+lval* lval_tmethod(TMethodCall *method, const char *args) {
+  lval* v = (lval*)malloc(sizeof(lval));
+  v->type = LVAL_TMETHOD;
+  v->method = method;
+  v->methodArgs = strdup(args);
+  return v;
+}
+
 /* Create a new number type lval */
 lval* lval_num(long x) {
   lval* v = (lval *)malloc(sizeof(lval));
@@ -179,7 +220,15 @@ lval* lval_num(long x) {
   return v;
 }
 
-lval* lval_str(char* s) {
+/* Create a floating point lval */
+lval *lval_floating(double x) {
+  lval* v = (lval *)malloc(sizeof(lval));
+  v->type = LVAL_FLOAT;
+  v->floating = x;
+  return v;
+}
+
+lval* lval_str(const char* s) {
   lval* v = (lval *)malloc(sizeof(lval));
   v->type = LVAL_STR;
   v->str = strdup(s);
@@ -206,9 +255,12 @@ const char* ltype_name(int t) {
   switch(t) {
     case LVAL_FUN: return "Function";
     case LVAL_NUM: return "Number";
+    case LVAL_FLOAT: return "Floating";
     case LVAL_ERR: return "Error";
     case LVAL_SYM: return "Symbol";
     case LVAL_STR: return "String";
+    case LVAL_TOBJ: return "Object";
+    case LVAL_TMETHOD: return "Method";
     case LVAL_SEXPR: return "S-Expression";
     case LVAL_QEXPR: return "Q-Expression";
     default: return "Unknown";
@@ -267,15 +319,22 @@ lval* lval_qexpr(void) {
 void lval_del(lval* v) {
   switch (v->type) {
     /* No deletion for functions*/
-    case LVAL_FUN: 
+    case LVAL_FUN:
       if (!v->builtin) {
         lenv_del(v->env);
         lval_del(v->formals);
         lval_del(v->body);
       }
     break;
+    case LVAL_TOBJ:
+    // FIXME: Reference counting TObjects?
+    break;
+    case LVAL_TMETHOD:
+    // FIXME: reference counting TMethods?
+    break;
     /* Do nothing special for number type */
     case LVAL_NUM: break;
+    case LVAL_FLOAT: break;
 
     /* For Err or Sym free the string data */
     case LVAL_ERR: free(v->err); break;
@@ -301,6 +360,13 @@ lval* lval_read_num(mpc_ast_t* t) {
   long x = strtol(t->contents, NULL, 10);
   return errno != ERANGE ?
     lval_num(x) : lval_err("invalid number", t->contents);
+}
+
+lval* lval_read_floating(mpc_ast_t* t) {
+  errno = 0;
+  double x = strtod(t->contents, NULL);
+  return errno != ERANGE ?
+    lval_floating(x) : lval_err("Invalid number", t->contents);
 }
 
 lval* lval_add(lval* v, lval* x) {
@@ -337,10 +403,33 @@ void lval_print_str(lval* v) {
   free(escaped);
 }
 
+std::string lval_to_cpp_arg(lval* a, int offset) {
+  // Let's iterate on all the arguments and construct the
+  // string which is required to 
+  std::string args = "";
+  bool first = true;
+  for (int i = offset; i < a->count; i++) {
+    if (!first)
+      args += ", ";
+    first = false;
+    lval *v = a->cell[i];
+    switch (v->type) {
+      case LVAL_NUM: args += std::to_string(v->num); break;
+      case LVAL_FLOAT: args += std::to_string(v->floating); break;
+      case LVAL_STR: args += "\"" + std::string(v->str) + "\""; break;
+      default:
+        printf("Cannot use as a C++ argument.");
+        args += "";
+    }
+  }
+  return args;
+}
+
 /* Print an "lval" */
 void lval_print(lval* v) {
   switch (v->type) {
     case LVAL_NUM:   printf("%li", v->num); break;
+    case LVAL_FLOAT:   printf("%f", v->floating); break;
     case LVAL_ERR:   printf("Error: %s", v->err); break;
     case LVAL_FUN:
       if (v->builtin) {
@@ -349,6 +438,14 @@ void lval_print(lval* v) {
         printf("(\\ "); lval_print(v->formals);
         putchar(' '); lval_print(v->body); putchar(')');
       }
+    break;
+    case LVAL_TOBJ:
+      printf("<tobject @%llx>\n", (int64_t)v->obj);
+      if (v->obj)
+        v->obj->Print();
+    break;
+    case LVAL_TMETHOD:
+      printf("<tmethodcall %s(%s)>", v->method->GetMethodName(), v->methodArgs);
     break;
     case LVAL_SYM:   printf("%s", v->sym); break;
     case LVAL_STR:   lval_print_str(v); break;
@@ -374,9 +471,10 @@ lval* lval_read_str(mpc_ast_t* t) {
 }
 
 lval* lval_read(mpc_ast_t* t) {
-  /* If Symbol or Number return conversion to that type */
+  /* If Symbol, Number or method return conversion to that type */
   if (strstr(t->tag, "number")) { return lval_read_num(t); }
-  if (strstr(t->tag, "symbol")) { return lval_sym(t->contents); }
+  if (strstr(t->tag, "floating")) { return lval_read_floating(t); }
+  if (strstr(t->tag, "symbol")) { return lval_sym(t->contents);}
   /* If string read it */
   if (strstr(t->tag, "string")) { return lval_read_str(t); }
 
@@ -441,7 +539,15 @@ lval* lval_copy(lval* v) {
       }
     break;
 
+    // FIXME: should we do reference counting?
+    case LVAL_TOBJ: x->obj = v->obj; break;
+    case LVAL_TMETHOD: 
+      x->method = v->method; 
+      x->methodArgs = strdup(v->methodArgs);
+    break;
+
     case LVAL_NUM: x->num = v->num; break;
+    case LVAL_FLOAT: x->floating = v->floating; break;
     
     /* Copy Strings using malloc and strcpy */
     case LVAL_ERR:
@@ -623,8 +729,7 @@ lval* builtin_head(lenv *e, lval* a) {
 lval* builtin_tail(lenv *e, lval* a) {
   /* Check Error Conditions */
   LASSERT_NUM("tail", a, 1);
-  LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
-    "Function 'tail' passed incorrect type!");
+  LASSERT_TYPE("tail", a, 0, LVAL_QEXPR);
   LASSERT(a, a->cell[0]->count != 0,
     "Function 'tail' passed {}!");
 
@@ -679,15 +784,54 @@ lval* builtin_join(lenv *e, lval* a) {
   return x;
 }
 
+// Built-in method to get a member (either data or method) of a given object.
+// - The first argument must be a string.
+// - The second argument must be an object.
+// - Rest of the arguments should be passed to the method call, if 
+//   we are referring to one.
+lval* builtin_member(lenv *e, lval *a) {
+  // FIXME: check that arguments are > 2.
+  LASSERT(a, a->count >= 2,
+    "Function '.' needs at least 2 argument: <method name> and <object>.");
+  LASSERT_TYPE(".", a, 0, LVAL_STR);
+  LASSERT_TYPE(".", a, 1, LVAL_TOBJ);
+  /* Pop the first element */
+  lval* name = lval_pop(a, 0);
+  lval* obj = lval_pop(a, 0);
+  lval_print(name);
+  lval_print(obj);
+  std::string args = lval_to_cpp_arg(a, 0);
+  std::cout << "Executing " << name->str << "(" << args.c_str() 
+                                     << ") in object " << std::hex << obj->obj
+                                     << " of class " << obj->obj->ClassName() << std::endl;
+  // FIXME: Slow and error prone, but good enough for now
+  int error = 0;
+  obj->obj->Execute(name->str, args.c_str(), &error);
+  return lval_qexpr();
+}
+
+lval* promote_to_floating(lval *a) {
+  lval *f = lval_floating((double)a->num);
+  lval_del(a);
+  return f;
+}
+
+void best_numeric_type(lval *&x, lval *&y) {
+  // If x is a integer and y is a double, promote x to be double.
+  // If x is a double and y is an integer, promote y.
+  // We never demote while doing math.
+  if (x->type == LVAL_NUM && y->type == LVAL_FLOAT)
+    x = promote_to_floating(x);
+  if (x->type == LVAL_FLOAT && y->type == LVAL_NUM)
+    y = promote_to_floating(y);
+}
 
 lval* builtin_op(lenv *e, lval* a, const char* op) {
-  
   /* Ensure all arguments are numbers */
   for (int i = 0; i < a->count; i++) {
-    if (a->cell[i]->type != LVAL_NUM) {
-      lval_del(a);
-      return lval_err("Cannot operate on non-number!");
-    }
+    LASSERT(a, a->cell[i]->type == LVAL_NUM 
+               || a->cell[i]->type == LVAL_FLOAT,
+      "Cannot operate on non-number!");
   }
   
   /* Pop the first element */
@@ -695,7 +839,10 @@ lval* builtin_op(lenv *e, lval* a, const char* op) {
 
   /* If no arguments and sub then perform unary negation */
   if ((strcmp(op, "-") == 0) && a->count == 0) {
-    x->num = -x->num;
+    switch (x->type) {
+      case LVAL_NUM: x->num = -x->num; break;
+      case LVAL_FLOAT: x->floating = -x->floating; break;
+    }
   }
 
   /* While there are still elements remaining */
@@ -704,17 +851,34 @@ lval* builtin_op(lenv *e, lval* a, const char* op) {
     /* Pop the next element */
     lval* y = lval_pop(a, 0);
 
-    if (strcmp(op, "+") == 0) { x->num += y->num; }
-    if (strcmp(op, "-") == 0) { x->num -= y->num; }
-    if (strcmp(op, "*") == 0) { x->num *= y->num; }
-    if (strcmp(op, "/") == 0) {
-      if (y->num == 0) {
-        lval_del(x); lval_del(y);
-        x = lval_err("Division By Zero!"); break;
-      }
-      x->num /= y->num;
-    }
+    best_numeric_type(x, y);
 
+    switch(x->type) {
+      case LVAL_NUM:
+        if (strcmp(op, "+") == 0) { x->num += y->num; }
+        if (strcmp(op, "-") == 0) { x->num -= y->num; }
+        if (strcmp(op, "*") == 0) { x->num *= y->num; }
+        if (strcmp(op, "/") == 0) {
+          if (y->num == 0) {
+            lval_del(x); lval_del(y);
+            x = lval_err("Division By Zero!"); break;
+          }
+          x->num /= y->num;
+        }
+      break;
+      case LVAL_FLOAT:
+        if (strcmp(op, "+") == 0) { x->floating += y->floating; }
+        if (strcmp(op, "-") == 0) { x->floating -= y->floating; }
+        if (strcmp(op, "*") == 0) { x->floating *= y->floating; }
+        if (strcmp(op, "/") == 0) {
+          if (y->floating == 0) {
+            lval_del(x); lval_del(y);
+            x = lval_err("Division By Zero!"); break;
+          }
+          x->floating /= y->floating;
+        }
+      break;
+    }
     lval_del(y);
   }
 
@@ -723,24 +887,51 @@ lval* builtin_op(lenv *e, lval* a, const char* op) {
 
 lval* builtin_ord(lenv* e, lval* a, const char* op) {
   LASSERT_NUM(op, a, 2);
-  LASSERT_TYPE(op, a, 0, LVAL_NUM);
-  LASSERT_TYPE(op, a, 1, LVAL_NUM);
+  for (int i = 0; i < a->count; i++) {
+    LASSERT(a, a->cell[i]->type == LVAL_NUM 
+               || a->cell[i]->type == LVAL_FLOAT,
+      "Cannot operate on non-number!");
+  }
+  
+  best_numeric_type(a->cell[0], a->cell[1]);
   
   int r;
-  if (strcmp(op, ">")  == 0) {
-    r = (a->cell[0]->num >  a->cell[1]->num);
+  // Since we already promoted types, we can
+  // only check one of the arguments.
+  switch(a->cell[0]->type) {
+    case LVAL_NUM:
+      if (strcmp(op, ">")  == 0) {
+        r = (a->cell[0]->num >  a->cell[1]->num);
+      }
+      if (strcmp(op, "<")  == 0) {
+        r = (a->cell[0]->num <  a->cell[1]->num);
+      }
+      if (strcmp(op, ">=") == 0) {
+        r = (a->cell[0]->num >= a->cell[1]->num);
+      }
+      if (strcmp(op, "<=") == 0) {
+        r = (a->cell[0]->num <= a->cell[1]->num);
+      }
+      lval_del(a);
+      return lval_num(r);
+    case LVAL_FLOAT:
+      lval_del(a);
+      if (strcmp(op, ">")  == 0) {
+        r = (a->cell[0]->floating >  a->cell[1]->floating);
+      }
+      if (strcmp(op, "<")  == 0) {
+        r = (a->cell[0]->floating <  a->cell[1]->floating);
+      }
+      if (strcmp(op, ">=") == 0) {
+        r = (a->cell[0]->floating >= a->cell[1]->floating);
+      }
+      if (strcmp(op, "<=") == 0) {
+        r = (a->cell[0]->floating <= a->cell[1]->floating);
+      }
+      return lval_num(r);
+    default:
+      return lval_err("Guru Meditation");
   }
-  if (strcmp(op, "<")  == 0) {
-    r = (a->cell[0]->num <  a->cell[1]->num);
-  }
-  if (strcmp(op, ">=") == 0) {
-    r = (a->cell[0]->num >= a->cell[1]->num);
-  }
-  if (strcmp(op, "<=") == 0) {
-    r = (a->cell[0]->num <= a->cell[1]->num);
-  }
-  lval_del(a);
-  return lval_num(r);
 }
 
 lval* builtin_gt(lenv* e, lval* a) {
@@ -761,6 +952,8 @@ lval* builtin_le(lenv* e, lval* a) {
 
 lval* builtin_cmp(lenv* e, lval* a, const char* op) {
   LASSERT_NUM(op, a, 2);
+
+  best_numeric_type(a->cell[0], a->cell[1]);
   int r;
   if (strcmp(op, "==") == 0) {
     r =  lval_eq(a->cell[0], a->cell[1]);
@@ -869,6 +1062,7 @@ int lval_eq(lval* x, lval* y) {
   switch (x->type) {
     /* Compare Number Value */
     case LVAL_NUM: return (x->num == y->num);
+    case LVAL_FLOAT: return (x->floating == y->floating);
 
     /* Compare String Values */
     case LVAL_ERR: return (strcmp(x->err, y->err) == 0);
@@ -1008,6 +1202,43 @@ lval* builtin_exit(lenv* e, lval* a) {
   return 0;
 }
 
+// Creates a new TObject
+lval *builtin_new(lenv *e, lval* a) {
+  LASSERT(a, a->count >= 1,
+    "Function 'new' needs at least 1 argument: <class name>.");
+  LASSERT_TYPE("new", a, 0, LVAL_STR);
+  // Create an object of the given class
+  const char *className = a->cell[0]->str;
+  TClass *klass = TClass::GetClass(className);
+  TObject *obj = (TObject *) klass->New();
+  std::string args = lval_to_cpp_arg(a, 1);
+  printf("Invoking C++ constructor: %s(%s)\n", className,  args.c_str());
+  int error = 0;
+  TMethod *ctor = klass->GetMethod(className, args.c_str());
+  if (!ctor)
+    lval_err("Unknow constructor for class %s.", className);
+  obj->Execute( className, args.c_str(), &error);
+  //gInterpreter->Execute(obj, ctor->GetClass(), className, args.c_str(), &error);
+  obj->Print();
+  lval_del(a);
+  if (error)
+    return lval_err("Constructor not found for %s",  className);
+  return lval_tobj(obj);
+}
+
+// Invokes a method
+lval *builtin_invoke(lenv *e, lval *a) {
+  LASSERT_NUM("invoke", a, 2);
+  LASSERT_TYPE("invoke", a, 0, LVAL_TMETHOD);
+  LASSERT_TYPE("invoke", a, 1, LVAL_TOBJ);
+  TMethodCall *m = a->cell[0]->method;
+  const char *args = a->cell[0]->methodArgs;
+  printf("Return type is %i\n", m->ReturnType());
+  printf("Executing method with arguments %s(%s)\n", m->GetMethodName(), args);
+  m->Execute(a->cell[1]->obj, args);
+  return lval_qexpr();
+}
+
 void lenv_add_builtins(lenv* e) {  
   /* List Functions */
   lenv_add_builtin(e, "list", builtin_list);
@@ -1040,6 +1271,12 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "error", builtin_error);
   lenv_add_builtin(e, "print", builtin_print);
   lenv_add_builtin(e, "exit", builtin_exit);
+  
+  /*TObject interaction*/
+  lenv_add_builtin(e, "new", builtin_new);
+  lenv_add_builtin(e, "member", builtin_member);
+  lenv_add_builtin(e, ".", builtin_member);
+  lenv_add_builtin(e, "invoke", builtin_invoke);
 }
 
 //----- Interrupt signal handler -----------------------------------------------
@@ -1083,98 +1320,173 @@ Bool_t TTermInputHandler::Notify()
    return gApplication->HandleTermInput();
 }
 
-class ROOTureApp : public TApplication {
-public:
-  ROOTureApp(int *argc, char **argv, lenv *e) 
-  : TApplication("ROOTure", argc, argv),
-    fGlobalContext(e)
-  {
-    // Install interrupt and terminal input handlers
-    TInterruptHandler *ih = new TInterruptHandler();
-    ih->Add();
-    SetSignalHandler(ih);
+ROOTureApp::ROOTureApp(int *argc, char **argv, lenv *e) 
+: TApplication("ROOTure", argc, argv),
+  fGlobalContext(e)
+{
+  // Install interrupt and terminal input handlers
+  TInterruptHandler *ih = new TInterruptHandler();
+  ih->Add();
+  SetSignalHandler(ih);
 
-    // Handle stdin events
-    fInputHandler = new TTermInputHandler(0);
-    fInputHandler->Add();
-  }
-  ~ROOTureApp() {
-    fInputHandler->Remove();
-    delete fInputHandler;
-  }
+  // Handle stdin events
+  fInputHandler = new TTermInputHandler(0);
+  fInputHandler->Add();
 
-  virtual void Run(Bool_t retrn) {
-    fInputHandler->Activate();
-    Getlinem(kInit, "ROOTure> ");
-    TApplication::Run(retrn);
-    Getlinem(kCleanUp, 0);
-  }
+  // Add support for history
+  // Goto into raw terminal input mode
+  char defhist[kMAXPATHLEN];
+  snprintf(defhist, sizeof(defhist), "%s/.rooture_hist", gSystem->HomeDirectory());
+  // In the code we had HistorySize and HistorySave, in the rootrc and doc
+  // we have HistSize and HistSave. Keep the doc as it is and check
+  // now also for HistSize and HistSave in case the user did not use
+  // the History versions
+  int hist_size = 500;
+  int hist_save = 400;
+  Gl_histsize(hist_size, hist_save);
+  Gl_windowchanged();
 
-  virtual Bool_t HandleTermInput()
-  {
-    /* Output our prompt */
-    const char* line = Getlinem(kOneChar, 0);
-    if (!line)
-    {
-      Getlinem(kInit, "ROOTure> ");
-      return kTRUE;
-    }
-    if (line[0] == 0 && Gl_eof())
-      Terminate(0);
-    const char *input = strdup(line);
+}
 
-    // prevent recursive calling of this input handler
-//    fInputHandler->DeActivate();
+ROOTureApp::~ROOTureApp() {
+  fInputHandler->Remove();
+  delete fInputHandler;
+}
 
-    /* Attempt to parse the user input */
-    mpc_result_t r;
-    if (mpc_parse("<stdin>", input, Lispy, &r)) {
-      /* On success print and delete the AST */
-      mpc_ast_print((mpc_ast_t*)r.output);
-      lval* x = lval_eval(fGlobalContext, lval_read((mpc_ast_t *)r.output));
-      lval_println(x);
+void 
+ROOTureApp::Run(Bool_t retrn) {
+  /* Supplied with list of files, let's execute those. */
+  if (this->Argc() >= 2) {
+
+    /* loop over each supplied filename (starting from 1) */
+    for (int i = 1; i < this->Argc(); i++) {
+
+      /* Argument list with a single argument, the filename */
+      lval* args = lval_add(lval_sexpr(), lval_str(this->Argv()[i]));
+
+      /* Pass to builtin load and get the result */
+      lval* x = builtin_load(fGlobalContext, args);
+
+      /* If the result is an error be sure to print it */
+      if (x->type == LVAL_ERR) { lval_println(x); }
       lval_del(x);
-    } else {
-      /* Otherwise print and delete the Error */
-      mpc_err_print(r.error);
-      mpc_err_delete(r.error);
     }
-    free((void *)input);
-    Getlinem(kInit, "ROOTure> ");
+  }
+  TIter next(gROOT->GetListOfCanvases());
+  TVirtualPad* canvas;
+  while ((canvas = (TVirtualPad*)next())) {
+    canvas->Update();
+  }
+
+  fInputHandler->Activate();
+  Getlinem(kInit, "ROOTure> ");
+  TApplication::Run(retrn);
+  Getlinem(kCleanUp, 0);
+}
+
+Bool_t
+ROOTureApp::HandleTermInput()
+{
+  static TStopwatch timer;
+
+  /* Output our prompt */
+  const char* line = Getlinem(kOneChar, 0);
+  if (!line)
+  {
     return kTRUE;
   }
-private:
-  lenv *fGlobalContext;
-  TFileHandler *fInputHandler;
-};
+  if (line[0] == 0 && Gl_eof())
+    Terminate(0);
+  gVirtualX->SetKeyAutoRepeat(kTRUE);
 
-ClassImp(TApplication)
+  const char *input = strdup(line);
+  Gl_histadd(input);
+  TString sline = line;
+  
+  // strip off '\n' and leading and trailing blanks
+  sline = sline.Chop();
+  sline = sline.Strip(TString::kBoth);
+  ReturnPressed((char*)sline.Data());
+
+  // prevent recursive calling of this input handler
+  fInputHandler->DeActivate();
+  if (gROOT->Timer()) timer.Start();
+  TTHREAD_TLS(Bool_t) added;
+  added = kFALSE; // reset on each call.
+
+  /* Attempt to parse the user input */
+  mpc_result_t r;
+  if (mpc_parse("<stdin>", input, Lispy, &r)) {
+    /* On success print and delete the AST */
+    mpc_ast_print((mpc_ast_t*)r.output);
+    lval* x = lval_eval(fGlobalContext, lval_read((mpc_ast_t *)r.output));
+    lval_println(x);
+    lval_del(x);
+  } else {
+    /* Otherwise print and delete the Error */
+    mpc_err_print(r.error);
+    mpc_err_delete(r.error);
+  }
+  free((void *)input);
+  if (!sline.IsNull())
+    LineProcessed(sline);
+  TIter next(gROOT->GetListOfCanvases());
+  TVirtualPad* canvas;
+  while ((canvas = (TVirtualPad*)next())) {
+    canvas->Update();
+  }
+
+  fInputHandler->Activate();
+
+  TInterpreter::Instance()->EndOfLineAction();
+
+  Getlinem(kInit, "ROOTure> ");
+  return kTRUE;
+}
+  
+void 
+ROOTureApp::HandleException(Int_t sig)
+{
+   fCaughtException = kTRUE;
+   if (TROOT::Initialized()) {
+      if (gException) {
+         Getlinem(kCleanUp, 0);
+         Getlinem(kInit, "Root > ");
+      }
+   }
+   TApplication::HandleException(sig);
+}
+
+ClassImp(ROOTureApp)
 
 int main(int argc, char** argv) {
   /* Create Some Parsers */
-  Number  = mpc_new("number");
-  Symbol  = mpc_new("symbol");
-  String  = mpc_new("string");
-  Comment = mpc_new("comment");
-  Qexpr   = mpc_new("qexpr");
-  Sexpr   = mpc_new("sexpr");
-  Expr    = mpc_new("expr");
-  Lispy   = mpc_new("lispy");
+  Floating  = mpc_new("floating");
+  Number    = mpc_new("number");
+  Symbol    = mpc_new("symbol");
+  String    = mpc_new("string");
+  Comment   = mpc_new("comment");
+  Qexpr     = mpc_new("qexpr");
+  Sexpr     = mpc_new("sexpr");
+  Expr      = mpc_new("expr");
+  Lispy     = mpc_new("lispy");
 
   /* Define them with the following Language */
   mpca_lang(MPCA_LANG_DEFAULT,
-    "                                              \
-      number  : /-?[0-9]+/ ;                       \
-      symbol  : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&]+/ ; \
-      string  : /\"(\\\\.|[^\"])*\"/ ;             \
-      comment : /;[^\\r\\n]*/ ;                    \
-      sexpr   : '(' <expr>* ')' ;                  \
-      qexpr   : '{' <expr>* '}' ;                  \
-      expr    : <number>  | <symbol> | <string>    \
-              | <comment> | <sexpr>  | <qexpr>;    \
-      lispy   : /^/ <expr>* /$/ ;                  \
+    "                                                         \
+      floating : /-?[0-9]+[.][0-9]*/                          \
+               | /-?[.][0-9]+/ ;                              \
+      number   : /-?[0-9]+/ ;                                 \
+      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.]+/ ;           \
+      string   : /\"(\\\\.|[^\"])*\"/ ;                       \
+      comment  : /;[^\\r\\n]*/ ;                              \
+      sexpr    : '(' <expr>* ')' ;                            \
+      qexpr    : '{' <expr>* '}' ;                            \
+      expr     : <floating> | <number> | <symbol> | <string>  \
+               | <comment> | <sexpr> | <qexpr>;               \
+      lispy    : /^/ <expr>* /$/ ;                            \
     ",
-  Number, Symbol, String, Comment, Sexpr, Qexpr, Expr, Lispy);
+  Floating, Number, Symbol, String, Comment, Sexpr, Qexpr, Expr, Lispy);
 
   
   /* Print Version and Exit Information */
@@ -1185,23 +1497,6 @@ int main(int argc, char** argv) {
   lenv* e = lenv_new();
   lenv_add_builtins(e);
 
-  /* Supplied with list of files */
-  if (argc >= 2) {
-
-    /* loop over each supplied filename (starting from 1) */
-    for (int i = 1; i < argc; i++) {
-
-      /* Argument list with a single argument, the filename */
-      lval* args = lval_add(lval_sexpr(), lval_str(argv[i]));
-
-      /* Pass to builtin load and get the result */
-      lval* x = builtin_load(e, args);
-
-      /* If the result is an error be sure to print it */
-      if (x->type == LVAL_ERR) { lval_println(x); }
-      lval_del(x);
-    }
-  }
   TApplication *app = new ROOTureApp(&argc, argv, e);
   app->Run();
 
@@ -1233,7 +1528,7 @@ int main(int argc, char** argv) {
 
   /* Undefine and delete our parsers */
   mpc_cleanup(8, 
-    Number, Symbol, String, Comment, 
+    Number, Floating, Symbol, String, Comment, 
     Sexpr,  Qexpr,  Expr,   Lispy);
 
   return 0;

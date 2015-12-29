@@ -1,0 +1,15 @@
+What is this?
+=============
+
+ROOTure |ˈrʌtʃə| is modest attempt at having a LISP-like language where
+[ROOT](https://root.cern.ch) is a first class citizen. This means that the
+language itself not only tries to simplify interoperability with ROOT but
+considers by design the ROOT object model as a fundation of its own APIs.
+
+If you are thinking this is similar to what happens with
+[Clojure](http://clojure.org) and Java, you get exactly the idea.
+
+The initial implementation comes from the very nice tutorial ["Build your own
+LISP"](http://www.buildyourownlisp.com).
+
+This is not meant for production but you can still amuse yourself with it.
