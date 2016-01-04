@@ -13,3 +13,24 @@ The initial implementation comes from the very nice tutorial ["Build your own
 LISP"](http://www.buildyourownlisp.com).
 
 This is not meant for production but you can still amuse yourself with it.
+
+ROOT Interoperability
+=====================
+
+You can create ROOT objects by using the `new` function, e.g.:
+
+    (new TH1F Foo Bar 1000 -1 1)
+
+You can invoke methods of a ROOT object via the `.` function. E.g.:
+
+    (def {h1} (new TH1F Foo Bar 1000 -1 1))
+    (. FillRandom h1 gaus 10000)
+    (. Draw)
+
+In case you want to invoke multiple methods on the same object, you can use the
+`doto` function, similarly to what happens in clojure:
+
+    (doto h1
+        {FillRandom gaus 10000}
+        {Draw}
+    )
