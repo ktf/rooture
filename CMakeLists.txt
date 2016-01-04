@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 2.8)
-link_directories("~/work/active/sw/osx_x86-64/ROOT/latest/lib")
-include_directories("~/work/active/sw/osx_x86-64/ROOT/latest/include")
+
+set(ROOT_LIB_PATH ${ROOT_ROOT}/lib)
+set(ROOT_INCLUDE_PATH ${ROOT_ROOT}/include)
+link_directories(${ROOT_LIB_PATH})
+include_directories(${ROOT_INCLUDE_PATH})
 
 add_custom_command(OUTPUT DictOutput.cxx DictOutput.h
   COMMAND rootcint
