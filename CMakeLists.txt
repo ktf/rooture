@@ -12,7 +12,7 @@ add_custom_command(OUTPUT DictOutput.cxx DictOutput.h
 )
 
 add_executable(rooture rooture.cxx DictOutput.cxx mpc.c)
-target_link_libraries(rooture edit Core Cint)
+target_link_libraries(rooture edit Core Cint MathCore RIO)
  
 set(CMAKE_CXX_FLAGS "-g -O0 -std=c++11")
 # Installation

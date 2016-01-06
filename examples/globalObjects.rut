@@ -1,0 +1,2 @@
+(. Exec gSystem ls)
+(. Print gInterpreter)

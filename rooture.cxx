@@ -16,6 +16,8 @@
 #include "TException.h"
 #include "TInterpreter.h"
 #include "TMethod.h"
+#include "TFile.h"
+#include "TRandom.h"
 #include <iostream>
 
 extern "C"
@@ -1123,6 +1125,13 @@ void lenv_add_builtin(lenv* e, const char* name, lbuiltin func) {
   lval_del(k); lval_del(v);
 }
 
+void lenv_add_global_object(lenv* e, const char* name, TObject *obj) {
+  lval* k = lval_sym(name);
+  lval* v = lval_tobj(obj);
+  lenv_put(e, k, v);
+  lval_del(k); lval_del(v);
+}
+
 lval* builtin_load(lenv* e, lval* a) {
   LASSERT_NUM("load", a, 1);
   LASSERT_TYPE("load", a, 0, LVAL_STR);
@@ -1277,6 +1286,15 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "member", builtin_member);
   lenv_add_builtin(e, ".", builtin_member);
   lenv_add_builtin(e, "invoke", builtin_invoke);
+  
+  /*A few TObjects */
+  lenv_add_global_object(e, "gSystem", gSystem);
+  lenv_add_global_object(e, "gInterpreter", gInterpreter);
+  lenv_add_global_object(e, "gROOT", gROOT);
+  lenv_add_global_object(e, "gFile", gFile);
+  lenv_add_global_object(e, "gPad", gPad);
+  lenv_add_global_object(e, "gDirectory", gDirectory);
+  lenv_add_global_object(e, "gRandom", gRandom);
 }
 
 //----- Interrupt signal handler -----------------------------------------------
