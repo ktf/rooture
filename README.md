@@ -1,3 +1,20 @@
+Instant gratification:
+======================
+
+    (load stdlib.rut)
+    (def {nut} (new TCanvas nut FirstSession 10. 10. 700. (+ 1. 900)))
+
+    (def {a} (new TH1F "foo" "bar" 100 -10. 60.))
+
+    (doto a
+      {SetFillColor 3}
+      {SetFillStyle 3003}
+      {FillRandom gaus 1000}
+      {Draw}
+    )
+
+![docs/gratification.png](docs/gratification.png)
+
 What is this?
 =============
 

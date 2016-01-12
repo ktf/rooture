@@ -405,6 +405,22 @@ void lval_print_str(lval* v) {
   free(escaped);
 }
 
+TObjArray *lval_to_obj_array(lval *a, int offset) {
+  TObjArray *args = new TObjArray();
+  for (int i = offset; i < a->count; i++) {
+    lval *v = a->cell[i];
+    switch (v->type) {
+      case LVAL_NUM: args->Add(new TObjString(strdup(std::to_string(v->num).c_str()))); break;
+      case LVAL_FLOAT: args->Add(new TObjString(strdup(std::to_string(v->floating).c_str()))); break;
+      case LVAL_STR: args->Add(new TObjString(strdup(("\"" + std::string(v->str) + "\"").c_str()))); break;
+      default:
+        printf("Cannot use as a C++ argument.");
+        args->Add(new TObjString(""));
+    }
+  }
+  return args;
+
+}
 std::string lval_to_cpp_arg(lval* a, int offset) {
   // Let's iterate on all the arguments and construct the
   // string which is required to 
@@ -1221,7 +1237,9 @@ lval *builtin_new(lenv *e, lval* a) {
   std::string args = lval_to_cpp_arg(a, 1);
   int error = 0;
 
-  TObject *obj = (TObject *)gInterpreter->Calc((std::string("new ") + className + "(" + args + ");").c_str());
+  std::string ctorLine = std::string("new ") + className + "(" + args + ");";
+  TObject *obj = (TObject *)gInterpreter->Calc(ctorLine.c_str());
+
   obj->IsA()->Print();
   lval_del(a);
   if (error)

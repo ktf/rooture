@@ -3,7 +3,6 @@
 
 (def {a} (new TH1F "foo" "bar" 100 -10. 60.))
 
-; One can use "doto" to pipe various actions on the same object "a"
 (doto a
   {SetFillColor 3}
   {SetFillStyle 3003}
