@@ -54,8 +54,18 @@ so that it is executed as a first thing.
 Syntax and standard library
 ===========================
 
-Language syntax itself is close to any other LISP out there, so everything
-is expressed in reverse Polish notation, with the a
+Language syntax itself is close to any other LISP out there, so everything is
+expressed in reverse Polish notation, with the a few shortcuts to reduce the
+amount of code written. For example unresolved symbols bind automatically to
+their string counterpart so:
+
+    "foo"
+
+and
+
+    foo
+
+are actually the same. More documentation to come..
 
 ROOT Interoperability
 =====================
