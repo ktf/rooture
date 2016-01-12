@@ -1218,17 +1218,11 @@ lval *builtin_new(lenv *e, lval* a) {
   LASSERT_TYPE("new", a, 0, LVAL_STR);
   // Create an object of the given class
   const char *className = a->cell[0]->str;
-  TClass *klass = TClass::GetClass(className);
-  TObject *obj = (TObject *) klass->New();
   std::string args = lval_to_cpp_arg(a, 1);
-  printf("Invoking C++ constructor: %s(%s)\n", className,  args.c_str());
   int error = 0;
-  TMethod *ctor = klass->GetMethod(className, args.c_str());
-  if (!ctor)
-    lval_err("Unknow constructor for class %s.", className);
-  obj->Execute( className, args.c_str(), &error);
-  //gInterpreter->Execute(obj, ctor->GetClass(), className, args.c_str(), &error);
-  obj->Print();
+
+  TObject *obj = (TObject *)gInterpreter->Calc((std::string("new ") + className + "(" + args + ");").c_str());
+  obj->IsA()->Print();
   lval_del(a);
   if (error)
     return lval_err("Constructor not found for %s",  className);

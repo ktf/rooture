@@ -1,11 +1,10 @@
 (load stdlib.rut)
 (def {nut} (new TCanvas nut FirstSession 10. 10. 700. (+ 1. 900)))
 
-(def {a} (new TH1F "foo" "bar" 100 -10. 10.))
-; For some reasons the constructor does not get called correctly and
-; I need to invoke SetBins again.
-(doto a 
-  {SetBins 100 -10 1}
+(def {a} (new TH1F "foo" "bar" 100 -10. 60.))
+
+; One can use "doto" to pipe various actions on the same object "a"
+(doto a
   {SetFillColor 3}
   {SetFillStyle 3003}
   {FillRandom gaus 1000}
