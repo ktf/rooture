@@ -18,7 +18,7 @@ Instant gratification:
 What is this?
 =============
 
-ROOTure |ˈrʌtʃə| is modest attempt at having a LISP-like language where
+ROOTure |ˈrʌtʃə| is my modest attempt at having a LISP-like language where
 [ROOT](https://root.cern.ch) is a first class citizen. This means that
 the language itself not only tries to simplify interoperability with
 ROOT but considers by design the ROOT object model as a fundation of its
