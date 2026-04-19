@@ -22,6 +22,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <map>
+#include <atomic>
 #include <climits>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -48,6 +50,7 @@ lval* lval_copy(lval* v);
 lval* lval_err(const char* fmt, ...);
 lval* lval_eval(lenv* e, lval* v);
 lval* lval_eval_sexpr(lenv* e, lval* v);
+lval* lval_call(lenv* e, lval* f, lval* a);
 lval* lval_str(const char *s);
 lval* lenv_get(lenv *e, lval* v);
 void lenv_put(lenv *e, lval* k, lval* v);
@@ -434,23 +437,99 @@ TObjArray *lval_to_obj_array(lval *a, int offset) {
   return args;
 
 }
-std::string lval_to_cpp_arg(lval* a, int offset) {
-  // Let's iterate on all the arguments and construct the
-  // string which is required to 
-  std::string args = "";
+static std::string ptr_to_hex(void* p) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%p", p);
+  return buf;
+}
+
+std::string lval_to_cpp_arg(lenv* e, lval* a, int offset);  // forward decl
+
+// ---- Callable bridge -------------------------------------------------------
+
+struct RutureClosure { lenv* env; lval* fn; };
+static std::map<std::string, RutureClosure> g_callable_registry;
+static std::atomic<int> g_callable_counter{0};
+
+extern "C" double rooture_invoke_callable_c(const char* key,
+                                             const double* args, int n) {
+  auto it = g_callable_registry.find(key);
+  if (it == g_callable_registry.end()) return 0.0;
+  RutureClosure& c = it->second;
+  lval* fn   = lval_copy(c.fn);
+  lval* argv = lval_sexpr();
+  for (int i = 0; i < n; i++)
+    lval_add(argv, lval_floating(args[i]));
+  lval* result = lval_call(c.env, fn, argv);
+  lval_del(fn);
+  double ret = 0.0;
+  if (result->type == LVAL_FLOAT)     ret = result->floating;
+  else if (result->type == LVAL_NUM)  ret = (double)result->num;
+  else if (result->type == LVAL_TOBJ && !result->cls && result->obj)
+    ret = *(double*)result->obj;  // heap-allocated primitive from cling_new_auto_typed
+  lval_del(result);
+  return ret;
+}
+
+static std::string register_rooture_callable(lenv* e, lval* fn) {
+  std::string key = "__rut_fn_" + std::to_string(g_callable_counter++);
+  g_callable_registry[key] = { e, lval_copy(fn) };
+  return key;
+}
+
+static void emit_jit_wrapper(const std::string& key, lval* fn) {
+  int nargs = 0;
+  if (fn->formals)
+    for (int i = 0; i < fn->formals->count; i++)
+      if (strcmp(fn->formals->cell[i]->sym, "&") != 0) nargs++;
+
+  std::string decl = "double " + key + "_wrapper(";
+  std::string arr;
+  for (int i = 0; i < nargs; i++) {
+    if (i) { decl += ", "; arr += ", "; }
+    decl += "double _a" + std::to_string(i);
+    arr  += "_a" + std::to_string(i);
+  }
+  decl += ") { ";
+  if (nargs > 0)
+    decl += "double _args[] = {" + arr + "}; "
+            "return __rooture_invoke_ptr(\"" + key + "\", _args, "
+            + std::to_string(nargs) + "); }";
+  else
+    decl += "return __rooture_invoke_ptr(\"" + key + "\", nullptr, 0); }";
+  gInterpreter->Declare(decl.c_str());
+}
+
+// ---------------------------------------------------------------------------
+
+std::string lval_to_cpp_arg(lenv* e, lval* a, int offset) {
+  std::string args;
   bool first = true;
   for (int i = offset; i < a->count; i++) {
-    if (!first)
-      args += ", ";
+    if (!first) args += ", ";
     first = false;
     lval *v = a->cell[i];
     switch (v->type) {
-      case LVAL_NUM: args += std::to_string(v->num); break;
+      case LVAL_NUM:   args += std::to_string(v->num); break;
       case LVAL_FLOAT: args += std::to_string(v->floating); break;
-      case LVAL_STR: args += "\"" + std::string(v->str) + "\""; break;
+      case LVAL_STR:   args += "\"" + std::string(v->str) + "\""; break;
+      case LVAL_TOBJ:
+        if (v->cls)
+          args += "((" + std::string(v->cls->GetName()) + "*)" + ptr_to_hex(v->obj) + ")";
+        else
+          args += ptr_to_hex(v->obj);
+        break;
+      case LVAL_FUN:
+        if (v->builtin == nullptr) {
+          std::string key = register_rooture_callable(e, v);
+          emit_jit_wrapper(key, v);
+          args += key + "_wrapper";
+        } else {
+          printf("Cannot pass builtin as C++ callable.\n");
+        }
+        break;
       default:
-        printf("Cannot use as a C++ argument.");
-        args += "";
+        printf("Cannot use lval type %d as a C++ argument.\n", v->type);
     }
   }
   return args;
@@ -823,24 +902,141 @@ lval* builtin_join(lenv *e, lval* a) {
 // - Rest of the arguments should be passed to the method call, if 
 //   we are referring to one.
 lval* builtin_member(lenv *e, lval *a) {
-  // FIXME: check that arguments are > 2.
   LASSERT(a, a->count >= 2,
     "Function '.' needs at least 2 argument: <method name> and <object>.");
   LASSERT_TYPE(".", a, 0, LVAL_STR);
   LASSERT_TYPE(".", a, 1, LVAL_TOBJ);
   lval* name = lval_pop(a, 0);
   lval* obj  = lval_pop(a, 0);
-  std::string args = lval_to_cpp_arg(a, 0);
+
+  bool has_callable = false;
+  for (int i = 0; i < a->count; i++)
+    if (a->cell[i]->type == LVAL_FUN && a->cell[i]->builtin == nullptr)
+      has_callable = true;
+
+  std::string method_name = name->str;
+  std::string class_name  = obj->cls ? obj->cls->GetName() : "void";
+  void*       obj_ptr     = obj->obj;
+  TClass*     obj_cls     = obj->cls;
+  std::string args = lval_to_cpp_arg(e, a, 0);
+  lval_del(name); lval_del(obj); lval_del(a);
+
   if (g_debug)
-    std::cout << "Executing " << name->str << "(" << args
-              << ") on " << (obj->cls ? obj->cls->GetName() : "?")
-              << " @" << obj->obj << std::endl;
-  TMethodCall mc(obj->cls, name->str, args.c_str());
-  if (!mc.IsValid())
-    return lval_err("No method '%s' on class '%s'",
-                    name->str, obj->cls ? obj->cls->GetName() : "?");
-  mc.Execute(obj->obj);
-  return lval_qexpr();
+    std::cout << "Executing " << method_name << "(" << args
+              << ") on " << class_name << " @" << obj_ptr << std::endl;
+
+  // Helper: evaluate base_expr, use typeid to get TClass (works for template
+  // instantiations), then heap-copy the result.
+  // on_void() is called (and lval_qexpr returned) if the return type is void.
+  auto cling_new_auto_typed = [&](const std::string& base_expr,
+                                   std::function<void()> on_void) -> lval* {
+    static std::atomic<int> rut_tmp_n{0};
+    std::string n_str = std::to_string(rut_tmp_n++);
+    std::string alias = "__rut_t" + n_str;
+    std::string var   = "__rut_r" + n_str;
+
+    // Use decltype to check the return type — valid even when it is void.
+    std::string type_decl = "using " + alias + " = decltype(" + base_expr + ");";
+    if (g_debug) std::cout << "Cling type-check: " << type_decl << std::endl;
+    gInterpreter->ProcessLine(type_decl.c_str());
+    bool is_void = (bool)(Long_t)gInterpreter->Calc(
+        ("(Long_t)std::is_void<" + alias + ">::value").c_str());
+    if (is_void) {
+      on_void();
+      return lval_qexpr();
+    }
+
+    std::string decl = "auto " + var + " = " + base_expr + ";";
+    if (g_debug) std::cout << "Cling decl: " << decl << std::endl;
+    gInterpreter->ProcessLine(decl.c_str());
+    TClass* ret_cls = (TClass*)gInterpreter->Calc(
+        ("(Long_t)TClass::GetClass(typeid(" + var + "))").c_str());
+    void* result = (void*)gInterpreter->Calc(
+        ("(Long_t)(new auto(" + var + "))").c_str());
+    if (!result)
+      return lval_err("Method '%s' returned null", method_name.c_str());
+    return lval_tobj(result, ret_cls);
+  };
+
+  if (has_callable) {
+    // TMethodCall can't handle callable args — build a full Cling expression.
+    std::string base = "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
+                     + method_name + "(" + args + ")";
+    if (g_debug) std::cout << "Cling base: " << base << std::endl;
+    return cling_new_auto_typed(base,
+      [&]{ gInterpreter->ProcessLine((base + ";").c_str()); });
+  }
+
+  TMethodCall mc(obj_cls, method_name.c_str(), args.c_str());
+  if (!mc.IsValid()) {
+    // Method not found directly — try smart-pointer dereference via operator->().
+    // First try TMethodCall (works for non-template classes).
+    TMethodCall mc_arrow(obj_cls, "operator->", "");
+    if (mc_arrow.IsValid() && mc_arrow.ReturnType() == TMethodCall::kLong) {
+      Long_t inner_ptr = 0;
+      mc_arrow.Execute(obj_ptr, inner_ptr);
+      TMethod* arrow_m = obj_cls->GetMethodAny("operator->");
+      std::string inner_type = arrow_m ? arrow_m->GetReturnTypeName() : "";
+      while (!inner_type.empty() && (inner_type.back() == '*' || inner_type.back() == ' '))
+        inner_type.pop_back();
+      TClass* inner_cls = TClass::GetClass(inner_type.c_str());
+      if (inner_cls && inner_ptr) {
+        obj_ptr    = (void*)inner_ptr;
+        obj_cls    = inner_cls;
+        class_name = inner_cls->GetName();
+        mc         = TMethodCall(inner_cls, method_name.c_str(), args.c_str());
+      }
+    }
+    if (!mc.IsValid()) {
+      // TMethodCall can't resolve operator-> on template classes — use Cling.
+      std::string deref_base = "(*(" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
+                             + method_name + "(" + args + ")";
+      if (g_debug) std::cout << "Cling deref: " << deref_base << std::endl;
+      return cling_new_auto_typed(deref_base,
+        [&]{ gInterpreter->ProcessLine((deref_base + ";").c_str()); });
+    }
+  }
+
+  switch (mc.ReturnType()) {
+    case TMethodCall::kLong: {
+      // Could be an integral or a raw pointer
+      Long_t ret = 0;
+      mc.Execute(obj_ptr, ret);
+      TMethod* m = obj_cls ? obj_cls->GetMethodAny(method_name.c_str()) : nullptr;
+      std::string retname = m ? m->GetReturnTypeName() : "";
+      if (!retname.empty() && retname.back() == '*') {
+        // Raw pointer return — strip '*' and look up class
+        std::string bare = retname.substr(0, retname.size() - 1);
+        // trim trailing space
+        while (!bare.empty() && bare.back() == ' ') bare.pop_back();
+        return lval_tobj((void*)ret, TClass::GetClass(bare.c_str()));
+      }
+      return lval_num((long)ret);
+    }
+    case TMethodCall::kDouble: {
+      Double_t ret = 0;
+      mc.Execute(obj_ptr, ret);
+      return lval_floating(ret);
+    }
+    case TMethodCall::kOther: {
+      // kOther can fire for void returns in some ROOT versions — check first.
+      TMethod* m = obj_cls ? obj_cls->GetMethodAny(method_name.c_str()) : nullptr;
+      std::string retname = m ? m->GetReturnTypeName() : "";
+      if (retname == "void") {
+        mc.Execute(obj_ptr);
+        return lval_qexpr();
+      }
+      // Non-void value-type return — use typeid path for correct TClass
+      // even for template methods where GetMethodAny may not resolve.
+      std::string base = "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
+                       + method_name + "(" + args + ")";
+      return cling_new_auto_typed(base,
+        [&]{ mc.Execute(obj_ptr); });
+    }
+    default:  // kNone (void) or kString
+      mc.Execute(obj_ptr);
+      return lval_qexpr();
+  }
 }
 
 lval* promote_to_floating(lval *a) {
@@ -1301,7 +1497,7 @@ lval *builtin_new(lenv *e, lval* a) {
   TClass *cls = TClass::GetClass(className);
   if (!cls)
     return lval_err("Unknown class '%s'", className);
-  std::string args = lval_to_cpp_arg(a, 1);
+  std::string args = lval_to_cpp_arg(e, a, 1);
   std::string ctorLine = std::string("new ") + className + "(" + args + ");";
   void *obj = (void *)gInterpreter->Calc(ctorLine.c_str());
   lval_del(a);
@@ -1372,6 +1568,15 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_global_object(e, "gPad",         gPad,         TClass::GetClass("TVirtualPad"));
   lenv_add_global_object(e, "gDirectory",   gDirectory,   TClass::GetClass("TDirectory"));
   lenv_add_global_object(e, "gRandom",      gRandom,      TClass::GetClass("TRandom"));
+
+  // Register the callable bridge by address so Cling's JIT can call it
+  // without relying on symbol export (-rdynamic/-export_dynamic).
+  gInterpreter->Declare(
+    "typedef double (*__rooture_invoke_t)(const char*, const double*, int);\n"
+    "__rooture_invoke_t __rooture_invoke_ptr;");
+  gInterpreter->ProcessLine(
+    ("__rooture_invoke_ptr = (__rooture_invoke_t)" +
+     ptr_to_hex((void*)rooture_invoke_callable_c) + ";").c_str());
 }
 
 //----- Interrupt signal handler -----------------------------------------------
@@ -1601,7 +1806,7 @@ int main(int argc, char** argv) {
       floating : /-?[0-9]+[.][0-9]*/                          \
                | /-?[.][0-9]+/ ;                              \
       number   : /-?[0-9]+/ ;                                 \
-      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.]+/ ;           \
+      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:]+/ ;           \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \
       comment  : /;[^\\r\\n]*/ ;                              \
       sexpr    : '(' <expr>* ')' ;                            \

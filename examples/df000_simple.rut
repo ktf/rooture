@@ -1,0 +1,10 @@
+;;; df000_simple.rut
+;;;
+;;; ROOTure translation of the ROOT tutorial df000_simple.
+
+(load "stdlib.rut")
+
+(-> (new ROOT::RDataFrame 1000)
+    {. Define "x" (\ {} { (. Rndm gRandom) })}
+    {. Histo1D "x"}
+    {. DrawClone})

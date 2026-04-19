@@ -239,6 +239,26 @@
     { otherwise (+ (fib (- n 1)) (fib (- n 2))) }
 })
 
+;;; Threading
+
+; Thread-first: pipe a value through a sequence of method calls.
+; Each step is a qexpr {. "Method" extra-args...}; the accumulated
+; value is inserted as the object (second argument to .).
+; e.g. (-> rdf {. "Define" "x" f} {. "Histo1D" "x"})
+;   => (. "Histo1D" (. "Define" rdf "x" f) "x")
+(fun {-> val & steps} {
+  if (== steps nil)
+    {val}
+    {unpack ->
+      (join
+        (list (eval (join
+          (head (fst steps))
+          (head (tail (fst steps)))
+          (list val)
+          (tail (tail (fst steps))))))
+        (tail steps))}
+})
+
 ;;; OO interactions
 
 ; Apply a set of methods all to the same object. E.g.
