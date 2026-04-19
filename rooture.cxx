@@ -38,6 +38,8 @@ extern "C"
 enum { LVAL_ERR, LVAL_NUM,  LVAL_FLOAT, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR };
 
+static bool g_debug = false;
+
 struct lval;
 struct lenv;
 void lval_del(lval* v);
@@ -66,8 +68,9 @@ struct lval {
   char* err;
   char* sym;
   char* str;
-  /* TObject related */
-  TObject *obj;
+  /* Generic C++ object */
+  void    *obj;
+  TClass  *cls;
   TMethodCall *method;
   char *methodArgs;
 
@@ -206,11 +209,12 @@ lval* lval_fun(lbuiltin func) {
   return v;
 }
 
-/* Create a new TObject lval */
-lval* lval_tobj(TObject *obj) {
+/* Create a new generic C++ object lval */
+lval* lval_tobj(void *obj, TClass *cls) {
   lval* v = (lval*)malloc(sizeof(lval));
   v->type = LVAL_TOBJ;
-  v->obj = obj;
+  v->obj  = obj;
+  v->cls  = cls;
   return v;
 }
 
@@ -467,9 +471,11 @@ void lval_print(lval* v) {
       }
     break;
     case LVAL_TOBJ:
-      printf("<tobject @%llx>\n", (int64_t)v->obj);
-      if (v->obj)
-        v->obj->Print();
+      printf("<%s @%p>\n", v->cls ? v->cls->GetName() : "object", v->obj);
+      if (v->obj && v->cls) {
+        TMethodCall mc(v->cls, "Print", "");
+        if (mc.IsValid()) mc.Execute(v->obj);
+      }
     break;
     case LVAL_TMETHOD:
       printf("<tmethodcall %s(%s)>", v->method->GetMethodName(), v->methodArgs);
@@ -567,7 +573,7 @@ lval* lval_copy(lval* v) {
     break;
 
     // FIXME: should we do reference counting?
-    case LVAL_TOBJ: x->obj = v->obj; break;
+    case LVAL_TOBJ: x->obj = v->obj; x->cls = v->cls; break;
     case LVAL_TMETHOD: 
       x->method = v->method; 
       x->methodArgs = strdup(v->methodArgs);
@@ -822,18 +828,18 @@ lval* builtin_member(lenv *e, lval *a) {
     "Function '.' needs at least 2 argument: <method name> and <object>.");
   LASSERT_TYPE(".", a, 0, LVAL_STR);
   LASSERT_TYPE(".", a, 1, LVAL_TOBJ);
-  /* Pop the first element */
   lval* name = lval_pop(a, 0);
-  lval* obj = lval_pop(a, 0);
-  lval_print(name);
-  lval_print(obj);
+  lval* obj  = lval_pop(a, 0);
   std::string args = lval_to_cpp_arg(a, 0);
-  std::cout << "Executing " << name->str << "(" << args.c_str() 
-                                     << ") in object " << std::hex << obj->obj
-                                     << " of class " << obj->obj->ClassName() << std::endl;
-  // FIXME: Slow and error prone, but good enough for now
-  int error = 0;
-  obj->obj->Execute(name->str, args.c_str(), &error);
+  if (g_debug)
+    std::cout << "Executing " << name->str << "(" << args
+              << ") on " << (obj->cls ? obj->cls->GetName() : "?")
+              << " @" << obj->obj << std::endl;
+  TMethodCall mc(obj->cls, name->str, args.c_str());
+  if (!mc.IsValid())
+    return lval_err("No method '%s' on class '%s'",
+                    name->str, obj->cls ? obj->cls->GetName() : "?");
+  mc.Execute(obj->obj);
   return lval_qexpr();
 }
 
@@ -1150,15 +1156,14 @@ void lenv_add_builtin(lenv* e, const char* name, lbuiltin func) {
   lval_del(k); lval_del(v);
 }
 
-void lenv_add_global_object(lenv* e, const char* name, TObject *obj) {
+void lenv_add_global_object(lenv* e, const char* name, void *obj, TClass *cls) {
   lval* k = lval_sym(name);
-  lval* v = lval_tobj(obj);
+  lval* v = lval_tobj(obj, cls);
   lenv_put(e, k, v);
   lval_del(k); lval_del(v);
 }
 
 static std::vector<std::string> load_path;
-static bool g_debug = false;
 
 static std::string executable_dir() {
 #ifdef __APPLE__
@@ -1287,24 +1292,22 @@ lval* builtin_exit(lenv* e, lval* a) {
   return 0;
 }
 
-// Creates a new TObject
+// Creates a new C++ object
 lval *builtin_new(lenv *e, lval* a) {
   LASSERT(a, a->count >= 1,
     "Function 'new' needs at least 1 argument: <class name>.");
   LASSERT_TYPE("new", a, 0, LVAL_STR);
-  // Create an object of the given class
   const char *className = a->cell[0]->str;
+  TClass *cls = TClass::GetClass(className);
+  if (!cls)
+    return lval_err("Unknown class '%s'", className);
   std::string args = lval_to_cpp_arg(a, 1);
-  int error = 0;
-
   std::string ctorLine = std::string("new ") + className + "(" + args + ");";
-  TObject *obj = (TObject *)gInterpreter->Calc(ctorLine.c_str());
-
-  obj->IsA()->Print();
+  void *obj = (void *)gInterpreter->Calc(ctorLine.c_str());
   lval_del(a);
-  if (error)
-    return lval_err("Constructor not found for %s",  className);
-  return lval_tobj(obj);
+  if (!obj)
+    return lval_err("Constructor failed for '%s'", className);
+  return lval_tobj(obj, cls);
 }
 
 // Invokes a method
@@ -1314,8 +1317,10 @@ lval *builtin_invoke(lenv *e, lval *a) {
   LASSERT_TYPE("invoke", a, 1, LVAL_TOBJ);
   TMethodCall *m = a->cell[0]->method;
   const char *args = a->cell[0]->methodArgs;
-  printf("Return type is %i\n", m->ReturnType());
-  printf("Executing method with arguments %s(%s)\n", m->GetMethodName(), args);
+  if (g_debug) {
+    printf("Return type is %i\n", m->ReturnType());
+    printf("Executing method %s(%s)\n", m->GetMethodName(), args);
+  }
   m->Execute(a->cell[1]->obj, args);
   return lval_qexpr();
 }
@@ -1360,13 +1365,13 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "invoke", builtin_invoke);
   
   /*A few TObjects */
-  lenv_add_global_object(e, "gSystem", gSystem);
-  lenv_add_global_object(e, "gInterpreter", gInterpreter);
-  lenv_add_global_object(e, "gROOT", gROOT);
-  lenv_add_global_object(e, "gFile", gFile);
-  lenv_add_global_object(e, "gPad", gPad);
-  lenv_add_global_object(e, "gDirectory", gDirectory);
-  lenv_add_global_object(e, "gRandom", gRandom);
+  lenv_add_global_object(e, "gSystem",      gSystem,      TClass::GetClass("TSystem"));
+  lenv_add_global_object(e, "gInterpreter", gInterpreter, TClass::GetClass("TInterpreter"));
+  lenv_add_global_object(e, "gROOT",        gROOT,        TClass::GetClass("TROOT"));
+  lenv_add_global_object(e, "gFile",        gFile,        TClass::GetClass("TFile"));
+  lenv_add_global_object(e, "gPad",         gPad,         TClass::GetClass("TVirtualPad"));
+  lenv_add_global_object(e, "gDirectory",   gDirectory,   TClass::GetClass("TDirectory"));
+  lenv_add_global_object(e, "gRandom",      gRandom,      TClass::GetClass("TRandom"));
 }
 
 //----- Interrupt signal handler -----------------------------------------------
