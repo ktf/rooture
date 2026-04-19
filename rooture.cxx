@@ -1488,7 +1488,6 @@ ROOTureApp::HandleTermInput()
   gVirtualX->SetKeyAutoRepeat(kTRUE);
 
   const char *input = strdup(line);
-  Gl_histadd(input);
   TString sline = line;
 
   // strip off '\n' and leading and trailing blanks
@@ -1515,6 +1514,19 @@ ROOTureApp::HandleTermInput()
 
   std::string expr = accumulated;
   accumulated.clear();
+
+  // Store the complete expression as a single history entry,
+  // encoding newlines so Getline can treat it as one line.
+  // On recall the user sees \n literally — good enough for Getline-based editing.
+  {
+    std::string hist = expr;
+    size_t pos = 0;
+    while ((pos = hist.find('\n', pos)) != std::string::npos) {
+      hist.replace(pos, 1, "\\n");
+      pos += 2;
+    }
+    Gl_histadd(hist.c_str());
+  }
 
   /* Attempt to parse the accumulated input */
   mpc_result_t r;
