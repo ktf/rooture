@@ -1725,16 +1725,11 @@ ROOTureApp::HandleTermInput()
   std::string expr = accumulated;
   accumulated.clear();
 
-  // Store the complete expression as a single history entry,
-  // encoding newlines so Getline can treat it as one line.
-  // On recall the user sees \n literally — good enough for Getline-based editing.
+  // Store the complete expression as a single history entry.
+  // Replace newlines with spaces — the parser is whitespace-insensitive.
   {
     std::string hist = expr;
-    size_t pos = 0;
-    while ((pos = hist.find('\n', pos)) != std::string::npos) {
-      hist.replace(pos, 1, "\\n");
-      pos += 2;
-    }
+    std::replace(hist.begin(), hist.end(), '\n', ' ');
     Gl_histadd(hist.c_str());
   }
 
