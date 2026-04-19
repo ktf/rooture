@@ -17,7 +17,6 @@ public:
   TFileHandler       *GetInputHandler() { return fInputHandler; }
   void        Interrupt() { fInterrupt = kTRUE; }
   
-  ClassDef(ROOTureApp, 0);
 private:
   ROOTureApp(const ROOTureApp&);               // not implemented
   ROOTureApp& operator=(const ROOTureApp&);    // not implemented

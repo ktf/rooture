@@ -18,7 +18,16 @@
 #include "TMethod.h"
 #include "TFile.h"
 #include "TRandom.h"
+#include "TObjString.h"
 #include <iostream>
+#include <string>
+#include <vector>
+#include <climits>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#else
+#include <unistd.h>
+#endif
 
 extern "C"
 {
@@ -1148,13 +1157,64 @@ void lenv_add_global_object(lenv* e, const char* name, TObject *obj) {
   lval_del(k); lval_del(v);
 }
 
+static std::vector<std::string> load_path;
+static bool g_debug = false;
+
+static std::string executable_dir() {
+#ifdef __APPLE__
+  char buf[PATH_MAX];
+  uint32_t size = sizeof(buf);
+  if (_NSGetExecutablePath(buf, &size) == 0)
+    return gSystem->DirName(buf);
+#else
+  char buf[PATH_MAX];
+  ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n > 0) { buf[n] = '\0'; return gSystem->DirName(buf); }
+#endif
+  return ".";
+}
+
+/* Count net open parens/braces, ignoring strings and ; comments */
+static int paren_depth(const std::string& s) {
+  int depth = 0;
+  bool in_string = false;
+  bool in_comment = false;
+  for (size_t i = 0; i < s.size(); i++) {
+    char c = s[i];
+    if (in_comment) {
+      if (c == '\n') in_comment = false;
+    } else if (in_string) {
+      if (c == '\\') i++;           // skip escaped char
+      else if (c == '"') in_string = false;
+    } else {
+      if      (c == '"')            in_string = true;
+      else if (c == ';')            in_comment = true;
+      else if (c == '(' || c == '{') depth++;
+      else if (c == ')' || c == '}') depth--;
+    }
+  }
+  return depth;
+}
+
 lval* builtin_load(lenv* e, lval* a) {
   LASSERT_NUM("load", a, 1);
   LASSERT_TYPE("load", a, 0, LVAL_STR);
   
+  /* Resolve filename against load_path if not directly accessible */
+  std::string filename = a->cell[0]->str;
+  if (gSystem->AccessPathName(filename.c_str())) {
+    for (const auto& dir : load_path) {
+      std::string candidate = dir + "/" + filename;
+      if (!gSystem->AccessPathName(candidate.c_str())) {
+        filename = candidate;
+        break;
+      }
+    }
+  }
+
   /* Parse File given by string name */
   mpc_result_t r;
-  if (mpc_parse_contents(a->cell[0]->str, Lispy, &r)) {
+  if (mpc_parse_contents(filename.c_str(), Lispy, &r)) {
     
     /* Read contents */
     lval* expr = lval_read((mpc_ast_t *)r.output);
@@ -1418,13 +1478,11 @@ Bool_t
 ROOTureApp::HandleTermInput()
 {
   static TStopwatch timer;
+  static std::string accumulated;
 
-  /* Output our prompt */
   const char* line = Getlinem(kOneChar, 0);
   if (!line)
-  {
     return kTRUE;
-  }
   if (line[0] == 0 && Gl_eof())
     Terminate(0);
   gVirtualX->SetKeyAutoRepeat(kTRUE);
@@ -1432,23 +1490,37 @@ ROOTureApp::HandleTermInput()
   const char *input = strdup(line);
   Gl_histadd(input);
   TString sline = line;
-  
+
   // strip off '\n' and leading and trailing blanks
   sline = sline.Chop();
   sline = sline.Strip(TString::kBoth);
   ReturnPressed((char*)sline.Data());
 
+  // Append this line to the accumulation buffer
+  if (!accumulated.empty()) accumulated += '\n';
+  accumulated += sline.Data();
+
+  // Wait for more input if parens/braces are unbalanced
+  if (paren_depth(accumulated) > 0) {
+    free((void*)input);
+    Getlinem(kInit, "...   ");
+    return kTRUE;
+  }
+
   // prevent recursive calling of this input handler
   fInputHandler->DeActivate();
   if (gROOT->Timer()) timer.Start();
-  TTHREAD_TLS(Bool_t) added;
+  thread_local Bool_t added;
   added = kFALSE; // reset on each call.
 
-  /* Attempt to parse the user input */
+  std::string expr = accumulated;
+  accumulated.clear();
+
+  /* Attempt to parse the accumulated input */
   mpc_result_t r;
-  if (mpc_parse("<stdin>", input, Lispy, &r)) {
+  if (mpc_parse("<stdin>", expr.c_str(), Lispy, &r)) {
     /* On success print and delete the AST */
-    mpc_ast_print((mpc_ast_t*)r.output);
+    if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
     lval* x = lval_eval(fGlobalContext, lval_read((mpc_ast_t *)r.output));
     lval_println(x);
     lval_del(x);
@@ -1490,6 +1562,11 @@ ROOTureApp::HandleException(Int_t sig)
 ClassImp(ROOTureApp)
 
 int main(int argc, char** argv) {
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--debug") == 0)
+      g_debug = true;
+  }
+
   /* Create Some Parsers */
   Floating  = mpc_new("floating");
   Number    = mpc_new("number");
@@ -1523,6 +1600,10 @@ int main(int argc, char** argv) {
   puts("ROOTure 0.1.0");
   puts("Press Ctrl+c to Exit\n");
 
+  /* Build the file search path */
+  std::string exe_dir = executable_dir();
+  load_path.push_back(exe_dir + "/../share/rooture");
+
   /* The environment*/
   lenv* e = lenv_new();
   lenv_add_builtins(e);
@@ -1543,7 +1624,7 @@ int main(int argc, char** argv) {
     mpc_result_t r;
     if (mpc_parse("<stdin>", input, Lispy, &r)) {
       /* On success print and delete the AST */
-      mpc_ast_print((mpc_ast_t*)r.output);
+      if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
       lval* x = lval_eval(e, lval_read((mpc_ast_t *)r.output));
       lval_println(x);
       lval_del(x);
