@@ -19,12 +19,14 @@
 #include "TFile.h"
 #include "TRandom.h"
 #include "TObjString.h"
+#include "TCollection.h"
 #include <iostream>
 #include <string>
 #include <vector>
 #include <map>
 #include <atomic>
 #include <climits>
+#include <algorithm>
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -63,6 +65,7 @@ void lval_del(lval* v);
 int lval_eq(lval* x, lval* y);
 lval* lval_copy(lval* v);
 lval* lval_err(const char* fmt, ...);
+lval* lval_tobj(void* obj, TClass* cls);
 lval* lval_eval(lenv* e, lval* v);
 lval* lval_eval_sexpr(lenv* e, lval* v);
 lval* lval_call(lenv* e, lval* f, lval* a);
@@ -208,6 +211,16 @@ void lenv_def(lenv* e, lval* k, lval* v) {
 
 lval* lval_eval(lenv* e, lval* v) {
   if (v->type == LVAL_SYM) {
+    /* @name — look up a TNamed ROOT object by name */
+    if (v->sym[0] == '@') {
+      const char* name = v->sym + 1;
+      TObject* obj = gROOT->FindObject(name);
+      if (!obj && gDirectory) obj = (TObject*)gDirectory->Get(name);
+      lval_del(v);
+      if (!obj) return lval_err("No ROOT object named '%s'", name);
+      TClass* cls = obj->IsA();
+      return lval_tobj((void*)obj, cls);
+    }
     lval* x = lenv_get(e, v);
     lval_del(v);
     return x;
@@ -1660,7 +1673,9 @@ static void highlight_rooture(std::string const& input,
       std::string_view text(input.data() + start, end - start);
       const char* type = ts_node_type(node);
 
-      if (strcmp(type, "number") == 0 || strcmp(type, "float") == 0) {
+      if (strcmp(type, "named_ref") == 0) {
+        color_range(start, end, Color::MAGENTA);
+      } else if (strcmp(type, "number") == 0 || strcmp(type, "float") == 0) {
         color_range(start, end, Color::CYAN);
       } else if (strcmp(type, "string") == 0) {
         color_range(start, end, Color::YELLOW);
@@ -1692,6 +1707,52 @@ static void highlight_rooture(std::string const& input,
   ts_tree_delete(tree);
 }
 
+//----- Completion callback ----------------------------------------------------
+
+static replxx::Replxx::completions_t complete_rooture(
+    std::string const& input, int& context_len)
+{
+  replxx::Replxx::completions_t completions;
+
+  // Find the start of the current token
+  int pos = (int)input.size() - 1;
+  while (pos >= 0 && input[pos] != ' ' && input[pos] != '(' && input[pos] != ')' &&
+         input[pos] != '{' && input[pos] != '}')
+    --pos;
+  std::string word = input.substr(pos + 1);
+
+  if (word.empty() || word[0] != '@') return completions;
+
+  std::string prefix = word.substr(1); // strip '@'
+  context_len = (int)word.size();
+
+  // Collect matching names as strings first, then deduplicate
+  std::vector<std::string> names;
+  auto add_from_list = [&](TCollection* lst) {
+    if (!lst) return;
+    TIter next(lst);
+    TObject* obj;
+    while ((obj = next())) {
+      const char* raw = obj->GetName();
+      if (!raw || raw[0] == '\0' || strcmp(raw, obj->ClassName()) == 0) continue;
+      std::string name(raw);
+      if (prefix.empty() || name.substr(0, prefix.size()) == prefix)
+        names.push_back("@" + name);
+    }
+  };
+
+  add_from_list(gROOT->GetListOfCanvases());
+  add_from_list(gROOT->GetListOfFiles());
+  add_from_list(gROOT->GetListOfSpecials());
+  if (gDirectory) add_from_list(gDirectory->GetList());
+
+  std::sort(names.begin(), names.end());
+  names.erase(std::unique(names.begin(), names.end()), names.end());
+  for (auto const& n : names) completions.push_back(n);
+
+  return completions;
+}
+
 //----- Input thread -----------------------------------------------------------
 
 static void input_thread_fn() {
@@ -1702,6 +1763,8 @@ static void input_thread_fn() {
   g_ts_parser = ts_parser_new();
   ts_parser_set_language(g_ts_parser, tree_sitter_rooture());
   rx.set_highlighter_callback(highlight_rooture);
+  rx.set_completion_callback(complete_rooture);
+  rx.set_word_break_characters(" \t\n\r(){}\"");
 
   rx.print("ROOTure 0.1.0\nPress Ctrl+c to interrupt, Ctrl+d to exit\n\n");
 
@@ -1780,7 +1843,7 @@ int main(int argc, char** argv) {
       floating : /-?[0-9]+[.][0-9]*/                          \
                | /-?[.][0-9]+/ ;                              \
       number   : /-?[0-9]+/ ;                                 \
-      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:]+/ ;           \
+      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@]+/ ;          \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \
       comment  : /;[^\\r\\n]*/ ;                              \
       sexpr    : '(' <expr>* ')' ;                            \
