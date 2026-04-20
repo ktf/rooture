@@ -793,6 +793,22 @@ lval* lval_call(lenv* e, lval* f, lval* a) {
 // Evaluate an expression
 lval* lval_eval_sexpr(lenv* e, lval* v) {
 
+  /* Desugar (.Method args...) → (. Method args...) */
+  if (v->count >= 1 && v->cell[0]->type == LVAL_SYM) {
+    const char* sym = v->cell[0]->sym;
+    if (sym[0] == '.' && sym[1] != '\0') {
+      lval* dot    = lval_sym(".");
+      lval* method = lval_sym(sym + 1);
+      free(v->cell[0]->sym);
+      v->cell[0]->sym = dot->sym; dot->sym = nullptr; lval_del(dot);
+      /* Insert method name as new second cell */
+      v->count++;
+      v->cell = (lval**)realloc(v->cell, sizeof(lval*) * v->count);
+      memmove(v->cell + 2, v->cell + 1, sizeof(lval*) * (v->count - 2));
+      v->cell[1] = method;
+    }
+  }
+
   for (int i = 0; i < v->count; i++) {
     v->cell[i] = lval_eval(e, v->cell[i]);
   }
@@ -1506,6 +1522,69 @@ lval* builtin_exit(lenv* e, lval* a) {
   return 0;
 }
 
+// Thread-first operator  (-> val step1 step2 ...)
+// Each step is a Q-expression in one of two forms:
+//   {. Method extra-args...}     — classic form
+//   {.Method extra-args...}      — shorthand; desugared by lval_eval_sexpr
+// An optional alias as the first symbol before the dot binds the result globally:
+//   {alias . Method extra-args...}
+//   {alias .Method extra-args...}
+lval* builtin_arrow(lenv* e, lval* a) {
+  LASSERT(a, a->count >= 1, "'->' requires at least one argument.");
+  lval* acc = lval_copy(a->cell[0]);
+
+  for (int s = 1; s < a->count; s++) {
+    lval* step = a->cell[s];
+    LASSERT(a, step->type == LVAL_QEXPR && step->count >= 1,
+            "'->' steps must be non-empty Q-expressions.");
+
+    // Detect alias: first element is a symbol that is NOT "." and does NOT start with "."
+    int fn_idx = 0;
+    const char* alias = nullptr;
+    if (step->cell[0]->type == LVAL_SYM) {
+      const char* s0 = step->cell[0]->sym;
+      if (s0[0] != '.') { alias = s0; fn_idx = 1; }
+    }
+
+    // Build the call sexpr: (fn_sym [method] acc extra-args...)
+    // fn_sym is either "." (classic) or ".Method" (shorthand, desugared later)
+    lval* call = lval_sexpr();
+    lval_add(call, lval_copy(step->cell[fn_idx]));          // "." or ".Method"
+
+    // For classic {. Method ...}: also prepend the explicit method name
+    if (fn_idx + 1 < step->count) {
+      const char* fn_sym = step->cell[fn_idx]->sym;
+      if (fn_sym[0] == '.' && fn_sym[1] == '\0') {
+        // classic dot — next element is the method name
+        lval_add(call, lval_copy(step->cell[fn_idx + 1]));  // method name
+        lval_add(call, lval_copy(acc));                      // object
+        for (int i = fn_idx + 2; i < step->count; i++)
+          lval_add(call, lval_copy(step->cell[i]));
+      } else {
+        // shorthand .Method — object goes right after fn_sym
+        lval_add(call, lval_copy(acc));
+        for (int i = fn_idx + 1; i < step->count; i++)
+          lval_add(call, lval_copy(step->cell[i]));
+      }
+    } else {
+      // Only the function symbol, no extra args (e.g. {.DrawClone} or {. DrawClone})
+      lval_add(call, lval_copy(acc));
+    }
+
+    lval_del(acc);
+    acc = lval_eval(e, call);
+    if (acc->type == LVAL_ERR) return acc;
+
+    if (alias) {
+      lval* key = lval_sym(alias);
+      lenv_def(e, key, acc);
+      lval_del(key);
+    }
+  }
+
+  return acc;
+}
+
 // Creates a new C++ object
 lval *builtin_new(lenv *e, lval* a) {
   LASSERT(a, a->count >= 1,
@@ -1573,6 +1652,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "exit", builtin_exit);
   
   /*TObject interaction*/
+  lenv_add_builtin(e, "->",  builtin_arrow);
   lenv_add_builtin(e, "new", builtin_new);
   lenv_add_builtin(e, "member", builtin_member);
   lenv_add_builtin(e, ".", builtin_member);
@@ -1673,7 +1753,9 @@ static void highlight_rooture(std::string const& input,
       std::string_view text(input.data() + start, end - start);
       const char* type = ts_node_type(node);
 
-      if (strcmp(type, "named_ref") == 0) {
+      if (strcmp(type, "dot_method") == 0) {
+        color_range(start, end, Color::BRIGHTGREEN);
+      } else if (strcmp(type, "named_ref") == 0) {
         color_range(start, end, Color::MAGENTA);
       } else if (strcmp(type, "number") == 0 || strcmp(type, "float") == 0) {
         color_range(start, end, Color::CYAN);

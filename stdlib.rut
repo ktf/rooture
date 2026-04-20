@@ -240,24 +240,11 @@
 })
 
 ;;; Threading
-
-; Thread-first: pipe a value through a sequence of method calls.
-; Each step is a qexpr {. "Method" extra-args...}; the accumulated
-; value is inserted as the object (second argument to .).
-; e.g. (-> rdf {. "Define" "x" f} {. "Histo1D" "x"})
-;   => (. "Histo1D" (. "Define" rdf "x" f) "x")
-(fun {-> val & steps} {
-  if (== steps nil)
-    {val}
-    {unpack ->
-      (join
-        (list (eval (join
-          (head (fst steps))
-          (head (tail (fst steps)))
-          (list val)
-          (tail (tail (fst steps))))))
-        (tail steps))}
-})
+; -> is a C++ builtin (builtin_arrow). Supported step forms:
+;   {. Method extra-args...}         classic
+;   {.Method extra-args...}          shorthand
+;   {alias . Method extra-args...}   classic + bind result as alias
+;   {alias .Method extra-args...}    shorthand + bind result as alias
 
 ;;; OO interactions
 
