@@ -1,7 +1,7 @@
-#include <editline/readline.h>
+#include <replxx.hxx>
 #include <cstdlib>
 #include <cstdio>
-#include "ROOTureApp.h"
+#include <thread>
 #include "Rtypes.h"
 #include "TClass.h"
 #include "TApplication.h"
@@ -11,7 +11,6 @@
 #include "TSystem.h"
 #include "TVirtualX.h"
 #include "TVirtualPad.h"
-#include "Getline.h"
 #include "TStopwatch.h"
 #include "TException.h"
 #include "TInterpreter.h"
@@ -25,10 +24,9 @@
 #include <map>
 #include <atomic>
 #include <climits>
+#include <unistd.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
-#else
-#include <unistd.h>
 #endif
 
 extern "C"
@@ -41,6 +39,20 @@ enum { LVAL_ERR, LVAL_NUM,  LVAL_FLOAT, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR };
 
 static bool g_debug = false;
+
+static int             g_pipe_fds[2];
+static replxx::Replxx* g_rx = nullptr;
+
+static void rut_print(const char* fmt, ...) {
+  va_list ap; va_start(ap, fmt);
+  if (g_rx) {
+    char buf[4096]; vsnprintf(buf, sizeof(buf), fmt, ap);
+    g_rx->print("%s", buf);
+  } else {
+    vprintf(fmt, ap);
+  }
+  va_end(ap);
+}
 
 struct lval;
 struct lenv;
@@ -396,28 +408,18 @@ lval* lval_add(lval* v, lval* x) {
 void lval_print(lval* v);
 
 void lval_expr_print(lval* v, char open, char close) {
-  putchar(open);
+  rut_print("%c", open);
   for (int i = 0; i < v->count; i++) {
-
-    /* Print Value contained within */
     lval_print(v->cell[i]);
-
-    /* Don't print trailing space if last element */
-    if (i != (v->count-1)) {
-      putchar(' ');
-    }
+    if (i != (v->count-1)) rut_print(" ");
   }
-  putchar(close);
+  rut_print("%c", close);
 }
 
 void lval_print_str(lval* v) {
-  /* Make a Copy of the string */
   char* escaped = strdup(v->str);
-  /* Pass it through the escape function */
   escaped = (char *)mpcf_escape(escaped);
-  /* Print it between " characters */
-  printf("\"%s\"", escaped);
-  /* free the copied string */
+  rut_print("\"%s\"", escaped);
   free(escaped);
 }
 
@@ -430,7 +432,7 @@ TObjArray *lval_to_obj_array(lval *a, int offset) {
       case LVAL_FLOAT: args->Add(new TObjString(strdup(std::to_string(v->floating).c_str()))); break;
       case LVAL_STR: args->Add(new TObjString(strdup(("\"" + std::string(v->str) + "\"").c_str()))); break;
       default:
-        printf("Cannot use as a C++ argument.");
+        rut_print("Cannot use as a C++ argument.");
         args->Add(new TObjString(""));
     }
   }
@@ -525,11 +527,11 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset) {
           emit_jit_wrapper(key, v);
           args += key + "_wrapper";
         } else {
-          printf("Cannot pass builtin as C++ callable.\n");
+          rut_print("Cannot pass builtin as C++ callable.\n");
         }
         break;
       default:
-        printf("Cannot use lval type %d as a C++ argument.\n", v->type);
+        rut_print("Cannot use lval type %d as a C++ argument.\n", v->type);
     }
   }
   return args;
@@ -538,35 +540,35 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset) {
 /* Print an "lval" */
 void lval_print(lval* v) {
   switch (v->type) {
-    case LVAL_NUM:   printf("%li", v->num); break;
-    case LVAL_FLOAT:   printf("%f", v->floating); break;
-    case LVAL_ERR:   printf("Error: %s", v->err); break;
+    case LVAL_NUM:    rut_print("%li", v->num); break;
+    case LVAL_FLOAT:  rut_print("%f", v->floating); break;
+    case LVAL_ERR:    rut_print("Error: %s", v->err); break;
     case LVAL_FUN:
       if (v->builtin) {
-        printf("<builtin>");
+        rut_print("<builtin>");
       } else {
-        printf("(\\ "); lval_print(v->formals);
-        putchar(' '); lval_print(v->body); putchar(')');
+        rut_print("(\\ "); lval_print(v->formals);
+        rut_print(" "); lval_print(v->body); rut_print(")");
       }
     break;
     case LVAL_TOBJ:
-      printf("<%s @%p>\n", v->cls ? v->cls->GetName() : "object", v->obj);
+      rut_print("<%s @%p>\n", v->cls ? v->cls->GetName() : "object", v->obj);
       if (v->obj && v->cls) {
         TMethodCall mc(v->cls, "Print", "");
         if (mc.IsValid()) mc.Execute(v->obj);
       }
     break;
     case LVAL_TMETHOD:
-      printf("<tmethodcall %s(%s)>", v->method->GetMethodName(), v->methodArgs);
+      rut_print("<tmethodcall %s(%s)>", v->method->GetMethodName(), v->methodArgs);
     break;
-    case LVAL_SYM:   printf("%s", v->sym); break;
+    case LVAL_SYM:   rut_print("%s", v->sym); break;
     case LVAL_STR:   lval_print_str(v); break;
     case LVAL_SEXPR: lval_expr_print(v, '(', ')'); break;
     case LVAL_QEXPR: lval_expr_print(v, '{', '}'); break;
   }
 }
 
-void lval_println(lval* v) { lval_print(v); putchar('\n'); }
+void lval_println(lval* v) { lval_print(v); rut_print("\n"); }
 
 lval* lval_read_str(mpc_ast_t* t) {
   /* Cut off the final quote character */
@@ -1455,11 +1457,11 @@ lval* builtin_print(lenv* e, lval* a) {
 
   /* Print each argument followed by a space */
   for (int i = 0; i < a->count; i++) {
-    lval_print(a->cell[i]); putchar(' ');
+    lval_print(a->cell[i]); rut_print(" ");
   }
 
   /* Print a newline and delete arguments */
-  putchar('\n');
+  rut_print("\n");
   lval_del(a);
 
   return lval_sexpr();
@@ -1514,8 +1516,8 @@ lval *builtin_invoke(lenv *e, lval *a) {
   TMethodCall *m = a->cell[0]->method;
   const char *args = a->cell[0]->methodArgs;
   if (g_debug) {
-    printf("Return type is %i\n", m->ReturnType());
-    printf("Executing method %s(%s)\n", m->GetMethodName(), args);
+    rut_print("Return type is %i\n", m->ReturnType());
+    rut_print("Executing method %s(%s)\n", m->GetMethodName(), args);
   }
   m->Execute(a->cell[1]->obj, args);
   return lval_qexpr();
@@ -1579,204 +1581,107 @@ void lenv_add_builtins(lenv* e) {
      ptr_to_hex((void*)rooture_invoke_callable_c) + ";").c_str());
 }
 
-//----- Interrupt signal handler -----------------------------------------------
-////////////////////////////////////////////////////////////////////////////////
-//static Int_t Key_Pressed(Int_t key)
-//{
-//  gApplication->KeyPressed(key);
-//  return 0;
-//}
+//----- Pipe-based input handler -----------------------------------------------
 
-
-class TInterruptHandler : public TSignalHandler {
+class PipeHandler : public TFileHandler {
+  lenv* fEnv;
 public:
-   TInterruptHandler() : TSignalHandler(kSigInterrupt, kFALSE) { }
-   Bool_t  Notify();
-};
+  PipeHandler(lenv* e) : TFileHandler(g_pipe_fds[0], 1), fEnv(e) {}
 
-////////////////////////////////////////////////////////////////////////////////
-/// TRint interrupt handler.
+  Bool_t Notify() override {
+    uint32_t len = 0;
+    if (read(g_pipe_fds[0], &len, sizeof(len)) != sizeof(len)) return kTRUE;
+    if (len == 0) { gApplication->Terminate(0); return kTRUE; }
 
-Bool_t TInterruptHandler::Notify()
-{
-   exit(0);
-   if (fDelay) {
-      fDelay++;
-      return kTRUE;
-   }
-   return kTRUE;
-}
+    std::string expr(len, '\0');
+    size_t got = 0;
+    while (got < len) {
+      ssize_t n = read(g_pipe_fds[0], expr.data() + got, len - got);
+      if (n <= 0) break;
+      got += n;
+    }
 
-
-class TTermInputHandler : public TFileHandler {
-public:
-   TTermInputHandler(Int_t fd) : TFileHandler(fd, 1) { }
-   Bool_t Notify();
-   Bool_t ReadNotify() { return Notify(); }
-};
-
-Bool_t TTermInputHandler::Notify()
-{
-   return gApplication->HandleTermInput();
-}
-
-ROOTureApp::ROOTureApp(int *argc, char **argv, lenv *e) 
-: TApplication("ROOTure", argc, argv),
-  fGlobalContext(e)
-{
-  // Install interrupt and terminal input handlers
-  TInterruptHandler *ih = new TInterruptHandler();
-  ih->Add();
-  SetSignalHandler(ih);
-
-  // Handle stdin events
-  fInputHandler = new TTermInputHandler(0);
-  fInputHandler->Add();
-
-  // Add support for history
-  // Goto into raw terminal input mode
-  char defhist[kMAXPATHLEN];
-  snprintf(defhist, sizeof(defhist), "%s/.rooture_hist", gSystem->HomeDirectory());
-  // In the code we had HistorySize and HistorySave, in the rootrc and doc
-  // we have HistSize and HistSave. Keep the doc as it is and check
-  // now also for HistSize and HistSave in case the user did not use
-  // the History versions
-  int hist_size = 500;
-  int hist_save = 400;
-  Gl_histsize(hist_size, hist_save);
-  Gl_windowchanged();
-
-}
-
-ROOTureApp::~ROOTureApp() {
-  fInputHandler->Remove();
-  delete fInputHandler;
-}
-
-void 
-ROOTureApp::Run(Bool_t retrn) {
-  /* Supplied with list of files, let's execute those. */
-  if (this->Argc() >= 2) {
-
-    /* loop over each supplied filename (starting from 1) */
-    for (int i = 1; i < this->Argc(); i++) {
-
-      /* Argument list with a single argument, the filename */
-      lval* args = lval_add(lval_sexpr(), lval_str(this->Argv()[i]));
-
-      /* Pass to builtin load and get the result */
-      lval* x = builtin_load(fGlobalContext, args);
-
-      /* If the result is an error be sure to print it */
-      if (x->type == LVAL_ERR) { lval_println(x); }
+    mpc_result_t r;
+    if (mpc_parse("<stdin>", expr.c_str(), Lispy, &r)) {
+      if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
+      lval* x = lval_eval(fEnv, lval_read((mpc_ast_t*)r.output));
+      lval_println(x);
       lval_del(x);
+      mpc_ast_delete((mpc_ast_t*)r.output);
+    } else {
+      char* err_str = mpc_err_string(r.error);
+      rut_print("%s\n", err_str);
+      free(err_str);
+      mpc_err_delete(r.error);
+    }
+
+    TIter next(gROOT->GetListOfCanvases());
+    TVirtualPad* c;
+    while ((c = (TVirtualPad*)next())) c->Update();
+    TInterpreter::Instance()->EndOfLineAction();
+    return kTRUE;
+  }
+
+  Bool_t ReadNotify() override { return Notify(); }
+};
+
+//----- Input thread -----------------------------------------------------------
+
+static void input_thread_fn() {
+  replxx::Replxx rx;
+  rx.set_max_history_size(1000);
+  g_rx = &rx;
+
+  rx.print("ROOTure 0.1.0\nPress Ctrl+c to interrupt, Ctrl+d to exit\n\n");
+
+  // Load history
+  const char* home = getenv("HOME");
+  std::string hist_file;
+  if (home) { hist_file = std::string(home) + "/.rooture_history"; rx.history_load(hist_file); }
+
+  auto send_expr = [](const std::string& expr) {
+    uint32_t len = (uint32_t)expr.size();
+    write(g_pipe_fds[1], &len, sizeof(len));
+    write(g_pipe_fds[1], expr.data(), len);
+  };
+
+  std::string accumulated;
+  int open_parens = 0;
+
+  while (true) {
+    const char* prompt = accumulated.empty() ? "ROOTure> " : "      .. ";
+    const char* input = rx.input(prompt);
+    if (!input) {
+      // EOF (Ctrl+D)
+      uint32_t eof = 0;
+      write(g_pipe_fds[1], &eof, sizeof(eof));
+      break;
+    }
+
+    std::string line(input);
+
+    // Count parens to support multi-line input
+    for (char ch : line) {
+      if (ch == '(') open_parens++;
+      else if (ch == ')') open_parens--;
+    }
+
+    if (accumulated.empty()) accumulated = line;
+    else accumulated += "\n" + line;
+
+    if (open_parens <= 0) {
+      open_parens = 0;
+      if (!accumulated.empty() && accumulated.find_first_not_of(" \t\n\r") != std::string::npos) {
+        rx.history_add(accumulated);
+        send_expr(accumulated);
+      }
+      accumulated.clear();
     }
   }
-  TIter next(gROOT->GetListOfCanvases());
-  TVirtualPad* canvas;
-  while ((canvas = (TVirtualPad*)next())) {
-    canvas->Update();
-  }
 
-  fInputHandler->Activate();
-  Getlinem(kInit, "ROOTure> ");
-  TApplication::Run(retrn);
-  Getlinem(kCleanUp, 0);
+  if (!hist_file.empty()) rx.history_save(hist_file);
+  g_rx = nullptr;
 }
-
-Bool_t
-ROOTureApp::HandleTermInput()
-{
-  static TStopwatch timer;
-  static std::string accumulated;
-
-  const char* line = Getlinem(kOneChar, 0);
-  if (!line)
-    return kTRUE;
-  if (line[0] == 0 && Gl_eof())
-    Terminate(0);
-  gVirtualX->SetKeyAutoRepeat(kTRUE);
-
-  const char *input = strdup(line);
-  TString sline = line;
-
-  // strip off '\n' and leading and trailing blanks
-  sline = sline.Chop();
-  sline = sline.Strip(TString::kBoth);
-  ReturnPressed((char*)sline.Data());
-
-  // Append this line to the accumulation buffer
-  if (!accumulated.empty()) accumulated += '\n';
-  accumulated += sline.Data();
-
-  // Wait for more input if parens/braces are unbalanced
-  if (paren_depth(accumulated) > 0) {
-    free((void*)input);
-    Getlinem(kInit, "...   ");
-    return kTRUE;
-  }
-
-  // prevent recursive calling of this input handler
-  fInputHandler->DeActivate();
-  if (gROOT->Timer()) timer.Start();
-  thread_local Bool_t added;
-  added = kFALSE; // reset on each call.
-
-  std::string expr = accumulated;
-  accumulated.clear();
-
-  // Store the complete expression as a single history entry.
-  // Replace newlines with spaces — the parser is whitespace-insensitive.
-  {
-    std::string hist = expr;
-    std::replace(hist.begin(), hist.end(), '\n', ' ');
-    Gl_histadd(hist.c_str());
-  }
-
-  /* Attempt to parse the accumulated input */
-  mpc_result_t r;
-  if (mpc_parse("<stdin>", expr.c_str(), Lispy, &r)) {
-    /* On success print and delete the AST */
-    if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
-    lval* x = lval_eval(fGlobalContext, lval_read((mpc_ast_t *)r.output));
-    lval_println(x);
-    lval_del(x);
-  } else {
-    /* Otherwise print and delete the Error */
-    mpc_err_print(r.error);
-    mpc_err_delete(r.error);
-  }
-  free((void *)input);
-  if (!sline.IsNull())
-    LineProcessed(sline);
-  TIter next(gROOT->GetListOfCanvases());
-  TVirtualPad* canvas;
-  while ((canvas = (TVirtualPad*)next())) {
-    canvas->Update();
-  }
-
-  fInputHandler->Activate();
-
-  TInterpreter::Instance()->EndOfLineAction();
-
-  Getlinem(kInit, "ROOTure> ");
-  return kTRUE;
-}
-  
-void 
-ROOTureApp::HandleException(Int_t sig)
-{
-   fCaughtException = kTRUE;
-   if (TROOT::Initialized()) {
-      if (gException) {
-         Getlinem(kCleanUp, 0);
-         Getlinem(kInit, "Root > ");
-      }
-   }
-   TApplication::HandleException(sig);
-}
-
-ClassImp(ROOTureApp)
 
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; i++) {
@@ -1812,51 +1717,45 @@ int main(int argc, char** argv) {
     ",
   Floating, Number, Symbol, String, Comment, Sexpr, Qexpr, Expr, Lispy);
 
-  
-  /* Print Version and Exit Information */
-  puts("ROOTure 0.1.0");
-  puts("Press Ctrl+c to Exit\n");
-
   /* Build the file search path */
   std::string exe_dir = executable_dir();
   load_path.push_back(exe_dir + "/../share/rooture");
 
-  /* The environment*/
+  /* The environment */
   lenv* e = lenv_new();
   lenv_add_builtins(e);
 
-  TApplication *app = new ROOTureApp(&argc, argv, e);
-  app->Run();
-
-  /* In a never ending loop */
-  while (1) {
-
-    /* Output our prompt */
-    char* input = readline("ROOTure> ");
-
-    /* Add input to history */
-    add_history(input);
-
-    /* Attempt to parse the user input */
-    mpc_result_t r;
-    if (mpc_parse("<stdin>", input, Lispy, &r)) {
-      /* On success print and delete the AST */
-      if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
-      lval* x = lval_eval(e, lval_read((mpc_ast_t *)r.output));
-      lval_println(x);
-      lval_del(x);
-    } else {
-      /* Otherwise print and delete the Error */
-      mpc_err_print(r.error);
-      mpc_err_delete(r.error);
-    }
-    free(input);
+  /* Set up the communication pipe between input thread and main thread */
+  if (pipe(g_pipe_fds) != 0) {
+    perror("pipe"); return 1;
   }
+
+  /* Bootstrap TApplication so ROOT graphics/gSystem work */
+  TApplication app("rooture", &argc, argv);
+
+  /* Register the pipe read-end with gSystem's event loop */
+  PipeHandler* ph = new PipeHandler(e);
+  ph->Add();
+
+  /* Print version banner via replxx so it appears above the prompt */
+  /* (g_rx not set yet — will be set by input thread before first prompt) */
+
+  /* Start input thread — it owns the replxx instance */
+  std::thread input_thread(input_thread_fn);
+
+  /* Run ROOT's event loop on the main thread */
+  gSystem->Run();
+
+  input_thread.join();
+
+  ph->Remove();
+  delete ph;
+
   lenv_del(e);
 
   /* Undefine and delete our parsers */
-  mpc_cleanup(8, 
-    Number, Floating, Symbol, String, Comment, 
+  mpc_cleanup(9,
+    Number, Floating, Symbol, String, Comment,
     Sexpr,  Qexpr,  Expr,   Lispy);
 
   return 0;

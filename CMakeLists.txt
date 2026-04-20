@@ -9,10 +9,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(ROOT REQUIRED COMPONENTS Core MathCore RIO Hist Tree TreePlayer ROOTVecOps ROOTDataFrame ROOTNTuple)
 include(${ROOT_USE_FILE})
 
+find_package(Threads REQUIRED)
+find_package(replxx REQUIRED)
+
 add_executable(rooture rooture.cxx mpc.c)
 target_include_directories(rooture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(rooture PRIVATE
-  edit
+  replxx::replxx
   ROOT::Core ROOT::MathCore ROOT::RIO
   ROOT::Hist ROOT::Tree ROOT::TreePlayer
   ROOT::ROOTVecOps ROOT::ROOTDataFrame ROOT::ROOTNTuple
