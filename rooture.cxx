@@ -1,4 +1,5 @@
 #include <replxx.hxx>
+#include <tree_sitter/api.h>
 #include <cstdlib>
 #include <cstdio>
 #include <thread>
@@ -32,6 +33,7 @@
 extern "C"
 {
 #include "mpc.h"
+const TSLanguage* tree_sitter_rooture();
 }
 
 /* Create Enumeration of Possible lval Types */
@@ -42,6 +44,7 @@ static bool g_debug = false;
 
 static int             g_pipe_fds[2];
 static replxx::Replxx* g_rx = nullptr;
+static TSParser*       g_ts_parser = nullptr;
 
 static void rut_print(const char* fmt, ...) {
   va_list ap; va_start(ap, fmt);
@@ -1625,12 +1628,80 @@ public:
   Bool_t ReadNotify() override { return Notify(); }
 };
 
+//----- Syntax highlighter -----------------------------------------------------
+
+static const std::vector<std::string> kKeywords = {
+  "def", "=", "\\", "if", "fun", "do", "let",
+  "->", ".", "new", "load", "error", "print", "println"
+};
+
+static void highlight_rooture(std::string const& input,
+                               replxx::Replxx::colors_t& colors) {
+  using Color = replxx::Replxx::Color;
+  if (!g_ts_parser) return;
+
+  TSTree* tree = ts_parser_parse_string(g_ts_parser, nullptr,
+                                        input.c_str(), (uint32_t)input.size());
+  if (!tree) return;
+
+  TSNode root = ts_tree_root_node(tree);
+  TSTreeCursor cursor = ts_tree_cursor_new(root);
+
+  auto color_range = [&](uint32_t start, uint32_t end, Color c) {
+    for (uint32_t i = start; i < end && i < colors.size(); ++i)
+      colors[i] = c;
+  };
+
+  std::function<void()> walk = [&]() {
+    TSNode node = ts_tree_cursor_current_node(&cursor);
+    if (ts_node_child_count(node) == 0) {
+      uint32_t start = ts_node_start_byte(node);
+      uint32_t end   = ts_node_end_byte(node);
+      std::string_view text(input.data() + start, end - start);
+      const char* type = ts_node_type(node);
+
+      if (strcmp(type, "number") == 0 || strcmp(type, "float") == 0) {
+        color_range(start, end, Color::CYAN);
+      } else if (strcmp(type, "string") == 0) {
+        color_range(start, end, Color::YELLOW);
+      } else if (strcmp(type, "comment") == 0) {
+        color_range(start, end, Color::BROWN);
+      } else if (strcmp(type, "(") == 0 || strcmp(type, ")") == 0 ||
+                 strcmp(type, "{") == 0 || strcmp(type, "}") == 0) {
+        color_range(start, end, Color::WHITE);
+      } else if (strcmp(type, "symbol") == 0) {
+        if (text.find("::") != std::string_view::npos) {
+          color_range(start, end, Color::BRIGHTBLUE);
+        } else {
+          bool is_kw = std::find(kKeywords.begin(), kKeywords.end(), text)
+                       != kKeywords.end();
+          color_range(start, end, is_kw ? Color::BRIGHTGREEN : Color::LIGHTGRAY);
+        }
+      }
+    }
+
+    if (ts_tree_cursor_goto_first_child(&cursor)) {
+      walk();
+      while (ts_tree_cursor_goto_next_sibling(&cursor)) walk();
+      ts_tree_cursor_goto_parent(&cursor);
+    }
+  };
+
+  walk();
+  ts_tree_cursor_delete(&cursor);
+  ts_tree_delete(tree);
+}
+
 //----- Input thread -----------------------------------------------------------
 
 static void input_thread_fn() {
   replxx::Replxx rx;
   rx.set_max_history_size(1000);
   g_rx = &rx;
+
+  g_ts_parser = ts_parser_new();
+  ts_parser_set_language(g_ts_parser, tree_sitter_rooture());
+  rx.set_highlighter_callback(highlight_rooture);
 
   rx.print("ROOTure 0.1.0\nPress Ctrl+c to interrupt, Ctrl+d to exit\n\n");
 
@@ -1680,6 +1751,9 @@ static void input_thread_fn() {
   }
 
   if (!hist_file.empty()) rx.history_save(hist_file);
+
+  ts_parser_delete(g_ts_parser);
+  g_ts_parser = nullptr;
   g_rx = nullptr;
 }
 

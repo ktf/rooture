@@ -11,11 +11,38 @@ include(${ROOT_USE_FILE})
 
 find_package(Threads REQUIRED)
 find_package(replxx REQUIRED)
+find_library(TREE_SITTER_LIB NAMES tree-sitter REQUIRED)
+find_path(TREE_SITTER_INCLUDE NAMES tree_sitter/api.h REQUIRED)
 
-add_executable(rooture rooture.cxx mpc.c)
-target_include_directories(rooture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# Generate src/parser.c from grammar.js using the tree-sitter CLI.
+# The CLI is provided by the tree-sitter alibuild recipe (or a local install).
+# The generated file should also be committed so builds work without the CLI.
+set(PARSER_C ${CMAKE_CURRENT_SOURCE_DIR}/src/parser.c)
+find_program(TREE_SITTER_CLI tree-sitter)
+if(TREE_SITTER_CLI)
+  add_custom_command(
+    OUTPUT  ${PARSER_C}
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/tree_sitter/parser.h
+    COMMAND ${TREE_SITTER_CLI} generate --no-bindings
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/grammar.js
+    COMMENT "Generating tree-sitter parser for rooture"
+  )
+elseif(NOT EXISTS ${PARSER_C})
+  message(FATAL_ERROR
+    "src/parser.c not found and tree-sitter CLI is not available.\n"
+    "Install tree-sitter and run: tree-sitter generate --no-bindings")
+endif()
+
+add_executable(rooture rooture.cxx mpc.c ${PARSER_C})
+target_include_directories(rooture PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src   # exposes tree_sitter/parser.h
+  ${TREE_SITTER_INCLUDE}
+)
 target_link_libraries(rooture PRIVATE
   replxx::replxx
+  ${TREE_SITTER_LIB}
   ROOT::Core ROOT::MathCore ROOT::RIO
   ROOT::Hist ROOT::Tree ROOT::TreePlayer
   ROOT::ROOTVecOps ROOT::ROOTDataFrame ROOT::ROOTNTuple
