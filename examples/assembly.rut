@@ -108,6 +108,15 @@
 ;;; --- Close geometry ---
 (.CloseGeometry geom)
 
-;;; --- Visualisation ---
-(.SetVisLevel geom 4)
-(.Draw (.GetTopVolume geom))
+;;; --- TEve Visualisation ---
+(.Load gSystem "libEve")
+(def {eve} (::Create TEveManager))
+
+(def {node} (.GetTopNode geom))
+(def {en}   (new TEveGeoTopNode geom node))
+(.SetVisLevel en 4)
+(.SetVisibility (.GetVolume (.GetNode en)) 0)
+
+(.AddGlobalElement eve en)
+(.Redraw3D eve 1)
+(.ExpandIntoListTreesRecursively en)

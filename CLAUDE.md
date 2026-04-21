@@ -24,6 +24,9 @@ At the top level, any symbol not bound in the environment becomes a **string wit
 ```
 Use `=` (not `def`) for local variables inside lambdas.
 
+### Static method calls
+`(::Method ClassName args...)` and `(:: Method ClassName args...)` are identical — the `::` prefix on the method symbol is syntactic sugar for the two-token form.
+
 ### `if` branches must be Q-expressions
 ```
 (if cond {true-val} {false-val})   ; correct
