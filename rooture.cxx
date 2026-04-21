@@ -3,6 +3,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <thread>
+#include <fstream>
+#include <sstream>
+#include <nlohmann/json.hpp>
 #include "Rtypes.h"
 #include "TClass.h"
 #include "TApplication.h"
@@ -48,9 +51,20 @@ static int             g_pipe_fds[2];
 static replxx::Replxx* g_rx = nullptr;
 static TSParser*       g_ts_parser = nullptr;
 
+// MCP mode
+static bool        g_mcp_mode = false;
+static int         g_mcp_reply_fds[2];
+static bool        g_capturing = false;
+static std::string g_capture_buf;
+
 static void rut_print(const char* fmt, ...) {
   va_list ap; va_start(ap, fmt);
-  if (g_rx) {
+  if (g_capturing) {
+    char buf[4096]; vsnprintf(buf, sizeof(buf), fmt, ap);
+    g_capture_buf += buf;
+  } else if (g_mcp_mode) {
+    // discard: stdout is reserved for JSON-RPC in MCP mode
+  } else if (g_rx) {
     char buf[4096]; vsnprintf(buf, sizeof(buf), fmt, ap);
     g_rx->print("%s", buf);
   } else {
@@ -1618,7 +1632,48 @@ lval *builtin_invoke(lenv *e, lval *a) {
   return lval_qexpr();
 }
 
-void lenv_add_builtins(lenv* e) {  
+// Returns all user-defined symbol names from the global env as a Q-expression of strings.
+lval* builtin_symbols(lenv* e, lval* a) {
+  lval_del(a);
+  lenv* top = e;
+  while (top->par) top = top->par;
+  lval* result = lval_qexpr();
+  for (int i = 0; i < top->count; i++) {
+    if (top->vals[i]->type == LVAL_FUN) continue;
+    lval_add(result, lval_str(top->syms[i]));
+  }
+  return result;
+}
+
+// Returns names of all open TCanvas objects as a Q-expression of strings.
+lval* builtin_canvases(lenv* e, lval* a) {
+  lval_del(a);
+  lval* result = lval_qexpr();
+  TIter next(gROOT->GetListOfCanvases());
+  TObject* obj;
+  while ((obj = next()))
+    lval_add(result, lval_str(obj->GetName()));
+  return result;
+}
+
+// (save-png "CanvasName" "/path/to/out.png") — saves a canvas to a PNG file.
+lval* builtin_save_png(lenv* e, lval* a) {
+  LASSERT(a, a->count == 2, "'save-png' requires 2 arguments: <canvas-name> <path>.");
+  LASSERT_TYPE("save-png", a, 0, LVAL_STR);
+  LASSERT_TYPE("save-png", a, 1, LVAL_STR);
+  const char* name = a->cell[0]->str;
+  const char* path = a->cell[1]->str;
+  TObject* obj = gROOT->GetListOfCanvases()->FindObject(name);
+  if (!obj) { lval_del(a); return lval_err("Canvas '%s' not found", name); }
+  TVirtualPad* pad = dynamic_cast<TVirtualPad*>(obj);
+  if (!pad) { lval_del(a); return lval_err("'%s' is not a pad", name); }
+  pad->SaveAs(path);
+  lval* res = lval_str(path);
+  lval_del(a);
+  return res;
+}
+
+void lenv_add_builtins(lenv* e) {
   /* List Functions */
   lenv_add_builtin(e, "list", builtin_list);
   lenv_add_builtin(e, "head", builtin_head);
@@ -1657,7 +1712,10 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "member", builtin_member);
   lenv_add_builtin(e, ".", builtin_member);
   lenv_add_builtin(e, "invoke", builtin_invoke);
-  
+  lenv_add_builtin(e, "symbols", builtin_symbols);
+  lenv_add_builtin(e, "canvases", builtin_canvases);
+  lenv_add_builtin(e, "save-png", builtin_save_png);
+
   /*A few TObjects */
   lenv_add_global_object(e, "gSystem",      gSystem,      TClass::GetClass("TSystem"));
   lenv_add_global_object(e, "gInterpreter", gInterpreter, TClass::GetClass("TInterpreter"));
@@ -1698,7 +1756,14 @@ public:
     }
 
     mpc_result_t r;
-    if (mpc_parse("<stdin>", expr.c_str(), Lispy, &r)) {
+    const char* src = g_mcp_mode ? "<mcp>" : "<stdin>";
+
+    if (g_mcp_mode) {
+      g_capturing = true;
+      g_capture_buf.clear();
+    }
+
+    if (mpc_parse(src, expr.c_str(), Lispy, &r)) {
       if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
       lval* x = lval_eval(fEnv, lval_read((mpc_ast_t*)r.output));
       lval_println(x);
@@ -1709,6 +1774,13 @@ public:
       rut_print("%s\n", err_str);
       free(err_str);
       mpc_err_delete(r.error);
+    }
+
+    if (g_mcp_mode) {
+      g_capturing = false;
+      uint32_t rlen = (uint32_t)g_capture_buf.size();
+      write(g_mcp_reply_fds[1], &rlen, sizeof(rlen));
+      if (rlen > 0) write(g_mcp_reply_fds[1], g_capture_buf.data(), rlen);
     }
 
     TIter next(gROOT->GetListOfCanvases());
@@ -1902,10 +1974,158 @@ static void input_thread_fn() {
   g_rx = nullptr;
 }
 
+//----- MCP stdio server -------------------------------------------------------
+
+static std::string base64_encode(const std::vector<uint8_t>& data) {
+  static const char* b64 =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  size_t i = 0;
+  for (; i + 2 < data.size(); i += 3) {
+    uint32_t v = ((uint32_t)data[i] << 16) | ((uint32_t)data[i+1] << 8) | data[i+2];
+    out += b64[(v >> 18) & 63]; out += b64[(v >> 12) & 63];
+    out += b64[(v >>  6) & 63]; out += b64[v & 63];
+  }
+  if (i < data.size()) {
+    uint32_t v = (uint32_t)data[i] << 16;
+    if (i + 1 < data.size()) v |= (uint32_t)data[i+1] << 8;
+    out += b64[(v >> 18) & 63];
+    out += b64[(v >> 12) & 63];
+    out += (i + 1 < data.size()) ? b64[(v >> 6) & 63] : '=';
+    out += '=';
+  }
+  return out;
+}
+
+static void mcp_thread_fn() {
+  using json = nlohmann::json;
+
+  // Helper: send eval expression to main thread, block until result arrives.
+  auto eval_expr = [](const std::string& expr) -> std::string {
+    uint32_t len = (uint32_t)expr.size();
+    write(g_pipe_fds[1], &len, sizeof(len));
+    write(g_pipe_fds[1], expr.data(), len);
+    uint32_t rlen = 0;
+    if (read(g_mcp_reply_fds[0], &rlen, sizeof(rlen)) != sizeof(rlen)) return "";
+    std::string result(rlen, '\0');
+    size_t got = 0;
+    while (got < rlen) {
+      ssize_t n = read(g_mcp_reply_fds[0], result.data() + got, rlen - got);
+      if (n <= 0) break;
+      got += n;
+    }
+    return result;
+  };
+
+  // Helper: write one JSON-RPC response line to stdout.
+  auto send_resp = [](const json& resp) {
+    std::string s = resp.dump() + "\n";
+    fwrite(s.c_str(), 1, s.size(), stdout);
+    fflush(stdout);
+  };
+
+  json tools = json::array({
+    {{"name", "eval"},
+     {"description", "Evaluate a rooture expression in ROOT (Lisp-like syntax)."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {{"expr", {{"type","string"},{"description","Expression to evaluate"}}}}},
+       {"required", {"expr"}}}}},
+    {{"name", "list_symbols"},
+     {"description", "List all user-defined symbols in the rooture environment."},
+     {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
+    {{"name", "list_canvases"},
+     {"description", "List names of all open ROOT TCanvas objects."},
+     {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
+    {{"name", "get_canvas"},
+     {"description", "Return a ROOT TCanvas as a PNG image."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {{"name", {{"type","string"},{"description","Canvas name"}}}}},
+       {"required", {"name"}}}}},
+  });
+
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line.empty()) continue;
+    json req;
+    try { req = json::parse(line); } catch (...) { continue; }
+
+    json id   = req.contains("id") ? req["id"] : json(nullptr);
+    std::string method = req.value("method", "");
+
+    if (method == "initialize") {
+      send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+        {"protocolVersion","2024-11-05"},
+        {"capabilities",{{"tools",json::object()}}},
+        {"serverInfo",{{"name","rooture"},{"version","0.1.0"}}}
+      }}});
+    } else if (method == "initialized") {
+      /* notification — no response */
+    } else if (method == "tools/list") {
+      send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{{"tools",tools}}}});
+    } else if (method == "tools/call") {
+      std::string tool = req["params"].value("name","");
+      json args = req["params"].value("arguments", json::object());
+
+      if (tool == "eval") {
+        std::string expr = args.value("expr","");
+        std::string result = eval_expr(expr);
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",result}}})}
+        }}});
+
+      } else if (tool == "list_symbols") {
+        std::string result = eval_expr("(symbols)");
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",result}}})}
+        }}});
+
+      } else if (tool == "list_canvases") {
+        std::string result = eval_expr("(canvases)");
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",result}}})}
+        }}});
+
+      } else if (tool == "get_canvas") {
+        std::string name = args.value("name","");
+        std::string tmp = "/tmp/rooture_canvas_" + name + ".png";
+        // Escape name/path for the rooture string literal
+        eval_expr("(save-png \"" + name + "\" \"" + tmp + "\")");
+        // Read PNG file and base64-encode
+        std::ifstream f(tmp, std::ios::binary);
+        std::vector<uint8_t> png((std::istreambuf_iterator<char>(f)),
+                                   std::istreambuf_iterator<char>());
+        if (png.empty()) {
+          send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
+            {"code",-32000},{"message","Failed to save canvas '"+name+"' as PNG"}
+          }}});
+        } else {
+          std::string b64 = base64_encode(png);
+          send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+            {"content", json::array({{{"type","image"},{"data",b64},{"mimeType","image/png"}}})}
+          }}});
+        }
+        std::remove(tmp.c_str());
+
+      } else {
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
+          {"code",-32601},{"message","Unknown tool: "+tool}
+        }}});
+      }
+    }
+    // Other methods (e.g. ping, notifications) are silently ignored.
+  }
+
+  // EOF on stdin — signal main thread to exit.
+  uint32_t eof = 0;
+  write(g_pipe_fds[1], &eof, sizeof(eof));
+}
+
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--debug") == 0)
       g_debug = true;
+    if (strcmp(argv[i], "--mcp") == 0)
+      g_mcp_mode = true;
   }
 
   /* Create Some Parsers */
@@ -1945,8 +2165,13 @@ int main(int argc, char** argv) {
   lenv_add_builtins(e);
 
   /* Set up the communication pipe between input thread and main thread */
-  if (pipe(g_pipe_fds) != 0) {
-    perror("pipe"); return 1;
+  if (pipe(g_pipe_fds) != 0) { perror("pipe"); return 1; }
+
+  /* In MCP mode create the reply pipe (main→MCP thread) */
+  if (g_mcp_mode) {
+    if (pipe(g_mcp_reply_fds) != 0) { perror("pipe(mcp_reply)"); return 1; }
+    /* Batch mode: no display needed; canvases are saved to files on request */
+    gROOT->SetBatch(true);
   }
 
   /* Bootstrap TApplication so ROOT graphics/gSystem work */
@@ -1956,16 +2181,13 @@ int main(int argc, char** argv) {
   PipeHandler* ph = new PipeHandler(e);
   ph->Add();
 
-  /* Print version banner via replxx so it appears above the prompt */
-  /* (g_rx not set yet — will be set by input thread before first prompt) */
-
-  /* Start input thread — it owns the replxx instance */
-  std::thread input_thread(input_thread_fn);
+  /* Start the appropriate I/O thread */
+  std::thread io_thread(g_mcp_mode ? mcp_thread_fn : input_thread_fn);
 
   /* Run ROOT's event loop on the main thread */
   gSystem->Run();
 
-  input_thread.join();
+  io_thread.join();
 
   ph->Remove();
   delete ph;

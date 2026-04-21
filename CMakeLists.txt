@@ -37,7 +37,8 @@ endif()
 add_executable(rooture rooture.cxx mpc.c ${PARSER_C})
 target_include_directories(rooture PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/src   # exposes tree_sitter/parser.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src     # exposes tree_sitter/parser.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/vendor  # nlohmann/json.hpp
   ${TREE_SITTER_INCLUDE}
 )
 target_link_libraries(rooture PRIVATE
