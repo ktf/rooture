@@ -54,6 +54,7 @@ static TSParser*       g_ts_parser = nullptr;
 // MCP mode
 static bool        g_mcp_mode = false;
 static int         g_mcp_reply_fds[2];
+static FILE*       g_mcp_out = stdout;  // real JSON-RPC output stream (saved before fd-1 redirect)
 static bool        g_capturing = false;
 static std::string g_capture_buf;
 
@@ -625,7 +626,7 @@ lval* lval_read(mpc_ast_t* t) {
 
   /* If root (>) or sexpr then create empty list */
   lval* x = NULL;
-  if (strcmp(t->tag, ">") == 0) { x = lval_sexpr(); } 
+  if (strcmp(t->tag, ">") == 0) { x = lval_sexpr(); }
   if (strstr(t->tag, "sexpr"))  { x = lval_sexpr(); }
   if (strstr(t->tag, "qexpr"))  { x = lval_qexpr(); }
 
@@ -821,6 +822,26 @@ lval* lval_eval_sexpr(lenv* e, lval* v) {
       memmove(v->cell + 2, v->cell + 1, sizeof(lval*) * (v->count - 2));
       v->cell[1] = method;
     }
+    /* Desugar (::Method ClassName args...) → (:: "Method" "ClassName" args...)
+       Method and class name must become strings so they are not looked up in
+       the rooture environment as variable names. */
+    else if (sym[0] == ':' && sym[1] == ':' && sym[2] != '\0') {
+      lval* colcol = lval_sym("::");
+      lval* method = lval_str(sym + 2);   // string, not sym
+      free(v->cell[0]->sym);
+      v->cell[0]->sym = colcol->sym; colcol->sym = nullptr; lval_del(colcol);
+      v->count++;
+      v->cell = (lval**)realloc(v->cell, sizeof(lval*) * v->count);
+      memmove(v->cell + 2, v->cell + 1, sizeof(lval*) * (v->count - 2));
+      v->cell[1] = method;
+      /* Also convert the class-name cell from sym to string so it is not
+         looked up in the env.  It may be a sym (bare word) or already a str. */
+      if (v->cell[2]->type == LVAL_SYM) {
+        lval* cstr = lval_str(v->cell[2]->sym);
+        lval_del(v->cell[2]);
+        v->cell[2] = cstr;
+      }
+    }
   }
 
   for (int i = 0; i < v->count; i++) {
@@ -915,6 +936,14 @@ lval* builtin_eval(lenv *e, lval* a) {
   return lval_eval(e, x);
 }
 
+lval* builtin_do(lenv* e, lval* a) {
+  /* Evaluate each argument in sequence, return the last result. */
+  if (a->count == 0) { lval_del(a); return lval_sexpr(); }
+  lval* result = lval_pop(a, a->count - 1);
+  lval_del(a);
+  return result;
+}
+
 lval* lval_join(lval* x, lval* y) {
 
   /* For each cell in 'y' add it to 'x' */
@@ -994,6 +1023,22 @@ lval* builtin_member(lenv *e, lval *a) {
       return lval_qexpr();
     }
 
+    // If the return type is a pointer, get it directly and use typeid on the
+    // dereferenced value; don't heap-copy a pointer with new auto().
+    bool is_ptr = (bool)(Long_t)gInterpreter->Calc(
+        ("(Long_t)std::is_pointer<" + alias + ">::value").c_str());
+    if (is_ptr) {
+      std::string decl = alias + " " + var + " = " + base_expr + ";";
+      if (g_debug) std::cout << "Cling ptr decl: " << decl << std::endl;
+      gInterpreter->ProcessLine(decl.c_str());
+      void* result = (void*)gInterpreter->Calc(("(Long_t)" + var).c_str());
+      if (!result)
+        return lval_err("Method '%s' returned null", method_name.c_str());
+      TClass* ret_cls = (TClass*)gInterpreter->Calc(
+          ("(Long_t)TClass::GetClass(typeid(*" + var + "))").c_str());
+      return lval_tobj(result, ret_cls);
+    }
+
     std::string decl = "auto " + var + " = " + base_expr + ";";
     if (g_debug) std::cout << "Cling decl: " << decl << std::endl;
     gInterpreter->ProcessLine(decl.c_str());
@@ -1037,11 +1082,16 @@ lval* builtin_member(lenv *e, lval *a) {
     }
     if (!mc.IsValid()) {
       // TMethodCall can't resolve operator-> on template classes — use Cling.
-      std::string deref_base = "(*(" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
-                             + method_name + "(" + args + ")";
-      if (g_debug) std::cout << "Cling deref: " << deref_base << std::endl;
-      return cling_new_auto_typed(deref_base,
-        [&]{ gInterpreter->ProcessLine((deref_base + ";").c_str()); });
+      // For template classes (smart pointers), dereference first: (*(Cls*)ptr)->method()
+      // For plain classes, use direct pointer form: ((Cls*)ptr)->method()
+      bool is_template = class_name.find('<') != std::string::npos;
+      std::string fallback_base = is_template
+        ? "(*(" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
+        : "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->";
+      fallback_base += method_name + "(" + args + ")";
+      if (g_debug) std::cout << "Cling fallback: " << fallback_base << std::endl;
+      return cling_new_auto_typed(fallback_base,
+        [&]{ gInterpreter->ProcessLine((fallback_base + ";").c_str()); });
     }
   }
 
@@ -1057,7 +1107,17 @@ lval* builtin_member(lenv *e, lval *a) {
         std::string bare = retname.substr(0, retname.size() - 1);
         // trim trailing space
         while (!bare.empty() && bare.back() == ' ') bare.pop_back();
-        return lval_tobj((void*)ret, TClass::GetClass(bare.c_str()));
+        TClass* ret_cls = TClass::GetClass(bare.c_str());
+        if (!ret_cls && ret != 0) {
+          // Name lookup failed — recover dynamic type via Cling typeid
+          static std::atomic<int> rut_ptr_n{0};
+          std::string pvar = "__rut_p" + std::to_string(rut_ptr_n++);
+          gInterpreter->ProcessLine(
+            ("auto* " + pvar + " = (" + bare + "*)(Long_t)" + std::to_string((Long_t)ret) + ";").c_str());
+          ret_cls = (TClass*)gInterpreter->Calc(
+            ("(Long_t)TClass::GetClass(typeid(*" + pvar + "))").c_str());
+        }
+        return lval_tobj((void*)ret, ret_cls);
       }
       return lval_num((long)ret);
     }
@@ -1085,6 +1145,70 @@ lval* builtin_member(lenv *e, lval *a) {
       mc.Execute(obj_ptr);
       return lval_qexpr();
   }
+}
+
+// (:: Method ClassName args...)  — static method call
+// Sugar: (::Method ClassName args...) desugars to the above in lval_eval_sexpr.
+// Return type dispatch:
+//   void    → empty Q-expression
+//   pointer → TOBJ with dynamic TClass (via typeid)
+//   float   → LVAL_FLOAT (bits smuggled through Long_t)
+//   other   → LVAL_NUM (integral / enum)
+lval* builtin_static(lenv* e, lval* a) {
+  LASSERT(a, a->count >= 2,
+    "Function '::' needs at least 2 arguments: <method> and <class>.");
+  LASSERT_TYPE("::", a, 0, LVAL_STR);
+  LASSERT_TYPE("::", a, 1, LVAL_STR);
+
+  std::string method_name = a->cell[0]->str;
+  std::string class_name  = a->cell[1]->str;
+  lval_del(lval_pop(a, 0));
+  lval_del(lval_pop(a, 0));
+  std::string args = lval_to_cpp_arg(e, a, 0);
+  lval_del(a);
+
+  std::string base  = class_name + "::" + method_name + "(" + args + ")";
+  static std::atomic<int> rut_static_n{0};
+  std::string ns    = std::to_string(rut_static_n++);
+  std::string alias = "__rut_sT" + ns;
+
+  std::string type_decl = "using " + alias + " = decltype(" + base + ");";
+  if (g_debug) std::cout << "static type-check: " << type_decl << std::endl;
+  gInterpreter->ProcessLine(type_decl.c_str());
+
+  auto calc_bool = [&](const std::string& expr) -> bool {
+    return (bool)(Long_t)gInterpreter->Calc(("(Long_t)" + expr).c_str());
+  };
+
+  if (calc_bool("std::is_void<"           + alias + ">::value")) {
+    gInterpreter->ProcessLine((base + ";").c_str());
+    return lval_qexpr();
+  }
+
+  if (calc_bool("std::is_pointer<" + alias + ">::value")) {
+    std::string var = "__rut_sP" + ns;
+    gInterpreter->ProcessLine(("auto* " + var + " = " + base + ";").c_str());
+    void* result = (void*)gInterpreter->Calc(("(Long_t)" + var).c_str());
+    if (!result)
+      return lval_err("Static '%s::%s' returned null",
+                      class_name.c_str(), method_name.c_str());
+    TClass* ret_cls = (TClass*)gInterpreter->Calc(
+        ("(Long_t)TClass::GetClass(typeid(*" + var + "))").c_str());
+    return lval_tobj(result, ret_cls);
+  }
+
+  if (calc_bool("std::is_floating_point<" + alias + ">::value")) {
+    std::string var = "__rut_sD" + ns;
+    gInterpreter->ProcessLine(("double " + var + " = (double)(" + base + ");").c_str());
+    Long_t raw = gInterpreter->Calc(
+        ("*reinterpret_cast<Long_t*>(&" + var + ")").c_str());
+    double dval; memcpy(&dval, &raw, sizeof(dval));
+    return lval_floating(dval);
+  }
+
+  // Integral / enum / other scalar
+  Long_t ival = gInterpreter->Calc(("(Long_t)(" + base + ")").c_str());
+  return lval_num((long)ival);
 }
 
 lval* promote_to_floating(lval *a) {
@@ -1679,6 +1803,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "head", builtin_head);
   lenv_add_builtin(e, "tail", builtin_tail);
   lenv_add_builtin(e, "eval", builtin_eval);
+  lenv_add_builtin(e, "do",   builtin_do);
   lenv_add_builtin(e, "join", builtin_join);
   /* Variable Functions */
   lenv_add_builtin(e, "\\",  builtin_lambda);
@@ -1711,6 +1836,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "new", builtin_new);
   lenv_add_builtin(e, "member", builtin_member);
   lenv_add_builtin(e, ".", builtin_member);
+  lenv_add_builtin(e, "::", builtin_static);
   lenv_add_builtin(e, "invoke", builtin_invoke);
   lenv_add_builtin(e, "symbols", builtin_symbols);
   lenv_add_builtin(e, "canvases", builtin_canvases);
@@ -1765,10 +1891,18 @@ public:
 
     if (mpc_parse(src, expr.c_str(), Lispy, &r)) {
       if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
-      lval* x = lval_eval(fEnv, lval_read((mpc_ast_t*)r.output));
+      lval* prog = lval_read((mpc_ast_t*)r.output);
+      mpc_ast_delete((mpc_ast_t*)r.output);
+      /* Evaluate top-level expressions in sequence, print last result. */
+      lval* x = lval_sexpr();
+      while (prog->count) {
+        lval_del(x);
+        x = lval_eval(fEnv, lval_pop(prog, 0));
+        if (x->type == LVAL_ERR) break;
+      }
+      lval_del(prog);
       lval_println(x);
       lval_del(x);
-      mpc_ast_delete((mpc_ast_t*)r.output);
     } else {
       char* err_str = mpc_err_string(r.error);
       rut_print("%s\n", err_str);
@@ -1797,7 +1931,7 @@ public:
 
 static const std::vector<std::string> kKeywords = {
   "def", "=", "\\", "if", "fun", "do", "let",
-  "->", ".", "new", "load", "error", "print", "println"
+  "->", ".", "::", "new", "load", "error", "print", "println"
 };
 
 static void highlight_rooture(std::string const& input,
@@ -2017,11 +2151,14 @@ static void mcp_thread_fn() {
     return result;
   };
 
-  // Helper: write one JSON-RPC response line to stdout.
+  // Helper: write one JSON-RPC response line to the saved MCP output stream.
+  // Use error_handler_t::replace so invalid UTF-8 in error messages never
+  // throws and kills the process.
   auto send_resp = [](const json& resp) {
-    std::string s = resp.dump() + "\n";
-    fwrite(s.c_str(), 1, s.size(), stdout);
-    fflush(stdout);
+    std::string s = resp.dump(-1, ' ', false,
+                              json::error_handler_t::replace) + "\n";
+    fwrite(s.c_str(), 1, s.size(), g_mcp_out);
+    fflush(g_mcp_out);
   };
 
   json tools = json::array({
@@ -2128,6 +2265,16 @@ int main(int argc, char** argv) {
       g_mcp_mode = true;
   }
 
+  /* In MCP mode save the real stdout fd for JSON-RPC, then redirect fd 1 to
+     stderr so that ROOT internals (TEveManager, TApplication, etc.) cannot
+     corrupt the JSON-RPC stream with their own print statements.  All ROOT
+     output will appear on the terminal's stderr where it is still useful. */
+  if (g_mcp_mode) {
+    int saved = dup(STDOUT_FILENO);
+    g_mcp_out = fdopen(saved, "w");
+    dup2(STDERR_FILENO, STDOUT_FILENO);
+  }
+
   /* Create Some Parsers */
   Floating  = mpc_new("floating");
   Number    = mpc_new("number");
@@ -2170,8 +2317,6 @@ int main(int argc, char** argv) {
   /* In MCP mode create the reply pipe (main→MCP thread) */
   if (g_mcp_mode) {
     if (pipe(g_mcp_reply_fds) != 0) { perror("pipe(mcp_reply)"); return 1; }
-    /* Batch mode: no display needed; canvases are saved to files on request */
-    gROOT->SetBatch(true);
   }
 
   /* Bootstrap TApplication so ROOT graphics/gSystem work */
