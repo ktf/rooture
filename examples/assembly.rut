@@ -1,0 +1,113 @@
+;;; assembly.rut
+;;;
+;;; Rooture translation of the ROOT geometry assembly tutorial (geom/assembly.C)
+;;;
+;;; Notes on rooture-specific workarounds:
+;;;   - TMath static methods use the (:: Method Class args...) syntax, e.g.
+;;;     (::Sin TMath x).  A TF1::Eval bridge is used here instead for brevity.
+;;;   - Copy constructors (new TGeoRotation(*rot1)) are not supported; recreate
+;;;     and re-apply the rotations explicitly each time.
+
+(load stdlib.rut)
+
+;;; --- range helper: (range a b) → {a a+1 ... b-1} ---
+(fun {range a b} {
+  if (== a b)
+    {nil}
+    {join (list a) (range (+ a 1) b)}
+})
+
+;;; --- Trig via TMath static methods (:: syntax) ---
+(def {deg2rad} (::DegToRad TMath))
+
+;;; --- Geometry setup ---
+(.Load gSystem "libGeom")
+(def {geom} (new TGeoManager "Assemblies" "Geometry using assemblies"))
+
+;;; --- Materials ---
+(def {matVacuum} (new TGeoMaterial "Vacuum" 0. 0. 0.))
+(def {matAl}     (new TGeoMaterial "Al" 26.98 13 2.7))
+
+;;; --- Media ---
+(def {Vacuum} (new TGeoMedium "Vacuum" 1 matVacuum))
+(def {Al}     (new TGeoMedium "Aluminium" 2 matAl))
+
+;;; --- Top container volume ---
+(def {top} (.MakeBox geom "TOP" Vacuum 1000. 1000. 100.))
+(.SetTopVolume geom top)
+
+;;; --- Tooth-plate assembly ---
+(def {tplate} (new TGeoVolumeAssembly "TOOTHPLATE"))
+
+(def {ntooth} 5)
+(def {xplate} 25.)
+(def {yplate} 50.)
+(def {xtooth} 10.)
+(def {ytooth} (* 0.5 (/ yplate ntooth)))
+(def {dshift} (+ (* 2. xplate) xtooth))
+
+(def {plate} (.MakeBox geom "PLATE" Al xplate yplate 1.))
+(.SetLineColor plate 4)   ; kBlue
+
+(def {tooth} (.MakeBox geom "TOOTH" Al xtooth ytooth 1.))
+(.SetLineColor tooth 4)
+
+(.AddNode tplate plate 1)
+
+(map (\ {i} {do
+  (.AddNode tplate tooth (+ i 1)
+    (new TGeoTranslation
+      (+ xplate xtooth)
+      (+ (* -1. yplate) (* (+ (* 4 i) 1) ytooth))
+      0.))
+  (.AddNode tplate tooth (+ ntooth i 1)
+    (new TGeoTranslation
+      (* -1. (+ xplate xtooth))
+      (+ (* -1. yplate) (* (+ (* 4 i) 3) ytooth))
+      0.))
+}) (range 0 ntooth))
+
+;;; --- Hexagonal cell: 6 tooth plates arranged at 60° steps ---
+;;; Note: copy ctor (new TGeoRotation(*rot1)) not available; recreate each time.
+(def {cell} (new TGeoVolumeAssembly "CELL"))
+
+(map (\ {i} {do
+  (= {phi}    (* 60. i))
+  (= {phirad} (* phi deg2rad))
+  (= {xp}     (* dshift (::Sin TMath phirad)))
+  (= {yp}     (* -1. dshift (::Cos TMath phirad)))
+  (= {rot}    (new TGeoRotation))
+  (.RotateX rot 90.)
+  (.RotateZ rot phi)
+  (.AddNode cell tplate (+ i 1) (new TGeoCombiTrans xp yp 0. rot))
+}) (range 0 6))
+
+;;; --- Row: ncells pairs of cells along y ---
+(def {row}    (new TGeoVolumeAssembly "ROW"))
+(def {ncells} 5)
+
+(map (\ {i} {do
+  (= {ycell} (* (+ (* 2 i) 1) (+ dshift 10.)))
+  (.AddNode row cell (+ ncells i 1) (new TGeoTranslation 0. ycell 0.))
+  (.AddNode row cell (- ncells i)   (new TGeoTranslation 0. (* -1. ycell) 0.))
+}) (range 0 ncells))
+
+;;; --- Honeycomb: stagger rows in x; alternate sign of y offset ---
+;;; Even/odd check without % operator: (== i (* 2 (/ i 2)))
+(def {dxrow} (* 3. (* (+ dshift 10.) (::Tan TMath (* 30. deg2rad)))))
+(def {dyrow} (+ dshift 10.))
+(def {nrows} 5)
+
+(map (\ {i} {do
+  (= {xrow} (* 0.5 (* (+ (* 2 i) 1) dxrow)))
+  (= {yrow} (* (if (== i (* 2 (/ i 2))) {-0.5} {0.5}) dyrow))
+  (.AddNode top row (+ nrows i 1) (new TGeoTranslation xrow yrow 0.))
+  (.AddNode top row (- nrows i)   (new TGeoTranslation (* -1. xrow) (* -1. yrow) 0.))
+}) (range 0 nrows))
+
+;;; --- Close geometry ---
+(.CloseGeometry geom)
+
+;;; --- Visualisation ---
+(.SetVisLevel geom 4)
+(.Draw (.GetTopVolume geom))
