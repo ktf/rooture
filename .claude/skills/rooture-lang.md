@@ -38,6 +38,16 @@ Strings use double quotes. Bare symbols are passed as identifiers (e.g. ROOT nam
 ```
 Note: inside `doto` blocks, method names are bare symbols (no dot prefix).
 
+A step of the form `{>> {Method1 args...} {Method2 args...} ...}` threads the object
+through a mini-pipeline — useful when a sub-object is needed only to call a follow-up
+method on it:
+```
+(doto h
+  {>> {GetXaxis} {SetTitle "x [GeV]"}}   ; h.GetXaxis() → SetTitle on the axis
+  {Draw}
+)
+```
+
 ### Threading macro (`->`)
 ```
 (-> expr

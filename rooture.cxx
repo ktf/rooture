@@ -20,6 +20,7 @@
 #include "TInterpreter.h"
 #include "TMethod.h"
 #include "TFile.h"
+#include "TStyle.h"
 #include "TRandom.h"
 #include "TObjString.h"
 #include "TCollection.h"
@@ -1817,17 +1818,35 @@ lval *builtin_new(lenv *e, lval* a) {
   LASSERT(a, a->count >= 1,
     "Function 'new' needs at least 1 argument: <class name>.");
   LASSERT_TYPE("new", a, 0, LVAL_STR);
-  const char *className = a->cell[0]->str;
-  TClass *cls = TClass::GetClass(className);
-  if (!cls)
-    return lval_err("Unknown class '%s'", className);
+  std::string className = a->cell[0]->str;  // copy before lval_del
+  TClass *cls = TClass::GetClass(className.c_str());
+  if (!cls) {
+    lval_del(a);
+    return lval_err("Unknown class '%s'", className.c_str());
+  }
   std::string args = lval_to_cpp_arg(e, a, 1);
-  std::string ctorLine = std::string("new ") + className + "(" + args + ");";
-  void *obj = (void *)gInterpreter->Calc(ctorLine.c_str());
   lval_del(a);
+
+  // Try direct args first; if that fails (e.g. pointer where reference
+  // expected), retry with TOBJ pointer args dereferenced: ((T*)p) → (*((T*)p))
+  static const std::regex ctor_arg_re(R"(\(\([^)*]+\*\)(0x[0-9a-fA-F]+)\)(?!->))");
+  auto try_ctor = [&](const std::string& ctorArgs) -> void* {
+    std::string expr = "new " + className + "(" + ctorArgs + ");";
+    return (void*)gInterpreter->Calc(expr.c_str());
+  };
+  void *obj = try_ctor(args);
+  if (!obj) {
+    std::string derefed = std::regex_replace(args, ctor_arg_re, "(*$&)");
+    if (derefed != args)
+      obj = try_ctor(derefed);
+  }
   if (!obj)
-    return lval_err("Constructor failed for '%s'", className);
-  return lval_tobj(obj, cls);
+    return lval_err("Constructor failed for '%s'", className.c_str());
+  // Use typeid-based TClass lookup so template instantiations resolve correctly
+  TClass* real_cls = (TClass*)gInterpreter->Calc(
+      ("(Long_t)TClass::GetClass(typeid(*((" + className + "*)" +
+       ptr_to_hex(obj) + ")))").c_str());
+  return lval_tobj(obj, real_cls ? real_cls : cls);
 }
 
 // Invokes a method
@@ -1939,6 +1958,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_global_object(e, "gPad",         gPad,         TClass::GetClass("TVirtualPad"));
   lenv_add_global_object(e, "gDirectory",   gDirectory,   TClass::GetClass("TDirectory"));
   lenv_add_global_object(e, "gRandom",      gRandom,      TClass::GetClass("TRandom"));
+  lenv_add_global_object(e, "gStyle",       gStyle,       TClass::GetClass("TStyle"));
 
   // Register the callable bridge by address so Cling's JIT can call it
   // without relying on symbol export (-rdynamic/-export_dynamic).
