@@ -1676,6 +1676,7 @@ void lenv_add_global_object(lenv* e, const char* name, void *obj, TClass *cls) {
 }
 
 static std::vector<std::string> load_path;
+static std::map<std::string, std::string> g_annotations;
 
 static std::string executable_dir() {
 #ifdef __APPLE__
@@ -1959,6 +1960,37 @@ lval* builtin_save_png(lenv* e, lval* a) {
   return res;
 }
 
+// (annotate sym "text") — attach a documentation string to a symbol name.
+// The symbol auto-converts to a string at the call site, so both
+//   (annotate myplot "description")  and  (annotate "myplot" "description")
+// are accepted.
+lval* builtin_annotate(lenv* e, lval* a) {
+  LASSERT_NUM("annotate", a, 2);
+  LASSERT(a, a->cell[0]->type == LVAL_STR || a->cell[0]->type == LVAL_SYM,
+          "'annotate' first argument must be a symbol or string");
+  LASSERT_TYPE("annotate", a, 1, LVAL_STR);
+
+  const char* name = (a->cell[0]->type == LVAL_STR) ? a->cell[0]->str : a->cell[0]->sym;
+  g_annotations[name] = a->cell[1]->str;
+
+  lval* res = lval_str(a->cell[1]->str);
+  lval_del(a);
+  return res;
+}
+
+// (annotations) — return all annotations as a Q-expression of {name text} pairs.
+lval* builtin_annotations(lenv* e, lval* a) {
+  lval_del(a);
+  lval* result = lval_qexpr();
+  for (const auto& kv : g_annotations) {
+    lval* pair = lval_qexpr();
+    lval_add(pair, lval_str(kv.first.c_str()));
+    lval_add(pair, lval_str(kv.second.c_str()));
+    lval_add(result, pair);
+  }
+  return result;
+}
+
 void lenv_add_builtins(lenv* e) {
   /* List Functions */
   lenv_add_builtin(e, "list", builtin_list);
@@ -2002,6 +2034,8 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "invoke", builtin_invoke);
   lenv_add_builtin(e, "symbols", builtin_symbols);
   lenv_add_builtin(e, "canvases", builtin_canvases);
+  lenv_add_builtin(e, "annotate", builtin_annotate);
+  lenv_add_builtin(e, "annotations", builtin_annotations);
   lenv_add_builtin(e, "save-png", builtin_save_png);
 
   /*A few TObjects */
@@ -2369,6 +2403,9 @@ static void mcp_thread_fn() {
      {"inputSchema", {{"type","object"},
        {"properties", {{"name", {{"type","string"},{"description","Canvas name"}}}}},
        {"required", {"name"}}}}},
+    {{"name", "list_annotations"},
+     {"description", "List all symbol annotations set via (annotate sym \"text\"). Returns {name annotation} pairs describing user-defined customisation points."},
+     {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
     {{"name", "reload"},
      {"description", "Quit the rooture MCP server so the host can restart it with a freshly built binary. Call this after rebuilding rooture, then reconnect with /mcp."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
@@ -2406,6 +2443,12 @@ static void mcp_thread_fn() {
 
       } else if (tool == "list_symbols") {
         std::string result = eval_expr("(symbols)");
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",result}}})}
+        }}});
+
+      } else if (tool == "list_annotations") {
+        std::string result = eval_expr("(annotations)");
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
           {"content", json::array({{{"type","text"},{"text",result}}})}
         }}});

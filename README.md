@@ -47,13 +47,13 @@ spectrum on the left (log scale), J/ψ window on the right:
 (load stdlib.rut)
 (def {filteredEvents}
   (-> (::FromCSV ROOT::RDF "http://root.cern/files/tutorials/df014_CsvDataSource_MuRun2010B.csv")
-    {.Filter "Q1 * Q2 == -1"}
-    {.Define "m" "sqrt(pow(E1 + E2, 2) - (pow(px1 + px2, 2) + pow(py1 + py2, 2) + pow(pz1 + pz2, 2)))"}))
+    {.Filter | Q1 * Q2 == -1}
+    {.Define "m" | sqrt(pow(E1 + E2, 2) - (pow(px1 + px2, 2) + pow(py1 + py2, 2) + pow(pz1 + pz2, 2)))}))
 
 (def {fullSpectrum} (.Histo1D filteredEvents
   (new ROOT::RDF::TH1DModel "Spectrum" "Subset of CMS Run 2010B;#mu#mu mass [GeV];Events" 1024 2. 110.) "m"))
 (def {jpsi} (.Histo1D
-  (-> filteredEvents {.Filter "m < 3.25 && m > 2.95"})
+  (-> filteredEvents {.Filter | m < 3.25 && m > 2.95})
   (new ROOT::RDF::TH1DModel "jpsi" "Subset of CMS Run 2010B: J/#psi window;#mu#mu mass [GeV];Events" 128 2.95 3.25) "m"))
 
 (def {dualCanvas} (new TCanvas "DualCanvas" "DualCanvas" 800 512))
@@ -61,7 +61,7 @@ spectrum on the left (log scale), J/ψ window on the right:
 (doto (.cd dualCanvas 1) {SetLogx} {SetLogy})
 (.DrawClone fullSpectrum "Hist")
 (.cd dualCanvas 2)
-(doto jpsi {SetMarkerStyle 20} {DrawClone "HistP"})
+(doto jpsi {SetMarkerStyle 20} {DrawClone | HistP})
 ```
 
 ![CMS dimuon spectrum](docs/df014_CsvDataSource.png)
@@ -76,6 +76,8 @@ spectrum on the left (log scale), J/ψ window on the right:
 - **`->`** — thread a value through a chain of method calls
 - **`@name`** — retrieve any named ROOT object via `gROOT->FindObject`
 - **Lambdas** — pass rooture functions as C++ callables (e.g. `RDataFrame::Define`)
+- **`|` tail strings** — write unquoted strings at the end of a Q-expression: `{.Filter | pt > 10}`
+- **`annotate`** — attach documentation to symbols; MCP-accessible for AI-assisted analysis
 - **MCP server** — connect Claude or any MCP-capable AI assistant for assisted analysis
 
 ---
@@ -135,12 +137,25 @@ Unquoted symbols auto-convert to strings, so `gaus` and `"gaus"` are identical.
 The `{>> {Step1} {Step2}}` form threads the object through a mini-pipeline,
 useful when you need to call a method on a sub-object (e.g. an axis).
 
+### `|` — tail strings in Q-expressions
+
+A `|` inside a Q-expression makes everything after it (up to the closing `}`)
+a single string, without needing quotes:
+
+```scheme
+{.Filter | pt > 20 && eta < 2.4}          ; same as {.Filter "pt > 20 && eta < 2.4"}
+{SetTitle | #tau [ps]}                     ; special characters need no escaping
+{.Define "col" | sqrt(x*x + y*y)}         ; earlier args can still be quoted normally
+```
+
+The only character that cannot appear in a tail string is `}`.
+
 ### `->` — method chaining
 
 ```scheme
 (-> dataFrame
-  {.Filter "pt > 10"}
-  {.Define "eta2" "eta*eta"}
+  {.Filter | pt > 10}
+  {.Define "eta2" | eta*eta}
   {.Histo1D "eta2"}
   {.DrawClone})
 ```
@@ -162,6 +177,33 @@ useful when you need to call a method on a sub-object (e.g. an axis).
 (.Filter df myFilter {"x"})
 ```
 
+### `annotate` — documenting symbols for AI-assisted analysis
+
+Attach a human-readable description to any symbol with `annotate`:
+
+```scheme
+(def {fitRange} {2.9 3.2})
+(annotate fitRange "J/psi fit window in GeV — widen to include more background")
+
+(def {nBins} 128)
+(annotate nBins "Histogram binning — increase for better mass resolution at the cost of stats")
+```
+
+Annotations are accessible at any time:
+
+```scheme
+(annotations)   ; => {{"fitRange" "J/psi fit window ..."} {"nBins" "Histogram binning ..."}}
+```
+
+When running with `--mcp`, the `list_annotations` tool exposes all annotations to the
+connected AI assistant. This lets you mark the meaningful knobs in your analysis script
+so the assistant knows exactly what to suggest changes to:
+
+```scheme
+; The assistant calls list_annotations, sees "nBins", reads its description,
+; and can propose (def {nBins} 256) with the right context.
+```
+
 ---
 
 ## MCP server
@@ -175,6 +217,17 @@ Start with the MCP flag:
 ```sh
 ./build/rooture --mcp
 ```
+
+Available MCP tools:
+
+| Tool | Description |
+|------|-------------|
+| `eval` | Evaluate any rooture expression |
+| `list_symbols` | List all user-defined symbols |
+| `list_annotations` | List all `annotate`d symbols with their descriptions |
+| `list_canvases` | List open ROOT canvases |
+| `get_canvas` | Capture a canvas as a PNG image |
+| `reload` | Restart the server after rebuilding |
 
 ---
 
