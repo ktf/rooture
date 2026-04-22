@@ -139,8 +139,8 @@ useful when you need to call a method on a sub-object (e.g. an axis).
 
 ### `|` — tail strings in Q-expressions
 
-A `|` inside a Q-expression makes everything after it (up to the closing `}`)
-a single string, without needing quotes:
+A `|` inside a Q-expression starts an inline string that runs to end-of-line
+or to the closing `}`, whichever comes first — no quotes needed:
 
 ```scheme
 {.Filter | pt > 20 && eta < 2.4}          ; same as {.Filter "pt > 20 && eta < 2.4"}
@@ -148,7 +148,14 @@ a single string, without needing quotes:
 {.Define "col" | sqrt(x*x + y*y)}         ; earlier args can still be quoted normally
 ```
 
-The only character that cannot appear in a tail string is `}`.
+Multiple `|` strings can appear on separate lines within one Q-expression:
+
+```scheme
+{1 | foo
+ 0 1 2 | bar}           ; equivalent to {1 "foo" 0 1 2 "bar"}
+```
+
+The only character that cannot appear in an inline string is `}`.
 
 ### `->` — method chaining
 

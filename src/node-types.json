@@ -8,11 +8,30 @@
       "required": false,
       "types": [
         {
+          "type": "qexpr_item",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "qexpr_item",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
           "type": "dot_method",
           "named": true
         },
         {
           "type": "float",
+          "named": true
+        },
+        {
+          "type": "inlinestr",
           "named": true
         },
         {
@@ -37,10 +56,6 @@
         },
         {
           "type": "symbol",
-          "named": true
-        },
-        {
-          "type": "tailstr",
           "named": true
         }
       ]
@@ -155,6 +170,10 @@
     "named": true
   },
   {
+    "type": "inlinestr",
+    "named": true
+  },
+  {
     "type": "named_ref",
     "named": true
   },
@@ -168,10 +187,6 @@
   },
   {
     "type": "symbol",
-    "named": true
-  },
-  {
-    "type": "tailstr",
     "named": true
   },
   {

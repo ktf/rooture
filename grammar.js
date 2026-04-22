@@ -30,14 +30,18 @@ module.exports = grammar({
     sexpr: ($) => seq("(", repeat($._expr), ")"),
 
     // Q-expression  (quoted / unevaluated)
-    // {a b | raw tail text} — everything after | up to } becomes a string
-    qexpr: ($) => choice(
-      seq("{", repeat($._expr), "|", $.tailstr, "}"),
-      seq("{", repeat($._expr), "}"),
+    // Each item is either a normal expression or '|' followed by an inline string
+    // that runs to end-of-line or '}'.  Multiple '|' strings can appear in one
+    // Q-expression on separate lines.
+    qexpr: ($) => seq("{", repeat($.qexpr_item), "}"),
+
+    qexpr_item: ($) => choice(
+      seq("|", $.inlinestr),
+      $._expr,
     ),
 
-    // Raw tail text after | inside a Q-expression (cannot contain })
-    tailstr: ($) => token(/[^}]*/),
+    // Raw text after '|': stops at newline or '}'.
+    inlinestr: ($) => token(/[^}\n]*/),
 
     // Literals
     float:  ($) => token(choice(/-?[0-9]+\.[0-9]*/, /-?\.[0-9]+/)),

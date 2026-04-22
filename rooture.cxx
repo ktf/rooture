@@ -130,7 +130,8 @@ mpc_parser_t* Floating;
 mpc_parser_t* Symbol;
 mpc_parser_t* String;
 mpc_parser_t* Comment;
-mpc_parser_t* Tailstr;
+mpc_parser_t* Inlinestr;
+mpc_parser_t* QexprItem;
 mpc_parser_t* Sexpr;
 mpc_parser_t* Qexpr;
 mpc_parser_t* Expr;
@@ -619,45 +620,55 @@ lval* lval_read_str(mpc_ast_t* t) {
   return str;
 }
 
+/* Trim leading and trailing whitespace in-place (returns pointer into buf). */
+static char* trim_ws(char* buf) {
+  char* s = buf;
+  while (*s == ' ' || *s == '\t' || *s == '\r') s++;
+  char* e = s + strlen(s);
+  while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) e--;
+  *e = '\0';
+  return s;
+}
+
 lval* lval_read(mpc_ast_t* t) {
-  /* If Symbol, Number or method return conversion to that type */
-  if (strstr(t->tag, "number")) { return lval_read_num(t); }
+  /* Leaf nodes */
+  if (strstr(t->tag, "number"))   { return lval_read_num(t); }
   if (strstr(t->tag, "floating")) { return lval_read_floating(t); }
-  if (strstr(t->tag, "symbol")) { return lval_sym(t->contents);}
-  /* If string read it */
-  if (strstr(t->tag, "string")) { return lval_read_str(t); }
+  if (strstr(t->tag, "symbol"))   { return lval_sym(t->contents); }
+  if (strstr(t->tag, "string"))   { return lval_read_str(t); }
 
+  /* qexpr_item: either '|' <inlinestr> (→ string) or a plain <expr> */
+  if (strstr(t->tag, "qexpr_item")) {
+    for (int i = 0; i < t->children_num; i++) {
+      if (strstr(t->children[i]->tag, "inlinestr")) {
+        char* raw = strdup(t->children[i]->contents);
+        lval* v = lval_str(trim_ws(raw));
+        free(raw);
+        return v;
+      }
+      if (strstr(t->children[i]->tag, "comment")) return NULL;
+      if (strcmp(t->children[i]->tag, "regex") == 0) continue;
+      if (strcmp(t->children[i]->contents, "|") == 0) continue;
+      return lval_read(t->children[i]);
+    }
+    return NULL;
+  }
 
-  /* If root (>) or sexpr then create empty list */
+  /* Container nodes */
   lval* x = NULL;
   if (strcmp(t->tag, ">") == 0) { x = lval_sexpr(); }
   if (strstr(t->tag, "sexpr"))  { x = lval_sexpr(); }
   if (strstr(t->tag, "qexpr"))  { x = lval_qexpr(); }
 
-  /* Fill this list with any valid expression contained within */
   for (int i = 0; i < t->children_num; i++) {
     if (strcmp(t->children[i]->contents, "(") == 0) { continue; }
     if (strcmp(t->children[i]->contents, ")") == 0) { continue; }
     if (strcmp(t->children[i]->contents, "}") == 0) { continue; }
     if (strcmp(t->children[i]->contents, "{") == 0) { continue; }
-    if (strcmp(t->children[i]->contents, "|") == 0) { continue; }
     if (strcmp(t->children[i]->tag,  "regex") == 0) { continue; }
     if (strstr(t->children[i]->tag, "comment")) { continue; }
-
-    /* {a b | raw tail text} — tailstr holds everything after | up to } */
-    if (strstr(t->children[i]->tag, "tailstr")) {
-      char* raw = strdup(t->children[i]->contents);
-      char* start = raw;
-      while (*start == ' ' || *start == '\t') start++;
-      char* end = start + strlen(start);
-      while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
-      *end = '\0';
-      x = lval_add(x, lval_str(start));
-      free(raw);
-      continue;
-    }
-
-    x = lval_add(x, lval_read(t->children[i]));
+    lval* child = lval_read(t->children[i]);
+    if (child) x = lval_add(x, child);  /* NULL means skipped (e.g. comment in qexpr_item) */
   }
   return x;
 }
@@ -2528,7 +2539,8 @@ int main(int argc, char** argv) {
   Symbol    = mpc_new("symbol");
   String    = mpc_new("string");
   Comment   = mpc_new("comment");
-  Tailstr   = mpc_new("tailstr");
+  Inlinestr = mpc_new("inlinestr");
+  QexprItem = mpc_new("qexpr_item");
   Qexpr     = mpc_new("qexpr");
   Sexpr     = mpc_new("sexpr");
   Expr      = mpc_new("expr");
@@ -2542,16 +2554,16 @@ int main(int argc, char** argv) {
       number   : /-?[0-9]+/ ;                                 \
       symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@]+/ ;          \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \
-      comment  : /;[^\\r\\n]*/ ;                              \
-      tailstr  : /[^}]*/ ;                                    \
-      sexpr    : '(' <expr>* ')' ;                            \
-      qexpr    : '{' <expr>* '|' <tailstr> '}'               \
-               | '{' <expr>* '}' ;                            \
-      expr     : <floating> | <number> | <symbol> | <string>  \
-               | <comment> | <sexpr> | <qexpr>;               \
+      comment    : /;[^\\r\\n]*/ ;                            \
+      inlinestr  : /[^}\\n]*/ ;                               \
+      qexpr_item : '|' <inlinestr> | <expr> ;                 \
+      sexpr      : '(' <expr>* ')' ;                          \
+      qexpr      : '{' <qexpr_item>* '}' ;                    \
+      expr       : <floating> | <number> | <symbol>           \
+                 | <string> | <comment> | <sexpr> | <qexpr>;  \
       lispy    : /^/ <expr>* /$/ ;                            \
     ",
-  Floating, Number, Symbol, String, Comment, Tailstr, Sexpr, Qexpr, Expr, Lispy);
+  Floating, Number, Symbol, String, Comment, Inlinestr, QexprItem, Sexpr, Qexpr, Expr, Lispy);
 
   /* Build the file search path */
   std::string exe_dir = executable_dir();
@@ -2612,8 +2624,8 @@ int main(int argc, char** argv) {
   lenv_del(e);
 
   /* Undefine and delete our parsers */
-  mpc_cleanup(10,
-    Number, Floating, Symbol, String, Comment, Tailstr,
+  mpc_cleanup(11,
+    Number, Floating, Symbol, String, Comment, Inlinestr, QexprItem,
     Sexpr,  Qexpr,  Expr,   Lispy);
 
   return 0;

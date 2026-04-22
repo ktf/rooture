@@ -66,6 +66,35 @@
   {a b | tail string}
   {a b "tail string"})
 
+;;; ── Multiple inline strings in one Q-expression ────────────────────────────
+
+; {1 |foo\n0 1 2|bar} == {1 "foo" 0 1 2 "bar"}
+(assert-eq "multiple inline strings, length"
+  (len {1
+        | foo
+        0 1 2
+        | bar})
+  6)
+
+(assert-eq "multiple inline strings, first string"
+  (nth 1 {1
+          | foo
+          0 1 2
+          | bar})
+  "foo")
+
+(assert-eq "multiple inline strings, last string"
+  (last {1
+         | foo
+         0 1 2
+         | bar})
+  "bar")
+
+(assert-eq "multiple inline strings equals explicit form"
+  {1 | foo
+   0 1 2 | bar}
+  {1 "foo" 0 1 2 "bar"})
+
 ;;; ── Normal Q-exprs unaffected ────────────────────────────────────────────────
 
 (assert-eq "plain Q-expr length unchanged"

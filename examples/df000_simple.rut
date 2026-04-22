@@ -5,6 +5,7 @@
 (load "stdlib.rut")
 
 (-> (new ROOT::RDataFrame 1000)
-    {. Define "x" (\ {} { (. Rndm gRandom) })}
+    {. Define | x
+     (\ {} { (. Rndm gRandom) })}
     {. Histo1D | x}
     {. DrawClone})
