@@ -1,89 +1,184 @@
-Instant gratification:
-======================
+# ROOTure
 
-    (load stdlib.rut)
-    (def {nut} (new TCanvas nut FirstSession 10. 10. 700. (+ 1. 900)))
+**ROOTure** |ˈrʌtʃə| is a Lisp dialect where [ROOT](https://root.cern.ch) is a
+first-class citizen. Instead of writing C++ macros or Python scripts, you get an
+interactive REPL that speaks ROOT natively — create histograms, run RDataFrame
+pipelines, fit functions, and render canvases, all in a concise Lisp syntax.
 
-    (def {a} (new TH1F "foo" "bar" 100 -10. 60.))
+If you know [Clojure](http://clojure.org) and its relationship with Java, you get
+the idea immediately.
 
-    (doto a
-      {SetFillColor 3}
-      {SetFillStyle 3003}
-      {FillRandom gaus 1000}
-      {Draw}
-    )
+---
 
-![docs/gratification.png](docs/gratification.png)
+## Quick taste
 
-What is this?
-=============
+```scheme
+(load stdlib.rut)
 
-ROOTure |ˈrʌtʃə| is my modest attempt at having a LISP-like language where
-[ROOT](https://root.cern.ch) is a first class citizen. This means that
-the language itself not only tries to simplify interoperability with
-ROOT but considers by design the ROOT object model as a fundation of its
-own APIs.
+(doto (new TH1F "h" "Gaussian;x;Events" 100 -4. 4.)
+  {SetFillColorAlpha 9 0.35}
+  {SetLineColor 9}
+  {FillRandom gaus 50000}
+  {Draw})
+```
 
-If you are thinking this is similar to what happens with
-[Clojure](http://clojure.org) and Java, you get exactly the idea.
+![Gaussian histogram](docs/doto_histogram.png)
 
-The initial implementation comes from the very nice tutorial ["Build
-your own LISP"](http://www.buildyourownlisp.com).
+---
 
-This is my Christmas pet project and it's not meant for production but
-you can still amuse yourself with it.
+## RDataFrame pipelines
 
-Compiling & running
-===================
+The `->` threading macro chains RDataFrame operations cleanly:
 
-You can compile ROOTure using cmake:
+```scheme
+(-> (new ROOT::RDataFrame 100000)
+    {.Define "x" "gRandom->Gaus(3.1, 0.05)"}
+    {.Histo1D "x"}
+    {.DrawClone})
+```
 
-    cmake -DROOT_ROOT=<path-of-root-installation> .
-    make
+![RDataFrame demo](docs/rdf_demo.png)
 
-Assuming you have ROOT in your LD_LIBRARY_PATH, you can then execute it
-by doing:
+For more complex pipelines, named intermediate results bind naturally:
 
-    ./rooture
+```scheme
+(def {selected}
+  (-> (::FromCSV ROOT::RDF "muons.csv")
+    {.Filter "Q1 * Q2 == -1"}
+    {.Define "m" "sqrt(pow(E1+E2,2) - (pow(px1+px2,2)+pow(py1+py2,2)+pow(pz1+pz2,2)))"}))
 
-which should present you a prompt. Alternatively you can pass a script
-so that it is executed as a first thing.
+(def {jpsi}
+  (.Histo1D (-> selected {.Filter "m > 2.95 && m < 3.25"})
+    (new ROOT::RDF::TH1DModel "jpsi" "J/#psi;mass [GeV];Events" 128 2.95 3.25)
+    "m"))
+```
 
-    ./rooture my-script.rut
+---
 
-Syntax and standard library
-===========================
+## Key features
 
-Language syntax itself is close to any other LISP out there, so everything is
-expressed in reverse Polish notation, with the a few shortcuts to reduce the
-amount of code written. For example unresolved symbols bind automatically to
-their string counterpart so:
+- **Interactive REPL** with history and tab completion
+- **Seamless ROOT interop** — any ROOT class, method, or global is directly accessible
+- **`doto`** — apply multiple methods to one object (à la Clojure)
+- **`->`** — thread a value through a chain of method calls
+- **`@name`** — retrieve any named ROOT object via `gROOT->FindObject`
+- **Lambdas** — pass rooture functions as C++ callables (e.g. `RDataFrame::Define`)
+- **MCP server** — connect Claude or any MCP-capable AI assistant for assisted analysis
 
-    "foo"
+---
 
-and
+## Building
 
-    foo
+Requires CMake and a ROOT installation (≥ 6.20):
 
-are actually the same. More documentation to come..
+```sh
+cmake -DROOT_ROOT=<path-to-root> -B build
+cmake --build build
+```
 
-ROOT Interoperability
-=====================
+Run interactively:
 
-You can create ROOT objects by using the `new` function, e.g.:
+```sh
+./build/rooture
+```
 
-    (new TH1F Foo Bar 1000 -1 1)
+Or execute a script:
 
-You can invoke methods of a ROOT object via the `.` function. E.g.:
+```sh
+./build/rooture examples/df014_CsvDataSource.rut
+```
 
-    (def {h1} (new TH1F Foo Bar 1000 -1 1))
-    (. FillRandom h1 gaus 10000)
-    (. Draw)
+---
 
-In case you want to invoke multiple methods on the same object, you can use the
-`doto` function, similarly to what happens in clojure:
+## Language overview
 
-    (doto h1
-        {FillRandom gaus 10000}
-        {Draw}
-    )
+### Everything is an expression
+
+```scheme
+(def {h} (new TH1F "foo" "bar" 100 -5. 5.))   ; create object
+(.FillRandom h gaus 10000)                      ; call method
+(.Draw h)                                       ; another method
+```
+
+Unquoted symbols auto-convert to strings, so `gaus` and `"gaus"` are identical.
+
+### Method calls
+
+```scheme
+(.Method obj arg1 arg2)     ; instance method
+(::StaticMethod Class arg)  ; static / namespace-scoped method
+```
+
+### `doto` — multiple methods on one object
+
+```scheme
+(doto canvas
+  {SetGrid}
+  {SetLogx}
+  {>> {GetXaxis} {SetTitle "mass [GeV]"}}   ; sub-object pipeline
+  {Update})
+```
+
+The `{>> {Step1} {Step2}}` form threads the object through a mini-pipeline,
+useful when you need to call a method on a sub-object (e.g. an axis).
+
+### `->` — method chaining
+
+```scheme
+(-> dataFrame
+  {.Filter "pt > 10"}
+  {.Define "eta2" "eta*eta"}
+  {.Histo1D "eta2"}
+  {.DrawClone})
+```
+
+### `@name` — look up named objects
+
+```scheme
+(doto @myCanvas
+  {Modified}
+  {Update})
+```
+
+### Lambdas
+
+```scheme
+(def {myFilter}
+  (\ {x} {> x 0.5}))
+
+(.Filter df myFilter {"x"})
+```
+
+---
+
+## MCP server
+
+ROOTure includes a [Model Context Protocol](https://modelcontextprotocol.io) server
+so AI assistants (e.g. Claude) can evaluate expressions, inspect results, and capture
+canvas images — enabling AI-assisted interactive analysis.
+
+Start with the MCP flag:
+
+```sh
+./build/rooture --mcp
+```
+
+---
+
+## Examples
+
+| File | Description |
+|------|-------------|
+| `examples/draw_histo.rut` | Basic histogram with fill style |
+| `examples/df000_simple.rut` | Minimal RDataFrame pipeline |
+| `examples/df014_CsvDataSource.rut` | CMS dimuon spectrum from CSV |
+| `examples/df101_h1Analysis.rut` | H1 D* analysis with fitting |
+| `examples/assembly.rut` | TGeo geometry assembly |
+
+---
+
+## Background
+
+The interpreter started from the ["Build Your Own Lisp"](http://www.buildyourownlisp.com)
+tutorial and evolved into a ROOT-native REPL. It uses ROOT's Cling/LLVM JIT to dispatch
+method calls, so you get the full power of C++ ROOT without writing C++.

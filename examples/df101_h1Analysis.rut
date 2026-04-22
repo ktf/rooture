@@ -1,0 +1,92 @@
+;;; df101_h1Analysis.rut
+;;;
+;;; Rooture translation of the ROOT RDataFrame H1 analysis tutorial (df101_h1Analysis.C)
+;;;
+;;; Notes:
+;;;   - All lambda-based Filter calls are converted to string expressions so RDF
+;;;     can JIT-compile them; RVec indexing like "nhitrp[ik-1]" works fine as strings.
+;;;   - fdm5 and fdm2 are expressed as TFormula strings (dxbin = 0.001 inlined).
+;;;   - gStyle and gDirectory are pre-registered ROOT globals in rooture.
+;;;   - @name retrieves any named ROOT object via gROOT->FindObject.
+
+(load stdlib.rut)
+
+;;; --- Load H1 data from CERN EOS via XRootD ---
+(def {chain}
+  (doto (new TChain "h42")
+    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarmb.root"}
+    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarp1a.root"}
+    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarp1b.root"}
+    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarp2.root"}))
+
+(::EnableImplicitMT ROOT 4)
+
+;;; --- Build RDataFrame and apply selection filters ---
+;;; Lambda filters from the original are written as JIT string expressions.
+(def {selected}
+  (-> (new ROOT::RDataFrame chain)
+    {.Filter "TMath::Abs(md0_d - 1.8646) < 0.04"}
+    {.Filter "ptds_d > 2.5"}
+    {.Filter "TMath::Abs(etads_d) < 1.5"}
+    {.Filter "nhitrp[ik - 1] * nhitrp[ipi - 1] > 1"}
+    {.Filter "rend[ik - 1] - rstart[ik - 1] > 22"}
+    {.Filter "rend[ipi - 1] - rstart[ipi - 1] > 22"}
+    {.Filter "nlhk[ik - 1] > 0.1"}
+    {.Filter "nlhpi[ipi - 1] > 0.1"}
+    {.Filter "nlhpi[ipis - 1] > 0.1"}
+    {.Filter "njets >= 1"}))
+
+;;; --- Define histograms (lazy) ---
+(def {hdmdARP} (.Histo1D selected
+  (new ROOT::RDF::TH1DModel "hdmd" "Dm_d;m_{K#pi#pi} - m_{K#pi}[GeV/c^{2}]" 40 0.13 0.17)
+  "dm_d"))
+
+(def {h2ARP}
+  (.Histo2D (.Define selected "h2_y" "rpd0_t / 0.029979f * 1.8646f / ptd0_d")
+    (new ROOT::RDF::TH2DModel "h2" "ptD0 vs Dm_d" 30 0.135 0.165 30 -3. 6.)
+    "dm_d" "h2_y"))
+
+;;; --- FitAndPlotHdmd ---
+;;; fdm5 as TFormula string (dxbin = (0.17-0.13)/40 = 0.001 inlined):
+(.SetOptFit gStyle)
+(def {c1} (new TCanvas "c1" "h1analysis analysis" 10 10 800 600))
+(doto hdmdARP
+  {>> {GetXaxis} {SetTitleOffset 1.4}})
+(def {hdraw} (.DrawClone hdmdARP))
+(def {f5}
+  (doto (new TF1 "f5"
+    "(x>0.13957)*0.001*([0]*pow(x-0.13957,[1])+[2]/2.5066/[4]*exp(-((x-[3])*(x-[3]))/2./([4]*[4])))"
+    0.139 0.17)
+    {SetParameter 0 1000000.}
+    {SetParameter 1 0.25}
+    {SetParameter 2 2000.}
+    {SetParameter 3 0.1454}
+    {SetParameter 4 0.001}))
+(.Fit hdraw "f5" "lr")
+
+;;; --- FitAndPlotH2 ---
+;;; fdm2 as TFormula string (dxbin=0.001, sigma=0.0012 inlined):
+(def {c2}
+  (doto (new TCanvas "c2" "tauD0" 100 100 800 600)
+    {SetGrid}
+    {SetBottomMargin 0.15}))
+(def {f2}
+  (doto (new TF1 "f2"
+    "(x>0.13957)*0.001*([0]*pow(x-0.13957,0.25)+[1]/2.5066/0.0012*exp(-((x-0.1454)*(x-0.1454))/2./(0.0012*0.0012)))"
+    0.139 0.17)
+    {SetParameter 0 10000.}
+    {SetParameter 1 10.}))
+
+;;; FitSlicesX stores result histograms h2_0, h2_1, h2_2 ... in gDirectory.
+(.FitSlicesX h2ARP f2 0 -1 1 "qln")
+
+;;; @h2_1 retrieves the TH1D created by FitSlicesX via gROOT->FindObject.
+(doto @h2_1
+  {SetDirectory 0}
+  {>> {GetXaxis} {SetTitle "#tau [ps]"}}
+  {SetMarkerStyle 21}
+  {Draw})
+(.Update c2)
+
+(def {line} (new TLine 0. 0. 0. (.GetUymax c2)))
+(.Draw line)
