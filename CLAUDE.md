@@ -27,6 +27,14 @@ Use `=` (not `def`) for local variables inside lambdas.
 ### Static method calls
 `(::Method ClassName args...)` and `(:: Method ClassName args...)` are identical — the `::` prefix on the method symbol is syntactic sugar for the two-token form.
 
+### Namespaced C++ types need no quotes
+The symbol regex includes `:`, so `ROOT::RDF::TH1DModel` is a single symbol and auto-converts to the string `"ROOT::RDF::TH1DModel"`. Write:
+```
+(new ROOT::RDF::TH1DModel "name" "title" 512 2. 110.)
+(::FromCSV ROOT::RDF fileUrl)
+```
+No quoting needed for namespaced class or namespace names.
+
 ### `if` branches must be Q-expressions
 ```
 (if cond {true-val} {false-val})   ; correct
@@ -35,6 +43,6 @@ Use `=` (not `def`) for local variables inside lambdas.
 
 ## Available skills
 
-- `/rooture` — explains how the rooture language works and its quirks.  Invoke
-  this skill whenever you need context on the language before writing or
-  debugging rooture (`.rut`) code.
+- `rooture-lang` (in `.claude/skills/rooture-lang.md`) — explains how the
+  rooture language works and its quirks.  Invoke this skill whenever you need
+  context on the language before writing or debugging rooture (`.rut`) code.

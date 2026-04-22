@@ -28,9 +28,11 @@
 #include <vector>
 #include <map>
 #include <atomic>
+#include <regex>
 #include <climits>
 #include <algorithm>
 #include <unistd.h>
+#include <fcntl.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
@@ -1005,21 +1007,76 @@ lval* builtin_member(lenv *e, lval *a) {
   // Helper: evaluate base_expr, use typeid to get TClass (works for template
   // instantiations), then heap-copy the result.
   // on_void() is called (and lval_qexpr returned) if the return type is void.
-  auto cling_new_auto_typed = [&](const std::string& base_expr,
+  // If the expression fails to compile (e.g. pointer arg where reference is
+  // expected), automatically retries with TOBJ pointer args dereferenced:
+  //   ((Type*)0xADDR)  →  (*((Type*)0xADDR))
+  auto cling_new_auto_typed = [&](const std::string& orig_expr,
                                    std::function<void()> on_void) -> lval* {
     static std::atomic<int> rut_tmp_n{0};
+
+    // Try to find a compilable form of expr. Tries up to four combinations:
+    //   1. direct(orig_args)   — e.g. ((Cls*)ptr)->Method(((ArgCls*)p))
+    //   2. direct(deref_args)  — e.g. ((Cls*)ptr)->Method(*((ArgCls*)p))   [ref mismatch]
+    //   3. arrow(orig_args)    — e.g. (*((Cls*)ptr))->Method(((ArgCls*)p)) [smart-ptr]
+    //   4. arrow(deref_args)   — e.g. (*((Cls*)ptr))->Method(*((ArgCls*)p))
+    // Returns {best_expr, alias} — alias may be undefined if all forms fail.
+    // tobj_arg_re: matches ((Type*)0xHEX) in argument position (not followed by ->)
+    static const std::regex tobj_arg_re(R"(\(\([^)*]+\*\)(0x[0-9a-fA-F]+)\)(?!->))");
+    // tobj_obj_re: matches (capture)-> at object position; $1 = ((Type*)0xHEX) without ->
+    static const std::regex tobj_obj_re(R"((\(\([^)*]+\*\)(0x[0-9a-fA-F]+)\))->)");
+    auto probe = [&](const std::string& e) -> std::pair<std::string,std::string> {
+      std::string n  = std::to_string(rut_tmp_n++);
+      std::string al = "__rut_t" + n;
+      gInterpreter->ProcessLine(("using " + al + " = decltype(" + e + ");").c_str());
+      // sizeof(void) is invalid — use conditional to treat void as char for the size check
+      bool ok = (bool)(Long_t)gInterpreter->Calc(
+          ("(Long_t)sizeof(std::conditional_t<std::is_void<" + al + ">::value,char," + al + ">)").c_str());
+      if (g_debug) std::cout << "Cling probe (" << (ok?"ok":"fail") << "): " << e << std::endl;
+      return {ok ? e : "", al};
+    };
+    auto deref_args = [&](const std::string& e){ return std::regex_replace(e, tobj_arg_re, "(*$&)"); };
+    // arrow_form: dereference object pointer so operator-> is called: ((Cls*)ptr)-> → (*((Cls*)ptr))->
+    auto arrow_form = [&](const std::string& e){ return std::regex_replace(e, tobj_obj_re, "(*$1)->"); };
+
+    auto pick_expr = [&](const std::string& orig) -> std::pair<std::string,std::string> {
+      // 1. direct, orig args
+      auto [e1, al1] = probe(orig);
+      if (!e1.empty()) return {e1, al1};
+      // 2. direct, deref args (handles pointer-where-reference-expected)
+      std::string da = deref_args(orig);
+      if (da != orig) {
+        auto [e2, al2] = probe(da);
+        if (!e2.empty()) return {e2, al2};
+      }
+      // 3. arrow (operator->), orig args (handles smart-pointer dispatch)
+      std::string ar = arrow_form(orig);
+      if (ar != orig) {
+        auto [e3, al3] = probe(ar);
+        if (!e3.empty()) return {e3, al3};
+        // 4. arrow + deref args
+        std::string ar_da = deref_args(ar);
+        if (ar_da != ar) {
+          auto [e4, al4] = probe(ar_da);
+          if (!e4.empty()) return {e4, al4};
+        }
+      }
+      // All forms failed — return orig with whatever alias (likely undefined)
+      std::string n = std::to_string(rut_tmp_n++);
+      std::string al = "__rut_t" + n;
+      gInterpreter->ProcessLine(("using " + al + " = decltype(" + orig + ");").c_str());
+      return {orig, al};
+    };
+
+    auto [base_expr, alias] = pick_expr(orig_expr);
     std::string n_str = std::to_string(rut_tmp_n++);
-    std::string alias = "__rut_t" + n_str;
     std::string var   = "__rut_r" + n_str;
 
-    // Use decltype to check the return type — valid even when it is void.
-    std::string type_decl = "using " + alias + " = decltype(" + base_expr + ");";
-    if (g_debug) std::cout << "Cling type-check: " << type_decl << std::endl;
-    gInterpreter->ProcessLine(type_decl.c_str());
     bool is_void = (bool)(Long_t)gInterpreter->Calc(
         ("(Long_t)std::is_void<" + alias + ">::value").c_str());
     if (is_void) {
-      on_void();
+      // Use base_expr (best compilable form) rather than on_void() which may
+      // use the original form before pick_expr selected the arrow/deref variant.
+      gInterpreter->ProcessLine((base_expr + ";").c_str());
       return lval_qexpr();
     }
 
@@ -1039,9 +1096,28 @@ lval* builtin_member(lenv *e, lval *a) {
       return lval_tobj(result, ret_cls);
     }
 
+    // Store result in an auto variable (strips reference qualifiers from return type).
     std::string decl = "auto " + var + " = " + base_expr + ";";
     if (g_debug) std::cout << "Cling decl: " << decl << std::endl;
     gInterpreter->ProcessLine(decl.c_str());
+
+    // Check scalar types on the auto-deduced (ref-stripped) variable type.
+    bool is_integral = (bool)(Long_t)gInterpreter->Calc(
+        ("(Long_t)std::is_integral<decltype(" + var + ")>::value").c_str());
+    if (is_integral) {
+      Long_t ival = gInterpreter->Calc(("(Long_t)" + var).c_str());
+      return lval_num((long)ival);
+    }
+
+    bool is_fp = (bool)(Long_t)gInterpreter->Calc(
+        ("(Long_t)std::is_floating_point<decltype(" + var + ")>::value").c_str());
+    if (is_fp) {
+      std::string fvar = "__rut_f" + n_str;
+      gInterpreter->ProcessLine(("double " + fvar + " = (double)" + var + ";").c_str());
+      Long_t raw = gInterpreter->Calc(("*reinterpret_cast<Long_t*>(&" + fvar + ")").c_str());
+      double dval; memcpy(&dval, &raw, sizeof(dval));
+      return lval_floating(dval);
+    }
     TClass* ret_cls = (TClass*)gInterpreter->Calc(
         ("(Long_t)TClass::GetClass(typeid(" + var + "))").c_str());
     void* result = (void*)gInterpreter->Calc(
@@ -1081,14 +1157,11 @@ lval* builtin_member(lenv *e, lval *a) {
       }
     }
     if (!mc.IsValid()) {
-      // TMethodCall can't resolve operator-> on template classes — use Cling.
-      // For template classes (smart pointers), dereference first: (*(Cls*)ptr)->method()
-      // For plain classes, use direct pointer form: ((Cls*)ptr)->method()
-      bool is_template = class_name.find('<') != std::string::npos;
-      std::string fallback_base = is_template
-        ? "(*(" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
-        : "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->";
-      fallback_base += method_name + "(" + args + ")";
+      // TMethodCall can't resolve methods on template classes — use Cling.
+      // pick_expr inside cling_new_auto_typed tries direct, arg-deref, arrow,
+      // and arrow+arg-deref forms automatically.
+      std::string fallback_base = "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
+                                + method_name + "(" + args + ")";
       if (g_debug) std::cout << "Cling fallback: " << fallback_base << std::endl;
       return cling_new_auto_typed(fallback_base,
         [&]{ gInterpreter->ProcessLine((fallback_base + ";").c_str()); });
@@ -1204,6 +1277,22 @@ lval* builtin_static(lenv* e, lval* a) {
         ("*reinterpret_cast<Long_t*>(&" + var + ")").c_str());
     double dval; memcpy(&dval, &raw, sizeof(dval));
     return lval_floating(dval);
+  }
+
+  // Value-type class/struct return (e.g. RDataFrame, RNode) — heap-allocate.
+  // Construct directly from the expression so move-only types (like RDataFrame)
+  // are move-constructed rather than copy-constructed.
+  if (calc_bool("std::is_class<" + alias + ">::value")) {
+    std::string var = "__rut_sV" + ns;
+    gInterpreter->ProcessLine(
+        ("auto* " + var + " = new " + alias + "(" + base + ");").c_str());
+    void* result = (void*)gInterpreter->Calc(("(Long_t)" + var).c_str());
+    if (!result)
+      return lval_err("Static '%s::%s' returned null",
+                      class_name.c_str(), method_name.c_str());
+    TClass* ret_cls = (TClass*)gInterpreter->Calc(
+        ("(Long_t)TClass::GetClass(typeid(*" + var + "))").c_str());
+    return lval_tobj(result, ret_cls);
   }
 
   // Integral / enum / other scalar
@@ -1884,9 +1973,17 @@ public:
     mpc_result_t r;
     const char* src = g_mcp_mode ? "<mcp>" : "<stdin>";
 
+    int saved_stderr_fd = -1;
+    int stderr_pipe[2] = {-1, -1};
     if (g_mcp_mode) {
       g_capturing = true;
       g_capture_buf.clear();
+      // Redirect stderr to capture Cling diagnostics
+      saved_stderr_fd = dup(STDERR_FILENO);
+      pipe(stderr_pipe);
+      dup2(stderr_pipe[1], STDERR_FILENO);
+      close(stderr_pipe[1]);
+      stderr_pipe[1] = -1;
     }
 
     if (mpc_parse(src, expr.c_str(), Lispy, &r)) {
@@ -1912,6 +2009,26 @@ public:
 
     if (g_mcp_mode) {
       g_capturing = false;
+
+      // Restore stderr and collect any Cling diagnostics
+      if (saved_stderr_fd >= 0) {
+        fflush(stderr);
+        dup2(saved_stderr_fd, STDERR_FILENO);
+        close(saved_stderr_fd);
+        // Drain the pipe (non-blocking)
+        fcntl(stderr_pipe[0], F_SETFL, O_NONBLOCK);
+        char sbuf[4096];
+        ssize_t sn;
+        std::string diag;
+        while ((sn = read(stderr_pipe[0], sbuf, sizeof(sbuf))) > 0)
+          diag.append(sbuf, sn);
+        close(stderr_pipe[0]);
+        if (!diag.empty()) {
+          if (!g_capture_buf.empty()) g_capture_buf += "\n";
+          g_capture_buf += diag;
+        }
+      }
+
       uint32_t rlen = (uint32_t)g_capture_buf.size();
       write(g_mcp_reply_fds[1], &rlen, sizeof(rlen));
       if (rlen > 0) write(g_mcp_reply_fds[1], g_capture_buf.data(), rlen);
@@ -2178,6 +2295,9 @@ static void mcp_thread_fn() {
      {"inputSchema", {{"type","object"},
        {"properties", {{"name", {{"type","string"},{"description","Canvas name"}}}}},
        {"required", {"name"}}}}},
+    {{"name", "reload"},
+     {"description", "Quit the rooture MCP server so the host can restart it with a freshly built binary. Call this after rebuilding rooture, then reconnect with /mcp."},
+     {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
   });
 
   std::string line;
@@ -2242,6 +2362,13 @@ static void mcp_thread_fn() {
           }}});
         }
         std::remove(tmp.c_str());
+
+      } else if (tool == "reload") {
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text","rooture MCP server exiting for reload."}}})}
+        }}});
+        fflush(g_mcp_out);
+        std::exit(0);
 
       } else {
         send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
