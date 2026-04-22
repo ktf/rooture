@@ -14,10 +14,10 @@
 ;;; --- Load H1 data from CERN EOS via XRootD ---
 (def {chain}
   (doto (new TChain "h42")
-    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarmb.root"}
-    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarp1a.root"}
-    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarp1b.root"}
-    {Add "root://eospublic.cern.ch//eos/root-eos/h1/dstarp2.root"}))
+    {Add | root://eospublic.cern.ch//eos/root-eos/h1/dstarmb.root}
+    {Add | root://eospublic.cern.ch//eos/root-eos/h1/dstarp1a.root}
+    {Add | root://eospublic.cern.ch//eos/root-eos/h1/dstarp1b.root}
+    {Add | root://eospublic.cern.ch//eos/root-eos/h1/dstarp2.root}))
 
 (::EnableImplicitMT ROOT 4)
 
@@ -25,16 +25,16 @@
 ;;; Lambda filters from the original are written as JIT string expressions.
 (def {selected}
   (-> (new ROOT::RDataFrame chain)
-    {.Filter "TMath::Abs(md0_d - 1.8646) < 0.04"}
-    {.Filter "ptds_d > 2.5"}
-    {.Filter "TMath::Abs(etads_d) < 1.5"}
-    {.Filter "nhitrp[ik - 1] * nhitrp[ipi - 1] > 1"}
-    {.Filter "rend[ik - 1] - rstart[ik - 1] > 22"}
-    {.Filter "rend[ipi - 1] - rstart[ipi - 1] > 22"}
-    {.Filter "nlhk[ik - 1] > 0.1"}
-    {.Filter "nlhpi[ipi - 1] > 0.1"}
-    {.Filter "nlhpi[ipis - 1] > 0.1"}
-    {.Filter "njets >= 1"}))
+    {.Filter | TMath::Abs(md0_d - 1.8646) < 0.04}
+    {.Filter | ptds_d > 2.5}
+    {.Filter | TMath::Abs(etads_d) < 1.5}
+    {.Filter | nhitrp[ik - 1] * nhitrp[ipi - 1] > 1}
+    {.Filter | rend[ik - 1] - rstart[ik - 1] > 22}
+    {.Filter | rend[ipi - 1] - rstart[ipi - 1] > 22}
+    {.Filter | nlhk[ik - 1] > 0.1}
+    {.Filter | nlhpi[ipi - 1] > 0.1}
+    {.Filter | nlhpi[ipis - 1] > 0.1}
+    {.Filter | njets >= 1}))
 
 ;;; --- Define histograms (lazy) ---
 (def {hdmdARP} (.Histo1D selected
@@ -83,7 +83,7 @@
 ;;; @h2_1 retrieves the TH1D created by FitSlicesX via gROOT->FindObject.
 (doto @h2_1
   {SetDirectory 0}
-  {>> {GetXaxis} {SetTitle "#tau [ps]"}}
+  {>> {GetXaxis} {SetTitle | #tau [ps]}}
   {SetMarkerStyle 21}
   {Draw})
 (.Update c2)

@@ -21,7 +21,6 @@ module.exports = grammar({
         $.float,        // must come before number (more specific)
         $.number,
         $.string,
-        $.pipe,
         $.dot_method,   // must come before symbol (.Method)
         $.named_ref,    // must come before symbol (@name)
         $.symbol,
@@ -31,11 +30,14 @@ module.exports = grammar({
     sexpr: ($) => seq("(", repeat($._expr), ")"),
 
     // Q-expression  (quoted / unevaluated)
-    // {a b | tail string} — | joins remaining tokens as a string literal
-    qexpr: ($) => seq("{", repeat($._expr), "}"),
+    // {a b | raw tail text} — everything after | up to } becomes a string
+    qexpr: ($) => choice(
+      seq("{", repeat($._expr), "|", $.tailstr, "}"),
+      seq("{", repeat($._expr), "}"),
+    ),
 
-    // Pipe — tail-string separator inside Q-expressions
-    pipe: ($) => token("|"),
+    // Raw tail text after | inside a Q-expression (cannot contain })
+    tailstr: ($) => token(/[^}]*/),
 
     // Literals
     float:  ($) => token(choice(/-?[0-9]+\.[0-9]*/, /-?\.[0-9]+/)),

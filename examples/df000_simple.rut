@@ -6,5 +6,5 @@
 
 (-> (new ROOT::RDataFrame 1000)
     {. Define "x" (\ {} { (. Rndm gRandom) })}
-    {. Histo1D "x"}
+    {. Histo1D | x}
     {. DrawClone})

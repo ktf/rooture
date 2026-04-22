@@ -34,10 +34,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "pipe"
-        },
-        {
-          "type": "SYMBOL",
           "name": "dot_method"
         },
         {
@@ -71,30 +67,63 @@
       ]
     },
     "qexpr": {
-      "type": "SEQ",
+      "type": "CHOICE",
       "members": [
         {
-          "type": "STRING",
-          "value": "{"
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "{"
+            },
+            {
+              "type": "REPEAT",
+              "content": {
+                "type": "SYMBOL",
+                "name": "_expr"
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "|"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "tailstr"
+            },
+            {
+              "type": "STRING",
+              "value": "}"
+            }
+          ]
         },
         {
-          "type": "REPEAT",
-          "content": {
-            "type": "SYMBOL",
-            "name": "_expr"
-          }
-        },
-        {
-          "type": "STRING",
-          "value": "}"
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "{"
+            },
+            {
+              "type": "REPEAT",
+              "content": {
+                "type": "SYMBOL",
+                "name": "_expr"
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "}"
+            }
+          ]
         }
       ]
     },
-    "pipe": {
+    "tailstr": {
       "type": "TOKEN",
       "content": {
-        "type": "STRING",
-        "value": "|"
+        "type": "PATTERN",
+        "value": "[^}]*"
       }
     },
     "float": {

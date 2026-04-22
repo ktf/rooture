@@ -24,10 +24,6 @@
           "named": true
         },
         {
-          "type": "pipe",
-          "named": true
-        },
-        {
           "type": "qexpr",
           "named": true
         },
@@ -41,6 +37,10 @@
         },
         {
           "type": "symbol",
+          "named": true
+        },
+        {
+          "type": "tailstr",
           "named": true
         }
       ]
@@ -68,10 +68,6 @@
         },
         {
           "type": "number",
-          "named": true
-        },
-        {
-          "type": "pipe",
           "named": true
         },
         {
@@ -116,10 +112,6 @@
         },
         {
           "type": "number",
-          "named": true
-        },
-        {
-          "type": "pipe",
           "named": true
         },
         {
@@ -171,10 +163,6 @@
     "named": true
   },
   {
-    "type": "pipe",
-    "named": true
-  },
-  {
     "type": "string",
     "named": true
   },
@@ -183,7 +171,15 @@
     "named": true
   },
   {
+    "type": "tailstr",
+    "named": true
+  },
+  {
     "type": "{",
+    "named": false
+  },
+  {
+    "type": "|",
     "named": false
   },
   {

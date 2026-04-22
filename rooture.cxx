@@ -130,7 +130,7 @@ mpc_parser_t* Floating;
 mpc_parser_t* Symbol;
 mpc_parser_t* String;
 mpc_parser_t* Comment;
-mpc_parser_t* Pipe;
+mpc_parser_t* Tailstr;
 mpc_parser_t* Sexpr;
 mpc_parser_t* Qexpr;
 mpc_parser_t* Expr;
@@ -635,38 +635,26 @@ lval* lval_read(mpc_ast_t* t) {
   if (strstr(t->tag, "qexpr"))  { x = lval_qexpr(); }
 
   /* Fill this list with any valid expression contained within */
-  int is_qexpr = strstr(t->tag, "qexpr") != NULL;
   for (int i = 0; i < t->children_num; i++) {
     if (strcmp(t->children[i]->contents, "(") == 0) { continue; }
     if (strcmp(t->children[i]->contents, ")") == 0) { continue; }
     if (strcmp(t->children[i]->contents, "}") == 0) { continue; }
     if (strcmp(t->children[i]->contents, "{") == 0) { continue; }
+    if (strcmp(t->children[i]->contents, "|") == 0) { continue; }
     if (strcmp(t->children[i]->tag,  "regex") == 0) { continue; }
     if (strstr(t->children[i]->tag, "comment")) { continue; }
 
-    /* {a b | tail string} — join all tokens after | as a single string */
-    if (is_qexpr && strstr(t->children[i]->tag, "pipe")) {
-      size_t buf_len = 1;
-      for (int j = i + 1; j < t->children_num; j++) {
-        const char* c = t->children[j]->contents;
-        if (strcmp(c, "}") == 0) break;
-        if (strcmp(t->children[j]->tag, "regex") == 0) continue;
-        buf_len += strlen(c) + 1;
-      }
-      char* buf = (char*)malloc(buf_len);
-      buf[0] = '\0';
-      int first = 1;
-      for (int j = i + 1; j < t->children_num; j++) {
-        const char* c = t->children[j]->contents;
-        if (strcmp(c, "}") == 0) break;
-        if (strcmp(t->children[j]->tag, "regex") == 0) continue;
-        if (!first) strcat(buf, " ");
-        strcat(buf, c);
-        first = 0;
-      }
-      x = lval_add(x, lval_str(buf));
-      free(buf);
-      break;
+    /* {a b | raw tail text} — tailstr holds everything after | up to } */
+    if (strstr(t->children[i]->tag, "tailstr")) {
+      char* raw = strdup(t->children[i]->contents);
+      char* start = raw;
+      while (*start == ' ' || *start == '\t') start++;
+      char* end = start + strlen(start);
+      while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+      *end = '\0';
+      x = lval_add(x, lval_str(start));
+      free(raw);
+      continue;
     }
 
     x = lval_add(x, lval_read(t->children[i]));
@@ -2497,7 +2485,7 @@ int main(int argc, char** argv) {
   Symbol    = mpc_new("symbol");
   String    = mpc_new("string");
   Comment   = mpc_new("comment");
-  Pipe      = mpc_new("pipe");
+  Tailstr   = mpc_new("tailstr");
   Qexpr     = mpc_new("qexpr");
   Sexpr     = mpc_new("sexpr");
   Expr      = mpc_new("expr");
@@ -2512,14 +2500,15 @@ int main(int argc, char** argv) {
       symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@]+/ ;          \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \
       comment  : /;[^\\r\\n]*/ ;                              \
-      pipe     : '|' ;                                        \
+      tailstr  : /[^}]*/ ;                                    \
       sexpr    : '(' <expr>* ')' ;                            \
-      qexpr    : '{' <expr>* '}' ;                            \
+      qexpr    : '{' <expr>* '|' <tailstr> '}'               \
+               | '{' <expr>* '}' ;                            \
       expr     : <floating> | <number> | <symbol> | <string>  \
-               | <comment> | <pipe> | <sexpr> | <qexpr>;      \
+               | <comment> | <sexpr> | <qexpr>;               \
       lispy    : /^/ <expr>* /$/ ;                            \
     ",
-  Floating, Number, Symbol, String, Comment, Pipe, Sexpr, Qexpr, Expr, Lispy);
+  Floating, Number, Symbol, String, Comment, Tailstr, Sexpr, Qexpr, Expr, Lispy);
 
   /* Build the file search path */
   std::string exe_dir = executable_dir();
@@ -2581,7 +2570,7 @@ int main(int argc, char** argv) {
 
   /* Undefine and delete our parsers */
   mpc_cleanup(10,
-    Number, Floating, Symbol, String, Comment, Pipe,
+    Number, Floating, Symbol, String, Comment, Tailstr,
     Sexpr,  Qexpr,  Expr,   Lispy);
 
   return 0;
