@@ -262,7 +262,7 @@
   if (== f {})
     {obj}
     {do
-      (if (== (fst (fst f)) >>)
+      (if (== (head (fst f)) {>>})
         {foldl (\ {cur step} {eval (join {.} (head step) (list cur) (tail step))})
                obj
                (tail (fst f))}
