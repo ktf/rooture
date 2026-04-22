@@ -587,7 +587,7 @@ void lval_print(lval* v) {
     break;
     case LVAL_TOBJ:
       rut_print("<%s @%p>\n", v->cls ? v->cls->GetName() : "object", v->obj);
-      if (v->obj && v->cls) {
+      if (v->obj && v->cls && !v->cls->InheritsFrom("TVirtualPad")) {
         TMethodCall mc(v->cls, "Print", "");
         if (mc.IsValid()) mc.Execute(v->obj);
       }
@@ -1001,6 +1001,13 @@ lval* builtin_member(lenv *e, lval *a) {
   std::string args = lval_to_cpp_arg(e, a, 0);
   lval_del(name); lval_del(obj); lval_del(a);
 
+  // Snapshot gPad before probe calls, which may trigger ROOT event processing
+  // (via TCanvas::Update in the REPL loop) that resets gPad to the main canvas.
+  // Restored just before actual method execution so that Draw/DrawClone go to
+  // the pad that was active when the method call was issued.
+  // Exception: cd() is intentionally changing gPad, so we don't restore for it.
+  TVirtualPad* const pad_snapshot = (method_name != "cd") ? gPad : nullptr;
+
   if (g_debug)
     std::cout << "Executing " << method_name << "(" << args
               << ") on " << class_name << " @" << obj_ptr << std::endl;
@@ -1039,15 +1046,25 @@ lval* builtin_member(lenv *e, lval *a) {
     // arrow_form: dereference object pointer so operator-> is called: ((Cls*)ptr)-> → (*((Cls*)ptr))->
     auto arrow_form = [&](const std::string& e){ return std::regex_replace(e, tobj_obj_re, "(*$1)->"); };
 
+    // If the object class exposes operator->() (smart-pointer pattern), the method
+    // is likely on the pointee rather than the class itself — skip direct Cling forms
+    // and go straight to the arrow forms.  This avoids slow Cling error-recovery on
+    // deep template types (e.g. RResultPtr<TH1D>::DrawClone).
+    // For regular ROOT objects (TCanvas, TH1, RInterface, …) there is no operator->,
+    // so try_direct stays true and direct dispatch is used as usual.
+    bool try_direct = !obj_cls || obj_cls->GetMethodAny("operator->") == nullptr;
+
     auto pick_expr = [&](const std::string& orig) -> std::pair<std::string,std::string> {
-      // 1. direct, orig args
-      auto [e1, al1] = probe(orig);
-      if (!e1.empty()) return {e1, al1};
-      // 2. direct, deref args (handles pointer-where-reference-expected)
-      std::string da = deref_args(orig);
-      if (da != orig) {
-        auto [e2, al2] = probe(da);
-        if (!e2.empty()) return {e2, al2};
+      if (try_direct) {
+        // 1. direct, orig args
+        auto [e1, al1] = probe(orig);
+        if (!e1.empty()) return {e1, al1};
+        // 2. direct, deref args (handles pointer-where-reference-expected)
+        std::string da = deref_args(orig);
+        if (da != orig) {
+          auto [e2, al2] = probe(da);
+          if (!e2.empty()) return {e2, al2};
+        }
       }
       // 3. arrow (operator->), orig args (handles smart-pointer dispatch)
       std::string ar = arrow_form(orig);
@@ -1071,6 +1088,17 @@ lval* builtin_member(lenv *e, lval *a) {
     auto [base_expr, alias] = pick_expr(orig_expr);
     std::string n_str = std::to_string(rut_tmp_n++);
     std::string var   = "__rut_r" + n_str;
+
+    // Restore the pad that was active when builtin_member was entered.
+    // Probe calls and ROOT's post-eval Update() can reset gPad; restoring here
+    // ensures Draw/DrawClone etc. target the pad the user cd'd to.
+    // TObject::DrawClone uses gROOT->GetSelectedPad() (not gPad) to decide
+    // where to draw, and TPad::cd(0) does NOT call gROOT->SetSelectedPad().
+    // So we must set both explicitly.
+    if (pad_snapshot) {
+      pad_snapshot->cd();
+      gROOT->SetSelectedPad(pad_snapshot);
+    }
 
     bool is_void = (bool)(Long_t)gInterpreter->Calc(
         ("(Long_t)std::is_void<" + alias + ">::value").c_str());
@@ -1167,6 +1195,16 @@ lval* builtin_member(lenv *e, lval *a) {
       return cling_new_auto_typed(fallback_base,
         [&]{ gInterpreter->ProcessLine((fallback_base + ";").c_str()); });
     }
+  }
+
+  // Restore gPad and the canvas selected pad before the actual method execute.
+  // The smart-pointer dereference via mc_arrow.Execute above (and any probe
+  // calls) may have left gPad in the wrong state; restoring here ensures
+  // Draw/DrawClone (which uses gROOT->GetSelectedPad()) target the pad that
+  // was active when this member call was issued.
+  if (pad_snapshot) {
+    pad_snapshot->cd();
+    gROOT->SetSelectedPad(pad_snapshot);
   }
 
   switch (mc.ReturnType()) {
