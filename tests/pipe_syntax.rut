@@ -1,0 +1,80 @@
+;;; tests/pipe_syntax.rut — tests for the {a b | tail string} sugar
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/pipe_syntax.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; Helper: print PASS/FAIL and exit 1 on mismatch.
+(def {assert-eq} (\ {label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Basic structure ──────────────────────────────────────────────────────────
+
+; Tail string becomes the last element
+(assert-eq "last element is tail string"
+  (last {a b | hello world})
+  "hello world")
+
+; Q-expr length accounts for the tail string as one element
+(assert-eq "length with two-word tail"
+  (len {a b | hello world})
+  3)
+
+; Non-tail elements are unchanged symbols
+(assert-eq "first element is still a symbol"
+  (fst {x y | some string})
+  x)
+
+(assert-eq "second element is still a symbol"
+  (snd {x y | some string})
+  y)
+
+;;; ── Variations ───────────────────────────────────────────────────────────────
+
+; Single word after pipe
+(assert-eq "single word tail"
+  (last {x | word})
+  "word")
+
+; Nothing before pipe — Q-expr has exactly one element
+(assert-eq "no prefix before pipe, length"
+  (len {| hello world})
+  1)
+
+(assert-eq "no prefix before pipe, value"
+  (fst {| hello world})
+  "hello world")
+
+; Empty tail — pipe at the end produces an empty string
+(assert-eq "empty tail string"
+  (last {x |})
+  "")
+
+;;; ── Equivalence with explicit string ─────────────────────────────────────────
+
+; {a | tail string} must be structurally identical to {a "tail string"}
+(assert-eq "pipe form equals explicit string form"
+  {a b | tail string}
+  {a b "tail string"})
+
+;;; ── Normal Q-exprs unaffected ────────────────────────────────────────────────
+
+(assert-eq "plain Q-expr length unchanged"
+  (len {a b c})
+  3)
+
+(assert-eq "plain Q-expr last element is a symbol"
+  (last {a b c})
+  c)
+
+(print "All pipe-syntax tests passed.")
+(exit 0)
