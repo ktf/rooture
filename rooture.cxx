@@ -2259,7 +2259,7 @@ static void input_thread_fn() {
   };
 
   std::string accumulated;
-  int open_parens = 0;
+  int open_depth = 0;
 
   while (true) {
     const char* prompt = accumulated.empty() ? "ROOTure> " : "      .. ";
@@ -2273,17 +2273,17 @@ static void input_thread_fn() {
 
     std::string line(input);
 
-    // Count parens to support multi-line input
+    // Count parens/braces to support multi-line input
     for (char ch : line) {
-      if (ch == '(') open_parens++;
-      else if (ch == ')') open_parens--;
+      if (ch == '(' || ch == '{') open_depth++;
+      else if (ch == ')' || ch == '}') open_depth--;
     }
 
     if (accumulated.empty()) accumulated = line;
     else accumulated += "\n" + line;
 
-    if (open_parens <= 0) {
-      open_parens = 0;
+    if (open_depth <= 0) {
+      open_depth = 0;
       if (!accumulated.empty() && accumulated.find_first_not_of(" \t\n\r") != std::string::npos) {
         rx.history_add(accumulated);
         send_expr(accumulated);
