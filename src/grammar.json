@@ -34,6 +34,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "pipe"
+        },
+        {
+          "type": "SYMBOL",
           "name": "dot_method"
         },
         {
@@ -85,6 +89,13 @@
           "value": "}"
         }
       ]
+    },
+    "pipe": {
+      "type": "TOKEN",
+      "content": {
+        "type": "STRING",
+        "value": "|"
+      }
     },
     "float": {
       "type": "TOKEN",

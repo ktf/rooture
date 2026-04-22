@@ -65,3 +65,16 @@ endif()
 install(TARGETS rooture RUNTIME DESTINATION bin)
 install(FILES stdlib.rut DESTINATION share/rooture)
 install(DIRECTORY examples/ DESTINATION share/rooture/examples)
+install(DIRECTORY tests/   DESTINATION share/rooture/tests)
+
+# Tests
+enable_testing()
+
+add_test(
+  NAME pipe_syntax
+  COMMAND $<TARGET_FILE:rooture> tests/pipe_syntax.rut
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(pipe_syntax PROPERTIES
+  PASS_REGULAR_EXPRESSION "All pipe-syntax tests passed"
+)

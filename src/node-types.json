@@ -24,6 +24,10 @@
           "named": true
         },
         {
+          "type": "pipe",
+          "named": true
+        },
+        {
           "type": "qexpr",
           "named": true
         },
@@ -64,6 +68,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "pipe",
           "named": true
         },
         {
@@ -108,6 +116,10 @@
         },
         {
           "type": "number",
+          "named": true
+        },
+        {
+          "type": "pipe",
           "named": true
         },
         {
@@ -156,6 +168,10 @@
   },
   {
     "type": "number",
+    "named": true
+  },
+  {
+    "type": "pipe",
     "named": true
   },
   {

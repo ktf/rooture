@@ -125,14 +125,15 @@ struct lval {
 };
 
 /* Parsers */
-mpc_parser_t* Number; 
-mpc_parser_t* Floating; 
-mpc_parser_t* Symbol; 
-mpc_parser_t* String; 
+mpc_parser_t* Number;
+mpc_parser_t* Floating;
+mpc_parser_t* Symbol;
+mpc_parser_t* String;
 mpc_parser_t* Comment;
-mpc_parser_t* Sexpr;  
-mpc_parser_t* Qexpr;  
-mpc_parser_t* Expr; 
+mpc_parser_t* Pipe;
+mpc_parser_t* Sexpr;
+mpc_parser_t* Qexpr;
+mpc_parser_t* Expr;
 mpc_parser_t* Lispy;
 
 /* The environment (context) for functions */
@@ -634,6 +635,7 @@ lval* lval_read(mpc_ast_t* t) {
   if (strstr(t->tag, "qexpr"))  { x = lval_qexpr(); }
 
   /* Fill this list with any valid expression contained within */
+  int is_qexpr = strstr(t->tag, "qexpr") != NULL;
   for (int i = 0; i < t->children_num; i++) {
     if (strcmp(t->children[i]->contents, "(") == 0) { continue; }
     if (strcmp(t->children[i]->contents, ")") == 0) { continue; }
@@ -641,6 +643,32 @@ lval* lval_read(mpc_ast_t* t) {
     if (strcmp(t->children[i]->contents, "{") == 0) { continue; }
     if (strcmp(t->children[i]->tag,  "regex") == 0) { continue; }
     if (strstr(t->children[i]->tag, "comment")) { continue; }
+
+    /* {a b | tail string} — join all tokens after | as a single string */
+    if (is_qexpr && strstr(t->children[i]->tag, "pipe")) {
+      size_t buf_len = 1;
+      for (int j = i + 1; j < t->children_num; j++) {
+        const char* c = t->children[j]->contents;
+        if (strcmp(c, "}") == 0) break;
+        if (strcmp(t->children[j]->tag, "regex") == 0) continue;
+        buf_len += strlen(c) + 1;
+      }
+      char* buf = (char*)malloc(buf_len);
+      buf[0] = '\0';
+      int first = 1;
+      for (int j = i + 1; j < t->children_num; j++) {
+        const char* c = t->children[j]->contents;
+        if (strcmp(c, "}") == 0) break;
+        if (strcmp(t->children[j]->tag, "regex") == 0) continue;
+        if (!first) strcat(buf, " ");
+        strcat(buf, c);
+        first = 0;
+      }
+      x = lval_add(x, lval_str(buf));
+      free(buf);
+      break;
+    }
+
     x = lval_add(x, lval_read(t->children[i]));
   }
   return x;
@@ -2443,11 +2471,14 @@ static void mcp_thread_fn() {
 }
 
 int main(int argc, char** argv) {
+  const char* g_script_file = nullptr;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--debug") == 0)
       g_debug = true;
-    if (strcmp(argv[i], "--mcp") == 0)
+    else if (strcmp(argv[i], "--mcp") == 0)
       g_mcp_mode = true;
+    else if (argv[i][0] != '-' && !g_script_file)
+      g_script_file = argv[i];
   }
 
   /* In MCP mode save the real stdout fd for JSON-RPC, then redirect fd 1 to
@@ -2466,6 +2497,7 @@ int main(int argc, char** argv) {
   Symbol    = mpc_new("symbol");
   String    = mpc_new("string");
   Comment   = mpc_new("comment");
+  Pipe      = mpc_new("pipe");
   Qexpr     = mpc_new("qexpr");
   Sexpr     = mpc_new("sexpr");
   Expr      = mpc_new("expr");
@@ -2480,13 +2512,14 @@ int main(int argc, char** argv) {
       symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@]+/ ;          \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \
       comment  : /;[^\\r\\n]*/ ;                              \
+      pipe     : '|' ;                                        \
       sexpr    : '(' <expr>* ')' ;                            \
       qexpr    : '{' <expr>* '}' ;                            \
       expr     : <floating> | <number> | <symbol> | <string>  \
-               | <comment> | <sexpr> | <qexpr>;               \
+               | <comment> | <pipe> | <sexpr> | <qexpr>;      \
       lispy    : /^/ <expr>* /$/ ;                            \
     ",
-  Floating, Number, Symbol, String, Comment, Sexpr, Qexpr, Expr, Lispy);
+  Floating, Number, Symbol, String, Comment, Pipe, Sexpr, Qexpr, Expr, Lispy);
 
   /* Build the file search path */
   std::string exe_dir = executable_dir();
@@ -2507,6 +2540,28 @@ int main(int argc, char** argv) {
   /* Bootstrap TApplication so ROOT graphics/gSystem work */
   TApplication app("rooture", &argc, argv);
 
+  /* Script mode: load a file and exit without starting the event loop */
+  if (g_script_file) {
+    mpc_result_t r;
+    if (mpc_parse_contents(g_script_file, Lispy, &r)) {
+      lval* expr = lval_read((mpc_ast_t*)r.output);
+      mpc_ast_delete((mpc_ast_t*)r.output);
+      while (expr->count) {
+        lval* x = lval_eval(e, lval_pop(expr, 0));
+        if (x->type == LVAL_ERR) { lval_println(x); lval_del(x); lval_del(expr); exit(1); }
+        lval_del(x);
+      }
+      lval_del(expr);
+    } else {
+      char* err_msg = mpc_err_string(r.error);
+      mpc_err_delete(r.error);
+      fprintf(stderr, "%s\n", err_msg);
+      free(err_msg);
+      exit(1);
+    }
+    exit(0);
+  }
+
   /* Register the pipe read-end with gSystem's event loop */
   PipeHandler* ph = new PipeHandler(e);
   ph->Add();
@@ -2525,8 +2580,8 @@ int main(int argc, char** argv) {
   lenv_del(e);
 
   /* Undefine and delete our parsers */
-  mpc_cleanup(9,
-    Number, Floating, Symbol, String, Comment,
+  mpc_cleanup(10,
+    Number, Floating, Symbol, String, Comment, Pipe,
     Sexpr,  Qexpr,  Expr,   Lispy);
 
   return 0;
