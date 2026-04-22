@@ -45,30 +45,23 @@ spectrum on the left (log scale), J/ψ window on the right:
 
 ```scheme
 (load stdlib.rut)
-(def {fileUrl} "http://root.cern/files/tutorials/df014_CsvDataSource_MuRun2010B.csv")
-(def {df} (::FromCSV ROOT::RDF fileUrl))
 (def {filteredEvents}
-  (-> df
+  (-> (::FromCSV ROOT::RDF "http://root.cern/files/tutorials/df014_CsvDataSource_MuRun2010B.csv")
     {.Filter "Q1 * Q2 == -1"}
     {.Define "m" "sqrt(pow(E1 + E2, 2) - (pow(px1 + px2, 2) + pow(py1 + py2, 2) + pow(pz1 + pz2, 2)))"}))
 
 (def {fullSpectrum} (.Histo1D filteredEvents
-  (new ROOT::RDF::TH1DModel "Spectrum" "Subset of CMS Run 2010B;#mu#mu mass [GeV];Events" 1024 2. 110.)
-  "m"))
+  (new ROOT::RDF::TH1DModel "Spectrum" "Subset of CMS Run 2010B;#mu#mu mass [GeV];Events" 1024 2. 110.) "m"))
 (def {jpsi} (.Histo1D
   (-> filteredEvents {.Filter "m < 3.25 && m > 2.95"})
-  (new ROOT::RDF::TH1DModel "jpsi" "Subset of CMS Run 2010B: J/#psi window;#mu#mu mass [GeV];Events" 128 2.95 3.25)
-  "m"))
+  (new ROOT::RDF::TH1DModel "jpsi" "Subset of CMS Run 2010B: J/#psi window;#mu#mu mass [GeV];Events" 128 2.95 3.25) "m"))
 
 (def {dualCanvas} (new TCanvas "DualCanvas" "DualCanvas" 800 512))
 (.Divide dualCanvas 2 1)
-(def {leftPad} (.cd dualCanvas 1))
-(.SetLogx leftPad)
-(.SetLogy leftPad)
+(doto (.cd dualCanvas 1) {SetLogx} {SetLogy})
 (.DrawClone fullSpectrum "Hist")
 (.cd dualCanvas 2)
-(.SetMarkerStyle jpsi 20)
-(.DrawClone jpsi "HistP")
+(doto jpsi {SetMarkerStyle 20} {DrawClone "HistP"})
 ```
 
 ![CMS dimuon spectrum](docs/df014_CsvDataSource.png)
