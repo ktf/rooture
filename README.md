@@ -234,6 +234,7 @@ Available MCP tools:
 | `list_annotations` | List all `annotate`d symbols with their descriptions |
 | `list_canvases` | List open ROOT canvases |
 | `get_canvas` | Capture a canvas as a PNG image |
+| `get_window` | Capture a GUI window (`TGFrame`) as a PNG image |
 | `reload` | Restart the server after rebuilding |
 
 ---

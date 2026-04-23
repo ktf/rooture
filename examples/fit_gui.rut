@@ -42,7 +42,7 @@
 (def {fit-row} (new TGHorizontalFrame win 580 36))
 (.AddFrame win fit-row (new TGLayoutHints 65 5 5 2 2))
 
-(.AddFrame fit-row (new TGLabel fit-row "Fit function:") (new TGLayoutHints 36 5 5 4 4))
+(.AddFrame fit-row (new TGLabel fit-row "Fit function:") (new TGLayoutHints 18 5 5 4 4))
 
 (def {combo}
   (doto (new TGComboBox fit-row -1)
@@ -52,18 +52,18 @@
     {AddEntry "pol3" 3}
     {Resize 90 22}
     {Select 0}))
-(.AddFrame fit-row combo (new TGLayoutHints 36 2 15 2 2))
+(.AddFrame fit-row combo (new TGLayoutHints 18 2 15 2 2))
 
 (def {fit-btn} (new TGTextButton fit-row "  Fit  " -1))
-(.AddFrame fit-row fit-btn (new TGLayoutHints 36 5 5 2 2))
+(.AddFrame fit-row fit-btn (new TGLayoutHints 18 5 5 2 2))
 
-;;; ── result label ─────────────────────────────────────────────────────────
-(def {res-lbl} (new TGLabel win "Fit result: —"))
-(.AddFrame win res-lbl (new TGLayoutHints 2 5 5 3 8))
+(def {res-lbl} (new TGLabel fit-row "chi2 = —       ndf = —"))
+(.AddFrame fit-row res-lbl (new TGLayoutHints 18 15 5 4 4))
 
 ;;; ── ROOT objects ─────────────────────────────────────────────────────────
 (def {canvas} (.GetCanvas ec))
 (def {h}  (new TH1F "fh" "Gaussian data;x;entries" 100 -10. 10.))
+(.SetDirectory h 0)
 (def {gf} (new TF1 "gfunc" "gaus" -10. 10.))
 
 ;;; ── redraw: update labels, refill histogram ──────────────────────────────
@@ -107,6 +107,6 @@
   {SetWindowName "Gaussian Fit GUI"}
   {MapSubwindows}
   {Resize (.GetDefaultWidth win) (.GetDefaultHeight win)}
-  {MapWindow})
+  {MapRaised})
 
 (redraw)

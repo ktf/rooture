@@ -1761,10 +1761,15 @@ public:
         fprintf(stderr, "callback error: %s\n", result->err);
       lval_del(result);
     }
-    // Flush any canvas redraws triggered by the callbacks.
+    // Flush canvas redraws triggered by the callbacks.
     TIter next(gROOT->GetListOfCanvases());
     TVirtualPad* c;
     while ((c = (TVirtualPad*)next())) c->Update();
+    // Flush GUI widget redraws (e.g. TGLabel::SetText → NeedRedraw).
+    // Update(2) calls TGClient::DoRedraw() via TGCocoa's friend access;
+    // Update(1) flushes the resulting Cocoa command buffer to the screen.
+    // (Mirrors what TMacOSXSystem::DispatchOneEvent does after Cocoa events.)
+    if (gVirtualX) { gVirtualX->Update(2); gVirtualX->Update(1); }
     return kTRUE;
   }
   Bool_t Notify() override { return ReadNotify(); }
@@ -2085,6 +2090,34 @@ lval* builtin_canvases(lenv* e, lval* a) {
   return result;
 }
 
+// (save-window <frame-obj> "/path/to/out.png") — captures a TGFrame window to PNG
+// using TASImage::FromWindow (libASImage loaded on demand).
+lval* builtin_save_window(lenv* e, lval* a) {
+  LASSERT(a, a->count == 2, "'save-window' requires 2 arguments: <frame> <path>.");
+  LASSERT(a, a->cell[0]->type == LVAL_TOBJ,
+          "'save-window' argument 1 must be a ROOT TGFrame object.");
+  LASSERT_TYPE("save-window", a, 1, LVAL_STR);
+
+  void* ptr  = a->cell[0]->obj;
+  const char* path = a->cell[1]->str;
+
+  gSystem->Load("libASImage");
+
+  // Execute via Cling to avoid compile-time dependency on TGFrame/TASImage headers.
+  // FromWindow is an instance method, not static — create a TASImage first.
+  std::string code = Form(
+    "{ TGFrame* __wf = (TGFrame*)((void*)%lldLL);"
+    "  TASImage* __img = new TASImage();"
+    "  __img->FromWindow(__wf->GetId(), 0, 0, 0, 0);"
+    "  __img->WriteImage(\"%s\"); delete __img; }",
+    (long long)ptr, path);
+  gInterpreter->ProcessLine(code.c_str());
+
+  lval* res = lval_str(path);
+  lval_del(a);
+  return res;
+}
+
 // (save-png "CanvasName" "/path/to/out.png") — saves a canvas to a PNG file.
 lval* builtin_save_png(lenv* e, lval* a) {
   LASSERT(a, a->count == 2, "'save-png' requires 2 arguments: <canvas-name> <path>.");
@@ -2311,6 +2344,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "annotate", builtin_annotate);
   lenv_add_builtin(e, "annotations", builtin_annotations);
   lenv_add_builtin(e, "save-png", builtin_save_png);
+  lenv_add_builtin(e, "save-window", builtin_save_window);
 
   /*A few TObjects */
   lenv_add_global_object(e, "gSystem",      gSystem,      TClass::GetClass("TSystem"));
@@ -2419,6 +2453,11 @@ public:
     TIter next(gROOT->GetListOfCanvases());
     TVirtualPad* c;
     while ((c = (TVirtualPad*)next())) c->Update();
+    // Flush GUI widget redraws (e.g. TGLabel::SetText → NeedRedraw).
+    // Update(2) calls TGClient::DoRedraw() via TGCocoa's friend access;
+    // Update(1) flushes the resulting Cocoa command buffer to the screen.
+    // (Mirrors what TMacOSXSystem::DispatchOneEvent does after Cocoa events.)
+    if (gVirtualX) { gVirtualX->Update(2); gVirtualX->Update(1); }
     TInterpreter::Instance()->EndOfLineAction();
     return kTRUE;
   }
@@ -2677,6 +2716,11 @@ static void mcp_thread_fn() {
      {"inputSchema", {{"type","object"},
        {"properties", {{"name", {{"type","string"},{"description","Canvas name"}}}}},
        {"required", {"name"}}}}},
+    {{"name", "get_window"},
+     {"description", "Capture a ROOT GUI window (TGFrame / TGMainFrame) as a PNG image. Pass the rooture symbol name that holds the window object (e.g. \"win\")."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {{"symbol", {{"type","string"},{"description","Rooture symbol name of the TGFrame variable"}}}}},
+       {"required", {"symbol"}}}}},
     {{"name", "list_annotations"},
      {"description", "List all symbol annotations set via (annotate sym \"text\"). Returns {name annotation} pairs describing user-defined customisation points."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
@@ -2745,6 +2789,28 @@ static void mcp_thread_fn() {
         if (png.empty()) {
           send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
             {"code",-32000},{"message","Failed to save canvas '"+name+"' as PNG"}
+          }}});
+        } else {
+          std::string b64 = base64_encode(png);
+          send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+            {"content", json::array({{{"type","image"},{"data",b64},{"mimeType","image/png"}}})}
+          }}});
+        }
+        std::remove(tmp.c_str());
+
+      } else if (tool == "get_window") {
+        std::string symbol = args.value("symbol","");
+        std::string tmp = "/tmp/rooture_window_" + symbol + ".png";
+        // Flush pending window-manager events so MapRaised takes effect
+        // before we capture the screen contents.
+        eval_expr("(process-line \"for(int _i=0;_i<5;_i++) gSystem->ProcessEvents();\")");
+        eval_expr("(save-window " + symbol + " \"" + tmp + "\")");
+        std::ifstream wf(tmp, std::ios::binary);
+        std::vector<uint8_t> png((std::istreambuf_iterator<char>(wf)),
+                                  std::istreambuf_iterator<char>());
+        if (png.empty()) {
+          send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
+            {"code",-32000},{"message","Failed to capture window '"+symbol+"' as PNG"}
           }}});
         } else {
           std::string b64 = base64_encode(png);

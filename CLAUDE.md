@@ -10,6 +10,31 @@ display, which breaks that workflow.
 If the server needs to save a canvas to a PNG (for `get_canvas`), use
 `TCanvas::SaveAs` or `TPad::Print` — these work fine without batch mode.
 
+## MCP server: taking GUI window screenshots
+
+The MCP tool `get_window` captures any open ROOT GUI window as a PNG and returns
+it as an image.  Use this to inspect layouts and diagnose visual issues without
+leaving Claude Code.
+
+```
+# after loading a script that creates a window bound to the symbol "win":
+get_window symbol="win"
+```
+
+The underlying rooture builtin `save-window` accepts a TGFrame object and a path:
+```scheme
+(save-window win "/tmp/screenshot.png")
+```
+
+**Important caveats on macOS**:
+- `save-window` uses `TASImage::FromWindow` which captures the window's backing
+  store.  If multiple windows overlap (e.g. after reloading a script that creates
+  a second window), the screenshot may show the wrong window.  Close stale windows
+  before reloading, or use `(.MapRaised win)` (already the default in GUI examples)
+  to bring the new window to the front.
+- `libASImage` is loaded on demand by `save-window`; no manual `(.Load gSystem
+  "libASImage")` is needed.
+
 ## Rooture language quirks
 
 ### Undefined symbols auto-convert to strings
@@ -69,3 +94,8 @@ When making multiple method calls on the same object, always prefer `doto` over 
 - `rooture-gui` (in `.claude/skills/rooture-gui.md`) — how to build ROOT GUI
   windows, buttons, and layouts in rooture.  Invoke this skill whenever the
   user asks for a GUI, dialog, or any `TGFrame`/`TGWidget`-based interface.
+
+- `rooture-debug-gui` (in `.claude/skills/rooture-debug-gui.md`) — how to
+  debug GUI and layout issues: widgets not appearing, zero-width labels, wrong
+  positions, text not refreshing after SetText.  Invoke this skill whenever
+  something in a rooture GUI looks wrong or a label fails to update.
