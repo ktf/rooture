@@ -46,3 +46,7 @@ No quoting needed for namespaced class or namespace names.
 - `rooture-lang` (in `.claude/skills/rooture-lang.md`) — explains how the
   rooture language works and its quirks.  Invoke this skill whenever you need
   context on the language before writing or debugging rooture (`.rut`) code.
+
+- `rooture-gui` (in `.claude/skills/rooture-gui.md`) — how to build ROOT GUI
+  windows, buttons, and layouts in rooture.  Invoke this skill whenever the
+  user asks for a GUI, dialog, or any `TGFrame`/`TGWidget`-based interface.

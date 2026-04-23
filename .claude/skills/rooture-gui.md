@@ -114,15 +114,67 @@ Common combinations:
 
 ---
 
-## Full example: Hello World
+## Signal/slot: connecting a button to a rooture lambda
+
+Use `(connect widget "Signal()" lambda)` to wire a ROOT signal to a rooture function:
+
+```scheme
+(def {click-count} 0)
+
+(connect btn "Clicked()" (\
+  {}
+  {do
+    (def {click-count} (+ click-count 1))
+    (.SetText lbl (new TGString (str click-count)))
+    (.Layout win)}))
+```
+
+- `connect` returns an integer callback ID.
+- The lambda receives no arguments (signal parameters are not forwarded yet).
+- Use `(str num)` to convert a number to a string for label updates.
+- Use `(def {var} val)` — **not** `(= var val)` — to update global variables from
+  inside the callback. `=` only writes to the lambda's local scope.
+- `TGLabel::SetText` takes a `TGString*`: `(new TGString "text")` creates one.
+- Call `(.Layout win)` after updating label text to force a geometry refresh.
+
+### How it works internally
+
+rooture's `connect` builtin:
+1. Stores a `__rut_fire` function-pointer global in Cling (once, at first call).
+2. Defines a `__rut_dispatch(int)` shim in Cling (once).
+3. Calls `TQObject::Connect(widget, signal, nullptr, nullptr, "__rut_dispatch(N)")`.
+4. When the signal fires, Cling executes the shim, which writes the callback ID
+   to a pipe.
+5. A `TFileHandler` drains the pipe in the **next event-loop iteration** — outside
+   Cling's slot-dispatch context — and runs the rooture lambda safely.
+
+The deferred-pipe design is essential: running Cling builtins (`new`, `.method`)
+**inside** a Cling-dispatched slot causes silent re-entrancy failures.
+
+---
+
+## Full example: Hello World with click counter
 
 ```scheme
 (.Load gSystem "libGui")
 (global "gClient")
 
-(def {win} (new TGMainFrame (.GetRoot gClient) 300 100))
+(def {win} (new TGMainFrame (.GetRoot gClient) 300 120))
 (def {btn} (new TGTextButton win "Hello World"))
-(.AddFrame win btn (new TGLayoutHints 18 5 5 5 5))
+(def {lbl} (new TGLabel win "Clicks: 0"))
+(def {click-count} 0)
+
+(def {hints} (new TGLayoutHints 18 5 5 5 5))
+(.AddFrame win btn hints)
+(.AddFrame win lbl hints)
+
+(connect btn "Clicked()" (\
+  {}
+  {do
+    (def {click-count} (+ click-count 1))
+    (.SetText lbl (new TGString (str click-count)))
+    (.Layout win)}))
+
 (.SetWindowName win "Hello World")
 (.MapSubwindows win)
 (.Resize win (.GetDefaultWidth win) (.GetDefaultHeight win))
@@ -143,3 +195,5 @@ See `examples/hello_gui.rut` for the runnable version.
   otherwise the window may appear collapsed.
 - `AddFrame` returns `()` (void) — chain it before `MapSubwindows`, not after.
 - Enum constants like `kLHintsCenterX` are not in scope; use their numeric values.
+- **`def` vs `=` in callbacks**: use `(def {var} val)` to update globals; `=` only
+  writes to the lambda's local scope and the change won't be visible outside.

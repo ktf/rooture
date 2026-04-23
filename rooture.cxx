@@ -24,6 +24,7 @@
 #include "TRandom.h"
 #include "TObjString.h"
 #include "TCollection.h"
+#include "TQObject.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -1689,6 +1690,49 @@ void lenv_add_global_object(lenv* e, const char* name, void *obj, TClass *cls) {
 static std::vector<std::string> load_path;
 static std::map<std::string, std::string> g_annotations;
 
+// Callback registry for (connect widget signal lambda)
+struct RutCallback { lval* fn; lenv* env; };
+static std::map<int, RutCallback> g_callbacks;
+static int  g_next_callback_id       = 0;
+static bool g_slot_class_initialised = false;
+
+// Pipe used to defer callback execution out of Cling's slot-dispatch context.
+// Calling Cling (via new/method-call builtins) from within a Cling-dispatched
+// slot causes re-entrancy that silently corrupts results.  Instead we write the
+// callback id to the pipe; a TFileHandler drains it in the next event-loop
+// iteration, when Cling is idle.
+static int g_cb_pipe[2] = {-1, -1};
+
+// Executed by the Cling shim inside TQObject::Connect slot dispatch.
+// Must not call Cling itself — only a pipe write.
+extern "C" void rooture_fire_callback(int id) {
+  if (g_cb_pipe[1] != -1)
+    ::write(g_cb_pipe[1], &id, sizeof(id));
+}
+
+// TFileHandler that drains the callback pipe and runs rooture lambdas.
+class RutCallbackHandler : public TFileHandler {
+public:
+  lenv* e;
+  explicit RutCallbackHandler(int fd, lenv* env)
+    : TFileHandler(fd, /*mask=*/1), e(env) {}
+  Bool_t ReadNotify() override {
+    int id;
+    while (::read(GetFd(), &id, sizeof(id)) == sizeof(id)) {
+      auto it = g_callbacks.find(id);
+      if (it == g_callbacks.end()) continue;
+      lval* fn   = it->second.fn;
+      lval* args = lval_sexpr();
+      lval* result = lval_call(e, lval_copy(fn), args);
+      if (result->type == LVAL_ERR)
+        fprintf(stderr, "callback error: %s\n", result->err);
+      lval_del(result);
+    }
+    return kTRUE;
+  }
+  Bool_t Notify() override { return ReadNotify(); }
+};
+
 static std::string executable_dir() {
 #ifdef __APPLE__
   char buf[PATH_MAX];
@@ -1999,6 +2043,78 @@ lval* builtin_global(lenv* e, lval* a) {
   return result;
 }
 
+// (connect widget "Signal()" lambda) — wire a ROOT signal to a rooture lambda.
+// Each call mints a unique Cling shim __rooture_cb_N() that fires the lambda.
+lval* builtin_connect(lenv* e, lval* a) {
+  LASSERT_NUM("connect", a, 3);
+  LASSERT_TYPE("connect", a, 0, LVAL_TOBJ);
+  LASSERT_TYPE("connect", a, 1, LVAL_STR);
+  LASSERT(a, a->cell[2]->type == LVAL_FUN,
+          "'connect' third argument must be a function");
+
+  // One-time setup: store the bridge function pointer in a Cling global
+  // variable (__rut_fire) so shims can call it without any symbol-name lookup.
+  // This sidesteps macOS symbol-visibility issues entirely.
+  if (!g_slot_class_initialised) {
+    typedef void (*FireFn)(int);
+    FireFn fn_ptr = rooture_fire_callback;
+    gInterpreter->ProcessLine("typedef void(*__RutFireFn)(int);");
+    gInterpreter->ProcessLine(Form(
+      "__RutFireFn __rut_fire = (__RutFireFn)%lldLL;",
+      (long long)(void*)fn_ptr));
+    g_slot_class_initialised = true;
+  }
+
+  TObject*    widget = (TObject*)a->cell[0]->obj;
+  const char* signal = a->cell[1]->str;
+  int         id     = g_next_callback_id++;
+
+  g_callbacks[id] = { lval_copy(a->cell[2]), e };
+
+  // Define the per-callback shim in Cling's interpreted scope via ProcessLine
+  // (needed so the null-receiver TQObject::Connect slot dispatcher can find it).
+  gInterpreter->ProcessLine(Form(
+    "void __rooture_cb_%d() { __rut_fire(%d); }", id, id));
+
+  // DynamicCast TObject* → TQObject* via ROOT reflection.
+  TClass* tqobj_cls = TClass::GetClass("TQObject");
+  void*   tqobj_ptr = a->cell[0]->cls->DynamicCast(tqobj_cls, widget, kTRUE);
+  if (!tqobj_ptr) {
+    lval_del(a);
+    return lval_err("'connect': widget does not inherit from TQObject");
+  }
+  TQObject* sender = static_cast<TQObject*>(tqobj_ptr);
+  // Connect with null receiver — ROOT dispatches the slot by calling
+  // gInterpreter->Execute("__rooture_cb_N()") when the signal fires.
+  bool ok = TQObject::Connect(sender, signal, nullptr, nullptr,
+                              Form("__rooture_cb_%d()", id));
+
+  lval_del(a);
+  if (!ok) return lval_err("'connect': TQObject::Connect failed for signal '%s'", signal);
+  return lval_num(id);
+}
+
+// (str val) — convert a number (or string) to its string representation.
+lval* builtin_str(lenv* e, lval* a) {
+  LASSERT_NUM("str", a, 1);
+  char buf[64];
+  lval* v = a->cell[0];
+  if (v->type == LVAL_STR) {
+    lval* s = lval_str(v->str);
+    lval_del(a); return s;
+  } else if (v->type == LVAL_NUM) {
+    snprintf(buf, sizeof(buf), "%ld", v->num);
+  } else if (v->type == LVAL_FLOAT) {
+    snprintf(buf, sizeof(buf), "%g", v->floating);
+  } else {
+    lval_del(a);
+    return lval_err("'str': cannot convert %s to string", ltype_name(v->type));
+  }
+  lval* s = lval_str(buf);
+  lval_del(a);
+  return s;
+}
+
 // (annotate sym "text") — attach a documentation string to a symbol name.
 // The symbol auto-converts to a string at the call site, so both
 //   (annotate myplot "description")  and  (annotate "myplot" "description")
@@ -2072,6 +2188,8 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "::", builtin_static);
   lenv_add_builtin(e, "invoke", builtin_invoke);
   lenv_add_builtin(e, "global",  builtin_global);
+  lenv_add_builtin(e, "connect", builtin_connect);
+  lenv_add_builtin(e, "str",     builtin_str);
   lenv_add_builtin(e, "symbols", builtin_symbols);
   lenv_add_builtin(e, "canvases", builtin_canvases);
   lenv_add_builtin(e, "annotate", builtin_annotate);
@@ -2612,6 +2730,13 @@ int main(int argc, char** argv) {
 
   /* Bootstrap TApplication so ROOT graphics/gSystem work */
   TApplication app("rooture", &argc, argv);
+
+  /* Callback pipe: rooture lambdas connected to ROOT signals are deferred here
+     so they run in the event loop, not inside Cling's slot-dispatch context. */
+  if (pipe(g_cb_pipe) == 0) {
+    fcntl(g_cb_pipe[0], F_SETFL, O_NONBLOCK);
+    gSystem->AddFileHandler(new RutCallbackHandler(g_cb_pipe[0], e));
+  }
 
   /* Script mode: load a file and exit without starting the event loop */
   if (g_script_file) {

@@ -1,6 +1,6 @@
 ;;; hello_gui.rut
 ;;;
-;;; Minimal ROOT GUI example: a window with a centred "Hello World" button.
+;;; ROOT GUI example: a window with a button and a click-count label.
 ;;;
 ;;; Run from the ROOTure REPL:
 ;;;   (load examples/hello_gui.rut)
@@ -8,13 +8,23 @@
 (.Load gSystem "libGui")
 (global "gClient")   ; make gClient available as a rooture object
 
-(def {win} (new TGMainFrame (.GetRoot gClient) 300 100))
+(def {win} (new TGMainFrame (.GetRoot gClient) 300 120))
 
 (def {btn} (new TGTextButton win "Hello World"))
+(def {lbl} (new TGLabel win "Clicks: 0"))
+(def {click-count} 0)
 
-; TGLayoutHints flags: kLHintsCenterX (2) | kLHintsCenterY (16) = 18
-; Arguments: hints, left, right, top, bottom padding
-(.AddFrame win btn (new TGLayoutHints 18 5 5 5 5))
+; kLHintsCenterX (2) | kLHintsCenterY (16) = 18
+(def {hints} (new TGLayoutHints 18 5 5 5 5))
+(.AddFrame win btn hints)
+(.AddFrame win lbl hints)
+
+(connect btn "Clicked()" (\
+  {}
+  {do
+    (def {click-count} (+ click-count 1))
+    (.SetText lbl (new TGString (str click-count)))
+    (.Layout win)}))
 
 (.SetWindowName win "Hello World")
 (.MapSubwindows win)
