@@ -42,7 +42,7 @@
     (def {sigma} (/ pos 10.))
     (.SetText sigma-lbl (new TGString (concat "sigma = " (str sigma))))
     (.cd canvas)
-    (process-line (concat "__rut_sigma = " (str sigma) "; __rut_h->Reset(); for(int i=0;i<5000;i++) __rut_h->Fill(gRandom->Gaus(0,__rut_sigma)); __rut_h->Draw(\"HIST\"); gPad->Modified(); gPad->Update();"))}))
+    (process-line (concat "__rut_sigma = " (str sigma) "; __rut_h->Reset(); for(int i=0;i<5000;i++) __rut_h->Fill(gRandom->Gaus(0,__rut_sigma)); __rut_h->Draw(\"HIST\"); gPad->Modified();"))}))
 
 (connect slider "PositionChanged(Int_t)" redraw)
 

@@ -1718,7 +1718,6 @@ static std::map<std::string, std::string> g_annotations;
 struct RutCallback { lval* fn; lenv* env; };
 static std::map<int, RutCallback> g_callbacks;
 static int  g_next_callback_id       = 0;
-static bool g_slot_class_initialised = false;
 
 // Pipe used to defer callback execution out of Cling's slot-dispatch context.
 // Calling Cling (via new/method-call builtins) from within a Cling-dispatched
@@ -1762,6 +1761,10 @@ public:
         fprintf(stderr, "callback error: %s\n", result->err);
       lval_del(result);
     }
+    // Flush any canvas redraws triggered by the callbacks.
+    TIter next(gROOT->GetListOfCanvases());
+    TVirtualPad* c;
+    while ((c = (TVirtualPad*)next())) c->Update();
     return kTRUE;
   }
   Bool_t Notify() override { return ReadNotify(); }
@@ -2086,26 +2089,6 @@ lval* builtin_connect(lenv* e, lval* a) {
   LASSERT(a, a->cell[2]->type == LVAL_FUN,
           "'connect' third argument must be a function");
 
-  // One-time setup: store the bridge function pointer in a Cling global and
-  // define the shared dispatcher __rut_dispatch(int).  Using a shared
-  // dispatcher with a literal callback-ID argument lets ROOT match signals of
-  // any arity (including ones that carry parameters like PositionChanged(Int_t))
-  // because ROOT allows passing a literal constant as the slot argument.
-  if (!g_slot_class_initialised) {
-    typedef void (*FireFn)(int);
-    FireFn fn_ptr = rooture_fire_callback;
-    // Use Declare() so the typedef and global persist as top-level Cling
-    // declarations (ProcessLine wraps code in temporary wrappers whose decls
-    // can be invalidated).
-    gInterpreter->Declare("typedef void(*__RutFireFn)(int);");
-    gInterpreter->Declare("__RutFireFn __rut_fire = nullptr;");
-    // Set the actual function pointer at runtime.
-    gInterpreter->ProcessLine(Form(
-      "__rut_fire = (__RutFireFn)%lldLL;",
-      (long long)(void*)fn_ptr));
-    g_slot_class_initialised = true;
-  }
-
   TObject*    widget = (TObject*)a->cell[0]->obj;
   const char* signal = a->cell[1]->str;
   int         id     = g_next_callback_id++;
@@ -2115,10 +2098,14 @@ lval* builtin_connect(lenv* e, lval* a) {
   // Declare a per-callback struct with a static method so that
   // TQSlot's ClassInfo_Init succeeds (global functions fail because
   // ClassInfo_Factory() without Init is invalid for SetFuncProto).
+  // Embed the function pointer directly to avoid any global-variable
+  // initialisation ordering issues.
+  typedef void (*FireFn)(int);
+  FireFn fn_ptr = rooture_fire_callback;
   const char* cls_name = Form("__RutSlot_%d", id);
   bool decl_ok = gInterpreter->Declare(Form(
-    "struct %s { static void fire() { if (__rut_fire) __rut_fire(%d); } };",
-    cls_name, id));
+    "struct %s { static void fire() { ((void(*)(int))%lldLL)(%d); } };",
+    cls_name, (long long)(void*)fn_ptr, id));
   if (!decl_ok) {
     lval_del(a);
     return lval_err("'connect': failed to declare callback class %s", cls_name);
