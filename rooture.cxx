@@ -1731,6 +1731,9 @@ lval* builtin_load(lenv* e, lval* a) {
   
   /* Resolve filename against load_path if not directly accessible */
   std::string filename = a->cell[0]->str;
+  char* expanded = gSystem->ExpandPathName(filename.c_str());
+  filename = expanded;
+  free(expanded);
   if (gSystem->AccessPathName(filename.c_str())) {
     for (const auto& dir : load_path) {
       std::string candidate = dir + "/" + filename;
@@ -2552,7 +2555,7 @@ int main(int argc, char** argv) {
       floating : /-?[0-9]+[.][0-9]*/                          \
                | /-?[.][0-9]+/ ;                              \
       number   : /-?[0-9]+/ ;                                 \
-      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@]+/ ;          \
+      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@~]+/ ;          \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \
       comment    : /;[^\\r\\n]*/ ;                            \
       inlinestr  : /[^}\\n]*/ ;                               \

@@ -55,7 +55,7 @@ module.exports = grammar({
     named_ref: ($) => token(/@[a-zA-Z0-9_]+/),
 
     // Everything else is a symbol (operators, ROOT class paths, …)
-    symbol: ($) => token(/[a-zA-Z0-9_+\-*\/\\=<>!&.:$]+/),
+    symbol: ($) => token(/[a-zA-Z0-9_+\-*\/\\=<>!&.:$~]+/),
 
     // Line comment — not listed in extras so it appears in the AST
     comment: ($) => token(/;[^\r\n]*/),
