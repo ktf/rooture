@@ -38,6 +38,19 @@
     {SetPosition 10}))
 (.AddFrame gen-row sig-sl (new TGLayoutHints 36 2 5 4 4))
 
+;;; ── entries control ──────────────────────────────────────────────────────
+(def {n-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win n-row (new TGLayoutHints 65 5 5 2 2))
+
+(def {n-lbl} (new TGLabel n-row "N = 10000"))
+(.AddFrame n-row n-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {n-sl}
+  (doto (new TGHSlider n-row 300 3 -1)
+    {SetRange 1 100}
+    {SetPosition 100}))
+(.AddFrame n-row n-sl (new TGLayoutHints 36 2 5 4 4))
+
 ;;; ── fit controls ─────────────────────────────────────────────────────────
 (def {fit-row} (new TGHorizontalFrame win 580 36))
 (.AddFrame win fit-row (new TGLayoutHints 65 5 5 2 2))
@@ -68,14 +81,16 @@
 
 ;;; ── redraw: update labels, refill histogram ──────────────────────────────
 (def {redraw} (\{} {do
-  (def {mu}    (/ (.GetPosition mu-sl)  10.))
-  (def {sigma} (/ (.GetPosition sig-sl) 10.))
+  (def {mu}      (/ (.GetPosition mu-sl)  10.))
+  (def {sigma}   (/ (.GetPosition sig-sl) 10.))
+  (def {nentries} (* (.GetPosition n-sl) 100))
   (.SetText mu-lbl  (new TGString (concat "mu = "    (str mu))))
   (.SetText sig-lbl (new TGString (concat "sigma = " (str sigma))))
+  (.SetText n-lbl   (new TGString (concat "N = "     (str nentries))))
   (doto gf {SetParameters 1. mu sigma})
   (doto h
     {Reset}
-    {FillRandom gf 5000})
+    {FillRandom gf nentries})
   (.cd canvas)
   (doto h {Draw "HIST"})
   (.Modified canvas)}))
@@ -101,6 +116,7 @@
 
 (connect mu-sl   "PositionChanged(Int_t)" redraw)
 (connect sig-sl  "PositionChanged(Int_t)" redraw)
+(connect n-sl    "PositionChanged(Int_t)" redraw)
 (connect fit-btn "Clicked()" do-fit)
 
 (doto win

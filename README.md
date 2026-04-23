@@ -68,6 +68,21 @@ spectrum on the left (log scale), J/ψ window on the right:
 
 ---
 
+## Interactive fit GUI
+
+A fully interactive ROOT GUI — sliders for mean, sigma, and number of entries,
+a fit-function selector, and live chi² output — vibe coded with Claude:
+
+```scheme
+(load examples/fit_gui.rut)
+```
+
+![Gaussian fit GUI](docs/fit_gui.png)
+
+See [`examples/fit_gui.rut`](examples/fit_gui.rut) for the full source.
+
+---
+
 ## Key features
 
 - **Interactive REPL** with history and tab completion
@@ -248,6 +263,7 @@ Available MCP tools:
 | `examples/df014_CsvDataSource.rut` | CMS dimuon spectrum from CSV |
 | `examples/df101_h1Analysis.rut` | H1 D* analysis with fitting |
 | `examples/assembly.rut` | TGeo geometry assembly |
+| `examples/fit_gui.rut` | Interactive fit GUI with sliders and live chi² output |
 
 ---
 
