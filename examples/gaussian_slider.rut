@@ -7,18 +7,17 @@
 
 (.Load gSystem "libGui")
 (global "gClient")
-(global "gInterpreter")
 
 ;;; ── window ───────────────────────────────────────────────────────────────
 (def {win} (new TGMainFrame (.GetRoot gClient) 560 460))
 
 ;;; ── embedded ROOT canvas ─────────────────────────────────────────────────
 (def {ec} (new TRootEmbeddedCanvas "gaus_canvas" win 540 360))
-(.AddFrame win ec (new TGLayoutHints 65 5 5 5 2))   ; kExpandX = 64, top align = 8 → 65+8 not needed, just 65
+(.AddFrame win ec (new TGLayoutHints 65 5 5 5 2))
 
 ;;; ── sigma label ──────────────────────────────────────────────────────────
 (def {sigma-lbl} (new TGLabel win "sigma = 1.0"))
-(.AddFrame win sigma-lbl (new TGLayoutHints 2 5 5 3 2))   ; CenterX
+(.AddFrame win sigma-lbl (new TGLayoutHints 2 5 5 3 2))
 
 ;;; ── slider: range 1–50 → sigma 0.1–5.0, default 10 → 1.0 ────────────────
 (def {slider} (new TGHSlider win 540 3 -1))
@@ -26,15 +25,9 @@
 (.SetPosition slider 10)
 (.AddFrame win slider (new TGLayoutHints 65 5 5 2 8))
 
-;;; Persistent Cling globals: sigma value + histogram (must survive between redraws
-;;; because Draw only stores a pointer — deleting it would leave a dangling reference).
 (def {canvas} (.GetCanvas ec))
-(process-line "double __rut_sigma = 1.0;")
-(process-line "TH1F* __rut_h = new TH1F(\"gh\",\"Gaussian;x;entries\",100,-5,5);")
 
 ;;; ── redraw callback ──────────────────────────────────────────────────────
-;;; Each call resets+refills the persistent histogram and redraws on the
-;;; embedded canvas.
 (def {redraw} (\
   {}
   {do
@@ -42,7 +35,11 @@
     (def {sigma} (/ pos 10.))
     (.SetText sigma-lbl (new TGString (concat "sigma = " (str sigma))))
     (.cd canvas)
-    (process-line (concat "__rut_sigma = " (str sigma) "; __rut_h->Reset(); for(int i=0;i<5000;i++) __rut_h->Fill(gRandom->Gaus(0,__rut_sigma)); __rut_h->Draw(\"HIST\"); gPad->Modified();"))}))
+    (-> (new ROOT::RDataFrame 5000)
+        {. Define "x" (\ {} {(.Gaus gRandom 0 sigma)})}
+        {. Histo1D (new ROOT::RDF::TH1DModel "gh" "Gaussian;x;entries" 100 -5. 5.) "x"}
+        {. DrawClone "HIST"})
+    (.Modified canvas)}))
 
 (connect slider "PositionChanged(Int_t)" redraw)
 
