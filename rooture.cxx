@@ -1305,7 +1305,12 @@ lval* builtin_member(lenv *e, lval *a) {
       return cling_new_auto_typed(base,
         [&]{ mc.Execute(obj_ptr); });
     }
-    default:  // kNone (void) or kString
+    case TMethodCall::kString: {
+      char* sret = nullptr;
+      mc.Execute(obj_ptr, &sret);
+      return lval_str(sret ? sret : "");
+    }
+    default:  // kNone (void)
       mc.Execute(obj_ptr);
       return lval_qexpr();
   }
