@@ -54,7 +54,7 @@
 
 (.AddNode tplate plate 1)
 
-(map (\ {i} {do
+(map (\{i} {do
   (.AddNode tplate tooth (+ i 1)
     (new TGeoTranslation
       (+ xplate xtooth)
@@ -71,7 +71,7 @@
 ;;; Note: copy ctor (new TGeoRotation(*rot1)) not available; recreate each time.
 (def {cell} (new TGeoVolumeAssembly "CELL"))
 
-(map (\ {i} {do
+(map (\{i} {do
   (= {phi}    (* 60. i))
   (= {phirad} (* phi deg2rad))
   (= {xp}     (* dshift (::Sin TMath phirad)))
@@ -86,7 +86,7 @@
 (def {row}    (new TGeoVolumeAssembly "ROW"))
 (def {ncells} 5)
 
-(map (\ {i} {do
+(map (\{i} {do
   (= {ycell} (* (+ (* 2 i) 1) (+ dshift 10.)))
   (.AddNode row cell (+ ncells i 1) (new TGeoTranslation 0. ycell 0.))
   (.AddNode row cell (- ncells i)   (new TGeoTranslation 0. (* -1. ycell) 0.))
@@ -98,7 +98,7 @@
 (def {dyrow} (+ dshift 10.))
 (def {nrows} 5)
 
-(map (\ {i} {do
+(map (\{i} {do
   (= {xrow} (* 0.5 (* (+ (* 2 i) 1) dxrow)))
   (= {yrow} (* (if (== i (* 2 (/ i 2))) {-0.5} {0.5}) dyrow))
   (.AddNode top row (+ nrows i 1) (new TGeoTranslation xrow yrow 0.))

@@ -77,7 +77,7 @@ floating-point → float value, integral/enum → integer value.
 
 ### Lambda
 ```
-(\ {arg1 arg2} { body })
+(\{arg1 arg2} { body })
 (fn [arg] body)
 ```
 
@@ -115,7 +115,7 @@ floating-point → float value, integral/enum → integer value.
 ```
 (load "stdlib.rut")
 (-> (new ROOT::RDataFrame 1000)
-    {. Define "x" (\ {} { (. Rndm gRandom) })}
+    {. Define "x" (\{} { (. Rndm gRandom) })}
     {. Histo1D "x"}
     {. DrawClone})
 ```
@@ -211,7 +211,7 @@ A lambda body is a Q-expression `{...}`. When called, the body `{expr1 expr2}` i
 
 For sequential execution, use `do` as the first element of the body:
 ```
-(\ {i} {do
+(\{i} {do
   expr1
   expr2
 })

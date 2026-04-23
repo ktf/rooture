@@ -8,7 +8,7 @@
 (load stdlib.rut)
 
 ;;; Helper: print PASS/FAIL and exit 1 on mismatch.
-(def {assert-eq} (\ {label got expected} {
+(def {assert-eq} (\{label got expected} {
   if (== got expected)
     {print label "PASS"}
     {do

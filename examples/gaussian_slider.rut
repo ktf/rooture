@@ -36,7 +36,7 @@
     (.SetText sigma-lbl (new TGString (concat "sigma = " (str sigma))))
     (.cd canvas)
     (-> (new ROOT::RDataFrame 5000)
-        {. Define "x" (\ {} {(.Gaus gRandom 0 sigma)})}
+        {. Define "x" (\{} {(.Gaus gRandom 0 sigma)})}
         {. Histo1D (new ROOT::RDF::TH1DModel "gh" "Gaussian;x;entries" 100 -5. 5.) "x"}
         {. DrawClone "HIST"})
     (.Modified canvas)}))

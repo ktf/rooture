@@ -20,7 +20,7 @@ At the top level, any symbol not bound in the environment becomes a **string wit
 ### Lambda bodies: use `do` for multiple expressions
 `{expr1 expr2}` as a lambda body evaluates to `(expr1 expr2)` — calling expr1 as a function on expr2. For sequential execution:
 ```
-(\ {i} {do expr1 expr2})   ; evaluates both, returns last
+(\{i} {do expr1 expr2})   ; evaluates both, returns last
 ```
 Use `=` (not `def`) for local variables inside lambdas.
 

@@ -11,13 +11,13 @@
 ;;; Functional Functions
 
 ; Function Definitions
-(def {fun} (\ {f b} {
+(def {fun} (\{f b} {
   def (head f) (\ (tail f) b)
 }))
 
 ; Open new scope
 (fun {let b} {
-  ((\ {_} b) ())
+  ((\{_} b) ())
 })
 
 ; Unpack List to Function
@@ -263,7 +263,7 @@
     {obj}
     {do
       (if (== (head (fst f)) {>>})
-        {foldl (\ {cur step} {eval (join {.} (head step) (list cur) (tail step))})
+        {foldl (\{cur step} {eval (join {.} (head step) (list cur) (tail step))})
                obj
                (tail (fst f))}
         {eval (join {.} (head (fst f)) (list obj) (tail (fst f)))})

@@ -179,7 +179,7 @@ The only character that cannot appear in an inline string is `}`.
 
 ```scheme
 (def {myFilter}
-  (\ {x} {> x 0.5}))
+  (\{x} {> x 0.5}))
 
 (.Filter df myFilter {"x"})
 ```
