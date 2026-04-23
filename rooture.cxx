@@ -28,6 +28,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
 #include <map>
 #include <atomic>
 #include <regex>
@@ -460,6 +461,19 @@ void lval_print_str(lval* v) {
   free(escaped);
 }
 
+// Escape a raw C string for embedding inside a C++ double-quoted literal that
+// will be fed to Cling's ProcessLine / Execute.  Backslashes and double-quotes
+// must be escaped; other characters are passed through unchanged.
+static std::string escape_for_cling_str(const char* s) {
+  std::string out;
+  out.reserve(strlen(s) + 8);
+  for (; *s; ++s) {
+    if (*s == '\\' || *s == '"') out += '\\';
+    out += *s;
+  }
+  return out;
+}
+
 TObjArray *lval_to_obj_array(lval *a, int offset) {
   TObjArray *args = new TObjArray();
   for (int i = offset; i < a->count; i++) {
@@ -467,7 +481,7 @@ TObjArray *lval_to_obj_array(lval *a, int offset) {
     switch (v->type) {
       case LVAL_NUM: args->Add(new TObjString(strdup(std::to_string(v->num).c_str()))); break;
       case LVAL_FLOAT: args->Add(new TObjString(strdup(std::to_string(v->floating).c_str()))); break;
-      case LVAL_STR: args->Add(new TObjString(strdup(("\"" + std::string(v->str) + "\"").c_str()))); break;
+      case LVAL_STR: args->Add(new TObjString(strdup(("\"" + escape_for_cling_str(v->str) + "\"").c_str()))); break;
       default:
         rut_print("Cannot use as a C++ argument.");
         args->Add(new TObjString(""));
@@ -551,7 +565,7 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset) {
     switch (v->type) {
       case LVAL_NUM:   args += std::to_string(v->num); break;
       case LVAL_FLOAT: args += std::to_string(v->floating); break;
-      case LVAL_STR:   args += "\"" + std::string(v->str) + "\""; break;
+      case LVAL_STR:   args += "\"" + escape_for_cling_str(v->str) + "\""; break;
       case LVAL_TOBJ:
         if (v->cls)
           args += "((" + std::string(v->cls->GetName()) + "*)" + ptr_to_hex(v->obj) + ")";
@@ -883,8 +897,18 @@ lval* lval_eval_sexpr(lenv* e, lval* v) {
     if (v->cell[i]->type == LVAL_ERR) { return lval_take(v, i); }
   }
 
-  if (v->count == 0) { return v; }  
-  if (v->count == 1) { return lval_take(v, 0); }
+  if (v->count == 0) { return v; }
+  if (v->count == 1) {
+    lval* x = lval_take(v, 0);
+    /* If the single element is a function, call it with zero arguments.
+       This makes (fn) correctly invoke fn rather than just returning it. */
+    if (x->type == LVAL_FUN) {
+      lval* result = lval_call(e, x, lval_sexpr());
+      lval_del(x);
+      return result;
+    }
+    return x;
+  }
 
   /* Ensure first element is a function after evaluation */
   lval* f = lval_pop(v, 0);
@@ -1717,9 +1741,19 @@ public:
   explicit RutCallbackHandler(int fd, lenv* env)
     : TFileHandler(fd, /*mask=*/1), e(env) {}
   Bool_t ReadNotify() override {
+    // Drain the pipe and execute only the *last* queued invocation per
+    // callback id.  This debounces rapid signals (e.g. slider drags) so
+    // slow callbacks don't pile up while the user is still interacting.
     int id;
-    while (::read(GetFd(), &id, sizeof(id)) == sizeof(id)) {
-      auto it = g_callbacks.find(id);
+    std::vector<int> pending;
+    while (::read(GetFd(), &id, sizeof(id)) == sizeof(id))
+      pending.push_back(id);
+    // Walk backwards, fire each id only once (the most recent occurrence).
+    std::set<int> fired;
+    for (int i = (int)pending.size() - 1; i >= 0; i--) {
+      int cb_id = pending[i];
+      if (!fired.insert(cb_id).second) continue;
+      auto it = g_callbacks.find(cb_id);
       if (it == g_callbacks.end()) continue;
       lval* fn   = it->second.fn;
       lval* args = lval_sexpr();
@@ -2052,15 +2086,22 @@ lval* builtin_connect(lenv* e, lval* a) {
   LASSERT(a, a->cell[2]->type == LVAL_FUN,
           "'connect' third argument must be a function");
 
-  // One-time setup: store the bridge function pointer in a Cling global
-  // variable (__rut_fire) so shims can call it without any symbol-name lookup.
-  // This sidesteps macOS symbol-visibility issues entirely.
+  // One-time setup: store the bridge function pointer in a Cling global and
+  // define the shared dispatcher __rut_dispatch(int).  Using a shared
+  // dispatcher with a literal callback-ID argument lets ROOT match signals of
+  // any arity (including ones that carry parameters like PositionChanged(Int_t))
+  // because ROOT allows passing a literal constant as the slot argument.
   if (!g_slot_class_initialised) {
     typedef void (*FireFn)(int);
     FireFn fn_ptr = rooture_fire_callback;
-    gInterpreter->ProcessLine("typedef void(*__RutFireFn)(int);");
+    // Use Declare() so the typedef and global persist as top-level Cling
+    // declarations (ProcessLine wraps code in temporary wrappers whose decls
+    // can be invalidated).
+    gInterpreter->Declare("typedef void(*__RutFireFn)(int);");
+    gInterpreter->Declare("__RutFireFn __rut_fire = nullptr;");
+    // Set the actual function pointer at runtime.
     gInterpreter->ProcessLine(Form(
-      "__RutFireFn __rut_fire = (__RutFireFn)%lldLL;",
+      "__rut_fire = (__RutFireFn)%lldLL;",
       (long long)(void*)fn_ptr));
     g_slot_class_initialised = true;
   }
@@ -2071,10 +2112,17 @@ lval* builtin_connect(lenv* e, lval* a) {
 
   g_callbacks[id] = { lval_copy(a->cell[2]), e };
 
-  // Define the per-callback shim in Cling's interpreted scope via ProcessLine
-  // (needed so the null-receiver TQObject::Connect slot dispatcher can find it).
-  gInterpreter->ProcessLine(Form(
-    "void __rooture_cb_%d() { __rut_fire(%d); }", id, id));
+  // Declare a per-callback struct with a static method so that
+  // TQSlot's ClassInfo_Init succeeds (global functions fail because
+  // ClassInfo_Factory() without Init is invalid for SetFuncProto).
+  const char* cls_name = Form("__RutSlot_%d", id);
+  bool decl_ok = gInterpreter->Declare(Form(
+    "struct %s { static void fire() { if (__rut_fire) __rut_fire(%d); } };",
+    cls_name, id));
+  if (!decl_ok) {
+    lval_del(a);
+    return lval_err("'connect': failed to declare callback class %s", cls_name);
+  }
 
   // DynamicCast TObject* → TQObject* via ROOT reflection.
   TClass* tqobj_cls = TClass::GetClass("TQObject");
@@ -2084,10 +2132,8 @@ lval* builtin_connect(lenv* e, lval* a) {
     return lval_err("'connect': widget does not inherit from TQObject");
   }
   TQObject* sender = static_cast<TQObject*>(tqobj_ptr);
-  // Connect with null receiver — ROOT dispatches the slot by calling
-  // gInterpreter->Execute("__rooture_cb_N()") when the signal fires.
-  bool ok = TQObject::Connect(sender, signal, nullptr, nullptr,
-                              Form("__rooture_cb_%d()", id));
+  // Connect with the struct as receiver_class and static method as slot.
+  bool ok = TQObject::Connect(sender, signal, cls_name, nullptr, "fire()");
 
   lval_del(a);
   if (!ok) return lval_err("'connect': TQObject::Connect failed for signal '%s'", signal);
@@ -2113,6 +2159,39 @@ lval* builtin_str(lenv* e, lval* a) {
   lval* s = lval_str(buf);
   lval_del(a);
   return s;
+}
+
+// (concat str ...) — concatenate any number of strings.
+lval* builtin_concat(lenv* e, lval* a) {
+  std::string result;
+  for (int i = 0; i < a->count; i++) {
+    if (a->cell[i]->type == LVAL_STR)
+      result += a->cell[i]->str;
+    else {
+      lval_del(a);
+      return lval_err("'concat' requires string arguments, got %s at index %d",
+                      ltype_name(a->cell[i]->type), i);
+    }
+  }
+  lval* s = lval_str(result.c_str());
+  lval_del(a);
+  return s;
+}
+
+// (process-line "code") — execute a C++ statement via gInterpreter->ProcessLine
+// directly from native C++, bypassing rooture's Cling method-dispatch path.
+// This avoids nested ProcessLine calls (Cling re-entrancy) that would freeze
+// the GUI when called from the event loop or MCP handler.
+lval* builtin_process_line(lenv* e, lval* a) {
+  LASSERT_NUM("process-line", a, 1);
+  LASSERT_TYPE("process-line", a, 0, LVAL_STR);
+  const char* code = a->cell[0]->str;
+  TInterpreter::EErrorCode err = TInterpreter::kNoError;
+  Long_t ret = gInterpreter->ProcessLine(code, &err);
+  lval_del(a);
+  if (err != TInterpreter::kNoError)
+    return lval_err("process-line: Cling error %d executing: %s", (int)err, code);
+  return lval_num(ret);
 }
 
 // (annotate sym "text") — attach a documentation string to a symbol name.
@@ -2188,8 +2267,10 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "::", builtin_static);
   lenv_add_builtin(e, "invoke", builtin_invoke);
   lenv_add_builtin(e, "global",  builtin_global);
-  lenv_add_builtin(e, "connect", builtin_connect);
-  lenv_add_builtin(e, "str",     builtin_str);
+  lenv_add_builtin(e, "connect",      builtin_connect);
+  lenv_add_builtin(e, "str",          builtin_str);
+  lenv_add_builtin(e, "concat",       builtin_concat);
+  lenv_add_builtin(e, "process-line", builtin_process_line);
   lenv_add_builtin(e, "symbols", builtin_symbols);
   lenv_add_builtin(e, "canvases", builtin_canvases);
   lenv_add_builtin(e, "annotate", builtin_annotate);
