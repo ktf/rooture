@@ -1,0 +1,54 @@
+;;; tests/dotimes.rut — tests for the (dotimes {i} n {body}) builtin
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/dotimes.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; Helper
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Basic iteration ───────────────────────────────────────────────────────────
+
+; Sum 0..4 using dotimes
+(def {total} 0)
+(dotimes {i} 5 {(= {total} (+ total i))})
+(assert-eq "sum 0..4" total 10)
+
+;;; ── Zero iterations ──────────────────────────────────────────────────────────
+
+(def {ran} 0)
+(dotimes {i} 0 {(= {ran} 1)})
+(assert-eq "zero iterations body never runs" ran 0)
+
+;;; ── Loop variable holds correct value ────────────────────────────────────────
+
+; Capture the last value of i (should be n-1 = 2)
+(def {last-i} -1)
+(dotimes {i} 3 {(= {last-i} i)})
+(assert-eq "last iteration index is n-1" last-i 2)
+
+;;; ── Multi-expression body using do ───────────────────────────────────────────
+
+(def {acc} 0)
+(def {cnt} 0)
+(dotimes {i} 4 {
+  do
+  (= {acc} (+ acc i))
+  (= {cnt} (+ cnt 1))
+})
+(assert-eq "multi-expr body: sum" acc 6)
+(assert-eq "multi-expr body: count" cnt 4)
+
+
+(print "All dotimes tests passed.")
+(exit 0)

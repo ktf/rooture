@@ -78,3 +78,12 @@ add_test(
 set_tests_properties(pipe_syntax PROPERTIES
   PASS_REGULAR_EXPRESSION "All pipe-syntax tests passed"
 )
+
+add_test(
+  NAME dotimes
+  COMMAND $<TARGET_FILE:rooture> tests/dotimes.rut
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(dotimes PROPERTIES
+  PASS_REGULAR_EXPRESSION "All dotimes tests passed"
+)

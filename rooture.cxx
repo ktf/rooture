@@ -1579,6 +1579,47 @@ lval* builtin_if(lenv* e, lval* a) {
 }
 
 
+lval* builtin_dotimes(lenv* e, lval* a) {
+  LASSERT_NUM("dotimes", a, 3);
+  LASSERT_TYPE("dotimes", a, 0, LVAL_QEXPR);
+  LASSERT_TYPE("dotimes", a, 1, LVAL_NUM);
+  LASSERT_TYPE("dotimes", a, 2, LVAL_QEXPR);
+
+  LASSERT(a, a->cell[0]->count == 1,
+    "'dotimes' first argument must be a single-symbol Q-expression, got %i elements.",
+    a->cell[0]->count);
+  LASSERT(a, a->cell[0]->cell[0]->type == LVAL_SYM,
+    "'dotimes' loop variable must be a symbol, got %s.",
+    ltype_name(a->cell[0]->cell[0]->type));
+
+  lval* sym  = a->cell[0]->cell[0];
+  long  n    = a->cell[1]->num;
+  lval* body = a->cell[2];
+
+  lval* result = lval_sexpr();
+
+  for (long i = 0; i < n; i++) {
+    lval* ival = lval_num(i);
+    lenv_put(e, sym, ival);
+    lval_del(ival);
+
+    lval* body_copy  = lval_copy(body);
+    body_copy->type  = LVAL_SEXPR;
+    lval* res        = lval_eval(e, body_copy);
+
+    if (res->type == LVAL_ERR) {
+      lval_del(a);
+      lval_del(result);
+      return res;
+    }
+    lval_del(result);
+    result = res;
+  }
+
+  lval_del(a);
+  return result;
+}
+
 lval* builtin_add(lenv* e, lval* a) {
   return builtin_op(e, a, "+");
 }
@@ -2345,6 +2386,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "annotations", builtin_annotations);
   lenv_add_builtin(e, "save-png", builtin_save_png);
   lenv_add_builtin(e, "save-window", builtin_save_window);
+  lenv_add_builtin(e, "dotimes",    builtin_dotimes);
 
   /*A few TObjects */
   lenv_add_global_object(e, "gSystem",      gSystem,      TClass::GetClass("TSystem"));
