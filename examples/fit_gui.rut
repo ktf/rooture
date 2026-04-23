@@ -1,0 +1,112 @@
+;;; fit_gui.rut
+;;;
+;;; Fill a Gaussian histogram with controllable mean and sigma,
+;;; then fit it with a user-selected function and report the fit quality.
+;;;
+;;;   (load examples/fit_gui.rut)
+
+(load stdlib.rut)
+(.Load gSystem "libGui")
+(global "gClient")
+
+;;; ── window ───────────────────────────────────────────────────────────────
+(def {win} (new TGMainFrame (.GetRoot gClient) 600 520))
+
+;;; ── canvas ───────────────────────────────────────────────────────────────
+(def {ec} (new TRootEmbeddedCanvas "fit_canvas" win 580 340))
+(.AddFrame win ec (new TGLayoutHints 65 5 5 5 2))
+
+;;; ── generator controls ───────────────────────────────────────────────────
+(def {gen-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win gen-row (new TGLayoutHints 65 5 5 2 2))
+
+(def {mu-lbl} (new TGLabel gen-row "mu = 0.0"))
+(.AddFrame gen-row mu-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {mu-sl}
+  (doto (new TGHSlider gen-row 160 3 -1)
+    {SetRange -30 30}
+    {SetPosition 0}))
+(.AddFrame gen-row mu-sl (new TGLayoutHints 36 2 15 4 4))
+
+(def {sig-lbl} (new TGLabel gen-row "sigma = 1.0"))
+(.AddFrame gen-row sig-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {sig-sl}
+  (doto (new TGHSlider gen-row 160 3 -1)
+    {SetRange 1 50}
+    {SetPosition 10}))
+(.AddFrame gen-row sig-sl (new TGLayoutHints 36 2 5 4 4))
+
+;;; ── fit controls ─────────────────────────────────────────────────────────
+(def {fit-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win fit-row (new TGLayoutHints 65 5 5 2 2))
+
+(.AddFrame fit-row (new TGLabel fit-row "Fit function:") (new TGLayoutHints 36 5 5 4 4))
+
+(def {combo}
+  (doto (new TGComboBox fit-row -1)
+    {AddEntry "gaus" 0}
+    {AddEntry "pol1" 1}
+    {AddEntry "pol2" 2}
+    {AddEntry "pol3" 3}
+    {Resize 90 22}
+    {Select 0}))
+(.AddFrame fit-row combo (new TGLayoutHints 36 2 15 2 2))
+
+(def {fit-btn} (new TGTextButton fit-row "  Fit  " -1))
+(.AddFrame fit-row fit-btn (new TGLayoutHints 36 5 5 2 2))
+
+;;; ── result label ─────────────────────────────────────────────────────────
+(def {res-lbl} (new TGLabel win "Fit result: —"))
+(.AddFrame win res-lbl (new TGLayoutHints 2 5 5 3 8))
+
+;;; ── ROOT objects ─────────────────────────────────────────────────────────
+(def {canvas} (.GetCanvas ec))
+(def {h}  (new TH1F "fh" "Gaussian data;x;entries" 100 -10. 10.))
+(def {gf} (new TF1 "gfunc" "gaus" -10. 10.))
+
+;;; ── redraw: update labels, refill histogram ──────────────────────────────
+(def {redraw} (\{} {do
+  (def {mu}    (/ (.GetPosition mu-sl)  10.))
+  (def {sigma} (/ (.GetPosition sig-sl) 10.))
+  (.SetText mu-lbl  (new TGString (concat "mu = "    (str mu))))
+  (.SetText sig-lbl (new TGString (concat "sigma = " (str sigma))))
+  (doto gf {SetParameters 1. mu sigma})
+  (doto h
+    {Reset}
+    {FillRandom gf 5000})
+  (.cd canvas)
+  (doto h {Draw "HIST"})
+  (.Modified canvas)}))
+
+;;; ── fit callback ─────────────────────────────────────────────────────────
+(def {fit-fns} {"gaus" "pol1" "pol2" "pol3"})
+
+(def {do-fit} (\{} {do
+  (def {sel}   (.GetSelected combo))
+  (def {fname} (if (== sel 0) {"gaus"}
+               {(if (== sel 1) {"pol1"}
+               {(if (== sel 2) {"pol2"}
+               {"pol3"})})}))
+  (.Fit h fname "Q")
+  (def {fn} (.GetFunction h fname))
+  (.SetText res-lbl
+    (new TGString (concat "chi2 = " (str (.GetChisquare fn))
+                          "  ndf = " (str (.GetNDF fn)))))
+  (.cd canvas)
+  (.Draw h "HIST")
+  (.Draw fn "SAME")
+  (.Modified canvas)}))
+
+(connect mu-sl   "PositionChanged(Int_t)" redraw)
+(connect sig-sl  "PositionChanged(Int_t)" redraw)
+(connect fit-btn "Clicked()" do-fit)
+
+(doto win
+  {SetWindowName "Gaussian Fit GUI"}
+  {MapSubwindows}
+  {Resize (.GetDefaultWidth win) (.GetDefaultHeight win)}
+  {MapWindow})
+
+(redraw)
