@@ -247,26 +247,4 @@
 ;   {alias .Method extra-args...}    shorthand + bind result as alias
 
 ;;; OO interactions
-
-; Apply a set of methods all to the same object. E.g.
-; (doto h1
-;      {SetBins 1000 -10 10}
-;      {Draw}
-; )
-;
-; A step of the form {>> {Method1 args...} {Method2 args...} ...} threads the
-; object through a mini-pipeline: obj → Method1 → Method2 → ...
-; Useful when a sub-object is needed only to call a follow-up method on it:
-;   {>> {GetXaxis} {SetTitle "x [GeV]"}}
-(fun {doto obj & f} {
-  if (== f {})
-    {obj}
-    {do
-      (if (== (head (fst f)) {>>})
-        {foldl (\{cur step} {eval (join {.} (head step) (list cur) (tail step))})
-               obj
-               (tail (fst f))}
-        {eval (join {.} (head (fst f)) (list obj) (tail (fst f)))})
-      (curry (doto) (join {obj} (tail f)))
-    }
-})
+; doto is a C++ builtin (see rooture.cxx builtin_doto).

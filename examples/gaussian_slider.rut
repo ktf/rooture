@@ -28,8 +28,7 @@
 (def {canvas} (.GetCanvas ec))
 
 ;;; ── redraw callback ──────────────────────────────────────────────────────
-(def {redraw} (\
-  {}
+(def {redraw} (\{}
   {do
     (def {pos}   (.GetPosition slider))
     (def {sigma} (/ pos 10.))

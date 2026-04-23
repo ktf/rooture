@@ -35,6 +35,25 @@ The symbol regex includes `:`, so `ROOT::RDF::TH1DModel` is a single symbol and 
 ```
 No quoting needed for namespaced class or namespace names.
 
+### Use `doto` to reduce verbosity
+When making multiple method calls on the same object, always prefer `doto` over repeated `.Method` calls:
+```
+; preferred
+(def {sl}
+  (doto (new TGHSlider parent 160 3 -1)
+    {SetRange 1 50}
+    {SetPosition 10}))
+
+; avoid
+(def {sl} (new TGHSlider parent 160 3 -1))
+(.SetRange sl 1 50)
+(.SetPosition sl 10)
+```
+`doto` also works inside callbacks for sequential operations on an object:
+```
+(doto h {Reset} {FillRandom gf 5000})
+```
+
 ### `if` branches must be Q-expressions
 ```
 (if cond {true-val} {false-val})   ; correct

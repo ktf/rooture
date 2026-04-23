@@ -1963,6 +1963,53 @@ lval* builtin_arrow(lenv* e, lval* a) {
   return acc;
 }
 
+// (doto obj {Method args...} {Method2 args...} ...)
+// Calls each method on obj in sequence; returns obj.
+// Steps with first element ">>" thread the result: {>> {GetAxis} {SetTitle "x"}}.
+lval* builtin_doto(lenv* e, lval* a) {
+  LASSERT(a, a->count >= 1, "'doto' requires at least one argument.");
+  lval* obj = lval_copy(a->cell[0]);
+
+  for (int s = 1; s < a->count; s++) {
+    lval* step = a->cell[s];
+    LASSERT(a, step->type == LVAL_QEXPR && step->count >= 1,
+            "'doto' steps must be non-empty Q-expressions.");
+
+    if (step->cell[0]->type == LVAL_SYM &&
+        strcmp(step->cell[0]->sym, ">>") == 0) {
+      // Threading pipeline: thread obj through sub-steps, discard result
+      lval* cur = lval_copy(obj);
+      for (int i = 1; i < step->count; i++) {
+        lval* sub = step->cell[i];
+        LASSERT(a, sub->type == LVAL_QEXPR && sub->count >= 1,
+                "'doto' '>>' sub-steps must be non-empty Q-expressions.");
+        lval* call = lval_sexpr();
+        lval_add(call, lval_sym("."));
+        lval_add(call, lval_copy(sub->cell[0]));  // method name
+        lval_add(call, cur);                        // current object
+        for (int j = 1; j < sub->count; j++)
+          lval_add(call, lval_copy(sub->cell[j]));
+        cur = lval_eval(e, call);
+        if (cur->type == LVAL_ERR) { lval_del(obj); return cur; }
+      }
+      lval_del(cur);
+    } else {
+      // Normal step: call method on obj, discard result
+      lval* call = lval_sexpr();
+      lval_add(call, lval_sym("."));
+      lval_add(call, lval_copy(step->cell[0]));  // method name
+      lval_add(call, lval_copy(obj));              // object
+      for (int i = 1; i < step->count; i++)
+        lval_add(call, lval_copy(step->cell[i]));
+      lval* result = lval_eval(e, call);
+      if (result->type == LVAL_ERR) { lval_del(obj); return result; }
+      lval_del(result);
+    }
+  }
+
+  return obj;
+}
+
 // Creates a new C++ object
 lval *builtin_new(lenv *e, lval* a) {
   LASSERT(a, a->count >= 1,
@@ -2247,7 +2294,8 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "exit", builtin_exit);
   
   /*TObject interaction*/
-  lenv_add_builtin(e, "->",  builtin_arrow);
+  lenv_add_builtin(e, "->",   builtin_arrow);
+  lenv_add_builtin(e, "doto", builtin_doto);
   lenv_add_builtin(e, "new", builtin_new);
   lenv_add_builtin(e, "member", builtin_member);
   lenv_add_builtin(e, ".", builtin_member);
