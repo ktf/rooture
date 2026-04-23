@@ -1974,6 +1974,31 @@ lval* builtin_save_png(lenv* e, lval* a) {
   return res;
 }
 
+// (global "gClient") — resolve a C++ global by name via Cling, wrap it as a
+// rooture object and bind it in the current environment.
+// The global must be TObject-derived so its dynamic type can be found via IsA().
+lval* builtin_global(lenv* e, lval* a) {
+  LASSERT_NUM("global", a, 1);
+  LASSERT_TYPE("global", a, 0, LVAL_STR);
+
+  const char* name = a->cell[0]->str;
+
+  TInterpreter::EErrorCode err = TInterpreter::kNoError;
+  Long_t addr = gInterpreter->Calc(Form("(Long_t)(TObject*)%s", name), &err);
+  if (err != TInterpreter::kNoError || !addr) {
+    lval_del(a);
+    return lval_err("'global': '%s' is null or not found", name);
+  }
+
+  TObject* obj = (TObject*)addr;
+  TClass*  cls = obj->IsA();
+  lenv_add_global_object(e, name, obj, cls);
+
+  lval* result = lval_tobj(obj, cls);
+  lval_del(a);
+  return result;
+}
+
 // (annotate sym "text") — attach a documentation string to a symbol name.
 // The symbol auto-converts to a string at the call site, so both
 //   (annotate myplot "description")  and  (annotate "myplot" "description")
@@ -2046,6 +2071,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, ".", builtin_member);
   lenv_add_builtin(e, "::", builtin_static);
   lenv_add_builtin(e, "invoke", builtin_invoke);
+  lenv_add_builtin(e, "global",  builtin_global);
   lenv_add_builtin(e, "symbols", builtin_symbols);
   lenv_add_builtin(e, "canvases", builtin_canvases);
   lenv_add_builtin(e, "annotate", builtin_annotate);
