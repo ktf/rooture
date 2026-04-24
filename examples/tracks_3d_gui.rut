@@ -1,0 +1,276 @@
+;;; tracks_3d_gui.rut
+;;;
+;;; 3-D track explorer for ALICE AO2D data.
+;;; Single canvas, three pads:
+;;;   pad1 (left)   — COLZ density: eta × sigma(pT)/pT
+;;;   pad2 (centre) — 3D scatter:   eta × log2(sigma(pT)/pT) × N_TPC cls
+;;;   pad3 (right)  — 3D helices:   actual track trajectories in global X/Y/Z
+;;; A slider filters by minimum number of TPC clusters.
+;;;
+;;; Usage:
+;;;   (load "/Users/ktf/src/rooture/examples/tracks_3d_gui.rut")
+
+(load stdlib.rut)
+(.Load gSystem "libGui")
+(global "gClient")
+(global "gInterpreter")
+
+;;; ── File / chains ────────────────────────────────────────────────────────
+(def {aod-path} "/Users/ktf/src/data/2024/LHC24ar/559575/apass1/2050/o2_ctf_run00559575_orbit0059692928_tf0000474395_epn011/001/AO2D.root")
+
+(def {trk-chain}   (new TChain "O2track_iu"))
+(def {extra-chain} (new TChain "O2trackextra_002"))
+(def {cov-chain}   (new TChain "O2trackcov_iu"))
+
+(def {f-keys} (.GetListOfKeys (new TFile aod-path "READ")))
+(def {nkeys}  (.GetEntries f-keys))
+
+(dotimes {i} nkeys {
+  do
+  (= {k} (.At f-keys i))
+  (if (== (.GetClassName k) "TDirectoryFile")
+    {do
+      (= {dn} (.GetName k))
+      (.Add trk-chain   (concat aod-path "?#" dn "/O2track_iu"))
+      (.Add extra-chain (concat aod-path "?#" dn "/O2trackextra_002"))
+      (.Add cov-chain   (concat aod-path "?#" dn "/O2trackcov_iu"))}
+    {})
+})
+
+(.AddFriend trk-chain extra-chain)
+(.AddFriend trk-chain cov-chain)
+
+;;; Cling global for the quality scatter
+(.ProcessLine gInterpreter "TGraph2D* gScatter3D = nullptr;")
+
+;;; ── Fill TH3D once (sample of 500k tracks) ───────────────────────────────
+;;; Axes: eta × sigma(pT)/pT × N_TPC cls
+(def {h3raw}
+  (-> (new ROOT::RDataFrame trk-chain)
+    {.Range 500000}
+    {.Define "eta"   "TMath::ASinH(fTgl)"}
+    {.Define "sigPt" "fSigma1Pt / std::abs(fSigned1Pt)"}
+    {.Define "nCls"  "int(fTPCNClsFindable) - int(fTPCNClsFindableMinusFound)"}
+    {.Histo3D (new ROOT::RDF::TH3DModel
+                 "h3raw" ";#eta;#sigma(p_{T})/p_{T};N_{TPC cls}"
+                 40 -2. 2.  50 0. 0.5  161 -0.5 160.5)
+              "eta" "sigPt" "nCls"}))
+
+;;; ── GUI window (created before initial draws so sl is bound) ─────────────
+(def {win} (new TGMainFrame (.GetRoot gClient) 460 70))
+
+(def {hf}    (new TGHorizontalFrame win 0 0))
+(def {lbl}   (new TGLabel hf "Min TPC clusters:"))
+(def {sl}
+  (doto (new TGHSlider hf 300 3 -1)
+    {SetRange 0 160}
+    {SetPosition 0}))
+(def {lbl-v} (new TGLabel hf "  0"))
+
+(.AddFrame hf lbl   (new TGLayoutHints 16 5 5 5 5))
+(.AddFrame hf sl    (new TGLayoutHints 16 5 5 5 5))
+(.AddFrame hf lbl-v (new TGLayoutHints 16 8 5 5 5))
+(.AddFrame win hf   (new TGLayoutHints 65 5 5 8 8))
+
+;;; ── Single canvas with three equal pads ──────────────────────────────────
+(def {c} (new TCanvas "c" "ALICE track explorer" 2400 750))
+
+(def {pad1} (doto (new TPad "pad1" "density" 0.    0. 0.333 1.)
+  {SetRightMargin 0.16}
+  {SetLeftMargin  0.13}
+  {Draw}))
+
+(def {pad2} (doto (new TPad "pad2" "scatter" 0.333 0. 0.667 1.)
+  {SetRightMargin 0.15}
+  {SetLeftMargin  0.14}
+  {Draw}))
+
+(def {pad3} (doto (new TPad "pad3" "helices" 0.667 0. 1.    1.)
+  {SetRightMargin 0.05}
+  {SetLeftMargin  0.05}
+  {Draw}))
+
+;;; ── Helpers ──────────────────────────────────────────────────────────────
+
+;;; pad1: projected 2-D density with nCls range cut
+(def {update-density} (\{} {
+  do
+  (= {minCls} (.GetPosition sl))
+  (.SetRange (.GetZaxis h3raw) (+ minCls 1) 162)
+  (= {hp} (.Project3D h3raw "yx"))
+  (.SetRange (.GetZaxis h3raw) 0 162)
+  (.SetTitle hp (concat "N_{TPC cls} #geq " (str minCls) ";#eta;#sigma(p_{T})/p_{T}"))
+  (.cd pad1)
+  (.Draw hp "COLZ")
+  (.Update c)
+  (.RaiseWindow c)
+}))
+
+;;; pad2: 3D quality scatter — eta × log2(sigma) × N_TPC cls
+;;; V1=nCls  V2=log2(sigPt)  V3=eta
+(def {update-scatter} (\{} {
+  do
+  (= {minCls} (.GetPosition sl))
+  (.ProcessLine gInterpreter
+    (concat
+      "{ TChain* _c=(TChain*)" (str trk-chain) ";"
+      " _c->Draw(\"int(fTPCNClsFindable)-int(fTPCNClsFindableMinusFound)"
+               ":TMath::Log2(fSigma1Pt/TMath::Abs(fSigned1Pt))"
+               ":TMath::ASinH(fTgl)\","
+               "\"int(fTPCNClsFindable)-int(fTPCNClsFindableMinusFound)>=" (str minCls)
+               "&&fSigma1Pt>0&&fSigned1Pt!=0\","
+               "\"goff\",20000);"
+      " Long64_t _n=_c->GetSelectedRows();"
+      " delete gScatter3D;"
+      " gScatter3D=new TGraph2D((Int_t)_n,_c->GetV3(),_c->GetV2(),_c->GetV1());"
+      " gScatter3D->SetMarkerStyle(20);"
+      " gScatter3D->SetMarkerSize(0.4);"
+      " gScatter3D->GetXaxis()->SetTitle(\"#eta\");"
+      " gScatter3D->GetYaxis()->SetTitle(\"log_{2}(#sigma(p_{T})/p_{T})\");"
+      " gScatter3D->GetZaxis()->SetTitle(\"N_{TPC cls}\"); }"))
+  (global "gScatter3D")
+  (.SetTitle gScatter3D (concat "N_{TPC cls} #geq " (str minCls)
+                                ";#eta;log_{2}(#sigma(p_{T})/p_{T});N_{TPC cls}"))
+  (.cd pad2)
+  (.Draw gScatter3D "PCOL")
+  (.Update c)
+  (.RaiseWindow c)
+}))
+
+;;; pad3: true 3D helix view
+;;;
+;;; Track helix in the local sector frame (t = arc length in XY plane):
+;;;   C        = fSigned1Pt * bz * kB2C          [curvature, cm^-1]
+;;;   phi0     = arcsin(fSnp)                     [local azimuthal angle at ref]
+;;;   xc       = fX - fSnp/C                      [circle centre, local x]
+;;;   yc       = fY + cos(phi0)/C                 [circle centre, local y]
+;;;   x_loc(t) = xc + sin(phi0 + C*t)/C
+;;;   y_loc(t) = yc - cos(phi0 + C*t)/C
+;;;   z(t)     = fZ + fTgl*t
+;;; Global:
+;;;   X = x_loc*cos(fAlpha) - y_loc*sin(fAlpha)
+;;;   Y = x_loc*sin(fAlpha) + y_loc*cos(fAlpha)
+;;;
+;;; Colour by pT:  <0.5 GeV→blue  0.5-1→cyan  1-2→green  >2→orange
+;;;
+;;; Three Draw("goff") calls (max 3 vars each, avoids GetV4) retrieve all
+;;; 7 parameters for the same nmax tracks (deterministic chain traversal).
+;;; pad3 is Clear'd from rooture before ProcessLine to avoid render races.
+(def {update-helices} (\{} {
+  do
+  (= {minCls} (.GetPosition sl))
+  (.cd pad3)
+  (.Clear pad3)
+  (.ProcessLine gInterpreter
+    (concat
+      "{"
+      " const float bz=5.f, kB2C=2.99792458e-4f;"
+      " const int nmax=200, npts=60;"
+      " const float tmin=-120.f, tmax=230.f, dt=(tmax-tmin)/(npts-1);"
+      " TChain* _c=(TChain*)" (str trk-chain) ";"
+      " TPad*   _p=(TPad*)"   (str pad3) ";"
+      " _p->cd();"
+      " const char* _cut=\"int(fTPCNClsFindable)-int(fTPCNClsFindableMinusFound)>=" (str minCls) "\";"
+
+      ;;; Call 1: fSnp, fTgl, fAlpha
+      " _c->Draw(\"fSnp:fTgl:fAlpha\",_cut,\"goff\",nmax);"
+      " Long64_t _n=_c->GetSelectedRows();"
+      " if(_n==0) return;"
+      " std::vector<double> _vsnp(_n),_vtgl(_n),_va(_n);"
+      " for(Long64_t i=0;i<_n;i++){_vsnp[i]=_c->GetV1()[i];_vtgl[i]=_c->GetV2()[i];_va[i]=_c->GetV3()[i];}"
+
+      ;;; Call 2: fZ, fY, fX
+      " _c->Draw(\"fZ:fY:fX\",_cut,\"goff\",nmax);"
+      " Long64_t _n2=_c->GetSelectedRows(),_m=_n<_n2?_n:_n2;"
+      " std::vector<double> _vz(_m),_vy(_m),_vx(_m);"
+      " for(Long64_t i=0;i<_m;i++){_vz[i]=_c->GetV1()[i];_vy[i]=_c->GetV2()[i];_vx[i]=_c->GetV3()[i];}"
+
+      ;;; Call 3: fSigned1Pt
+      " _c->Draw(\"fSigned1Pt\",_cut,\"goff\",nmax);"
+      " Long64_t _n3=_c->GetSelectedRows(),_mm=_m<_n3?_m:_n3;"
+      " std::vector<double> _vs(_mm);"
+      " for(Long64_t i=0;i<_mm;i++) _vs[i]=_c->GetV1()[i];"
+
+      ;;; Build TPolyLine3D objects
+      " std::vector<TPolyLine3D*> _pls;"
+      " _pls.reserve(_mm);"
+      " for(Long64_t i=0;i<_mm;i++){"
+      "   float C=(float)(_vs[i]*bz*kB2C);"
+      "   if(std::abs(C)<1e-9f||std::isnan(C)) continue;"
+      "   float snp=(float)_vsnp[i];"
+      "   if(snp<-1.f)snp=-1.f; if(snp>1.f)snp=1.f;"
+      "   float phi0=TMath::ASin(snp),cs0=TMath::Cos(phi0);"
+      "   float xref=(float)_vx[i],yref=(float)_vy[i],zref=(float)_vz[i];"
+      "   float xc=xref-snp/C,yc=yref+cs0/C;"
+      "   float al=(float)_va[i],ca=TMath::Cos(al),sa=TMath::Sin(al);"
+      "   TPolyLine3D* pl=new TPolyLine3D(npts);"
+      "   for(int ip=0;ip<npts;ip++){"
+      "     float t=tmin+ip*dt,ph=phi0+C*t;"
+      "     float xl=xc+TMath::Sin(ph)/C,yl=yc-TMath::Cos(ph)/C;"
+      "     pl->SetPoint(ip,xl*ca-yl*sa,xl*sa+yl*ca,zref+(float)_vtgl[i]*t);"
+      "   }"
+      "   float pt=(float)(_vs[i]!=0?1./std::abs(_vs[i]):0.);"
+      "   int col=pt<.5f?kAzure+1:pt<1.f?kCyan+1:pt<2.f?kGreen+2:kOrange+7;"
+      "   pl->SetLineColor(col);pl->SetLineWidth(1);"
+      "   _pls.push_back(pl);"
+      " }"
+
+      ;;; Draw: first line creates the 3D view, then fix range to TPC volume
+      " if(_pls.empty()) return;"
+      " _pls[0]->Draw(\"L\");"
+      " TView* _v=_p->GetView();"
+      " if(_v){double _mn[3]={-260,-260,-260},_mx[3]={260,260,260};_v->SetRange(_mn,_mx);}"
+      " for(size_t ii=1;ii<_pls.size();ii++) _pls[ii]->Draw(\"SAMEL\");"
+
+      ;;; Helper lambda: draw a wireframe cylinder
+      ;;; Args: radius r, z1..z2, nCircles evenly spaced, nSegs longitudinal lines,
+      ;;;       ROOT colour col, line width lw
+      " auto drawCyl=[&](float r,float z1,float z2,int nCirc,int nSeg,int col,int lw){"
+      "   const int nc=72;"
+      "   for(int ic=0;ic<nCirc;ic++){"
+      "     float zc=z1+(z2-z1)*ic/(nCirc-1);"
+      "     TPolyLine3D* cir=new TPolyLine3D(nc+1);"
+      "     for(int ip=0;ip<=nc;ip++){float ph=2.f*TMath::Pi()*ip/nc;"
+      "       cir->SetPoint(ip,r*TMath::Cos(ph),r*TMath::Sin(ph),zc);}"
+      "     cir->SetLineColor(col);cir->SetLineWidth(lw);cir->Draw(\"SAMEL\");"
+      "   }"
+      "   for(int ia=0;ia<nSeg;ia++){"
+      "     float ph=2.f*TMath::Pi()*ia/nSeg;"
+      "     float rx=r*TMath::Cos(ph),ry=r*TMath::Sin(ph);"
+      "     TPolyLine3D* seg=new TPolyLine3D(2);"
+      "     seg->SetPoint(0,rx,ry,z1);seg->SetPoint(1,rx,ry,z2);"
+      "     seg->SetLineColor(col);seg->SetLineWidth(lw);seg->Draw(\"SAMEL\");"
+      "   }"
+      " };"
+      ;;; Beam pipe:      r=2 cm,  bright yellow, z in [-250,+250]
+      ;;; Inner TPC wall: r=83 cm, light gray,    z in [-250,+250]
+      " drawCyl(2.f,  -250.f, 250.f, 5, 12, kYellow,   2);"
+      " drawCyl(83.f, -250.f, 250.f, 3,  8, kGray+1,   1);"
+      " }"
+    ))
+  (.Update c)
+  (.RaiseWindow c)
+}))
+
+(def {redraw} (\{} {
+  do
+  (= {minCls} (.GetPosition sl))
+  (.SetText lbl-v (new TGString (concat "  " (str minCls))))
+  (.Layout win)
+  (update-density)
+  (update-scatter)
+  (update-helices)
+}))
+
+;;; ── Initial draws ────────────────────────────────────────────────────────
+(update-density)
+(update-scatter)
+(update-helices)
+
+;;; ── Wire slider and show window ──────────────────────────────────────────
+(connect sl "PositionChanged(Int_t)" redraw)
+
+(.SetWindowName win "TPC Cluster Cut")
+(.MapSubwindows win)
+(.Resize win (.GetDefaultWidth win) (.GetDefaultHeight win))
+(.MapRaised win)
