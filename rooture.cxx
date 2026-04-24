@@ -2265,6 +2265,8 @@ lval* builtin_str(lenv* e, lval* a) {
     snprintf(buf, sizeof(buf), "%ld", v->num);
   } else if (v->type == LVAL_FLOAT) {
     snprintf(buf, sizeof(buf), "%g", v->floating);
+  } else if (v->type == LVAL_TOBJ) {
+    snprintf(buf, sizeof(buf), "%p", v->obj);
   } else {
     lval_del(a);
     return lval_err("'str': cannot convert %s to string", ltype_name(v->type));
