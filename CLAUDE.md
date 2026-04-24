@@ -99,3 +99,9 @@ When making multiple method calls on the same object, always prefer `doto` over 
   debug GUI and layout issues: widgets not appearing, zero-width labels, wrong
   positions, text not refreshing after SetText.  Invoke this skill whenever
   something in a rooture GUI looks wrong or a label fails to update.
+
+- `alice-aod` (in `.claude/skills/alice-aod.md`) — how to read ALICE Run 3
+  AO2D data in rooture: file structure, building TChains across time frames,
+  friend chains for track+trackextra, RDataFrame column definitions (eta, phi,
+  pt, nCls), and the interactive 3D cluster-cut GUI example.  Invoke this skill
+  whenever the user is working with AO2D.root files or ALICE O2 track data.

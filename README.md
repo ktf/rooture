@@ -26,6 +26,104 @@ the idea immediately.
 
 ---
 
+## AI-assisted analysis
+
+ROOTure is designed for **interactive, AI-assisted data analysis**.
+Two properties make it a particularly good fit:
+
+**Lisp syntax is trivial for LLMs to generate correctly.**
+There is no operator precedence, no implicit semicolons, no indentation rules.
+Every expression is a fully self-contained tree wrapped in parentheses.
+An LLM can write, extend, or patch rooture code with far fewer syntactic errors
+than equivalent C++ or Python — and a bad expression fails cleanly at the REPL
+rather than segfaulting or leaving the interpreter in a broken state.
+
+**The MCP server closes the feedback loop.**
+ROOTure embeds a [Model Context Protocol](https://modelcontextprotocol.io) server
+so a connected AI assistant can evaluate expressions, read back results, capture
+canvas images, and iterate — all without you copying and pasting between windows.
+
+### Example: vibe-coding a fit GUI
+
+The interactive fit GUI in [`examples/fit_gui.rut`](examples/fit_gui.rut) was built
+entirely in conversation with Claude via MCP:
+
+<table>
+<tr>
+<th width="55%">Prompt</th>
+<th>Result</th>
+</tr>
+<tr>
+<td>
+
+> "Create a histogram of a Gaussian and draw it."
+
+```scheme
+(doto (new TH1F "h" "Gaussian;x;Events" 100 -4. 4.)
+  {FillRandom gaus 50000}
+  {Draw})
+```
+
+Claude calls `get_canvas` to see the raw distribution.
+
+</td>
+<td>
+
+![Initial histogram](docs/doto_histogram.png)
+
+</td>
+</tr>
+<tr>
+<td>
+
+> "Add sliders for mean, sigma, and number of entries,
+> and a live chi² display. Redraw on every slider move."
+
+Claude writes [`examples/fit_gui.rut`](examples/fit_gui.rut),
+loads it, and calls `get_window` to inspect the layout.
+
+</td>
+<td>
+
+![Fit GUI](docs/fit_gui.png)
+
+</td>
+</tr>
+<tr>
+<td>
+
+> "The chi² label doesn't update after I move a slider."
+
+Claude calls `get_window` again, sees the stale text,
+and diagnoses the missing `Layout` call — fixing it
+without leaving the conversation.
+
+</td>
+<td>
+
+![Fixed GUI](docs/gratification.png)
+
+</td>
+</tr>
+</table>
+
+The `annotate` form lets you leave semantic notes in the script that the assistant
+can read back via `list_annotations` — marking the meaningful knobs so it knows
+exactly what to suggest changes to:
+
+```scheme
+(def {nBins} 128)
+(annotate nBins "Histogram binning — increase for better mass resolution at the cost of stats")
+
+(def {fitRange} {2.9 3.2})
+(annotate fitRange "J/psi fit window in GeV — widen to include more background")
+```
+
+The assistant calls `list_annotations`, sees these descriptions, and can propose
+`(def {nBins} 256)` with full context — rather than guessing what the numbers mean.
+
+---
+
 ## RDataFrame pipelines
 
 The `->` threading macro chains RDataFrame operations cleanly:
@@ -68,32 +166,55 @@ spectrum on the left (log scale), J/ψ window on the right:
 
 ---
 
-## Interactive fit GUI
-
-A fully interactive ROOT GUI — sliders for mean, sigma, and number of entries,
-a fit-function selector, and live chi² output — vibe coded with Claude:
-
-```scheme
-(load examples/fit_gui.rut)
-```
-
-![Gaussian fit GUI](docs/fit_gui.png)
-
-See [`examples/fit_gui.rut`](examples/fit_gui.rut) for the full source.
-
----
-
 ## Key features
 
-- **Interactive REPL** with history and tab completion
+- **Interactive REPL** with syntax highlighting, history, and tab completion
 - **Seamless ROOT interop** — any ROOT class, method, or global is directly accessible
 - **`doto`** — apply multiple methods to one object (à la Clojure)
 - **`->`** — thread a value through a chain of method calls
 - **`@name`** — retrieve any named ROOT object via `gROOT->FindObject`
 - **Lambdas** — pass rooture functions as C++ callables (e.g. `RDataFrame::Define`)
 - **`|` tail strings** — write unquoted strings at the end of a Q-expression: `{.Filter | pt > 10}`
-- **`annotate`** — attach documentation to symbols; MCP-accessible for AI-assisted analysis
-- **MCP server** — connect Claude or any MCP-capable AI assistant for assisted analysis
+- **`annotate`** — attach semantic notes to symbols; exposed to AI assistants via MCP
+- **MCP server** — connect Claude or any MCP-capable AI assistant for AI-assisted analysis
+
+---
+
+## MCP server
+
+Start rooture with the MCP flag and configure your AI assistant to connect to it:
+
+```sh
+./build/rooture --mcp
+```
+
+With Claude Code, add a `.mcp.json` to your project directory:
+
+```json
+{
+  "mcpServers": {
+    "rooture": {
+      "command": "/path/to/rooture",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+The assistant can then evaluate expressions, read back results, and capture canvases
+without you copying anything between windows.
+
+Available MCP tools:
+
+| Tool | Description |
+|------|-------------|
+| `eval` | Evaluate any rooture expression |
+| `list_symbols` | List all user-defined symbols |
+| `list_annotations` | List all `annotate`d symbols with their descriptions |
+| `list_canvases` | List open ROOT canvases |
+| `get_canvas` | Capture a canvas as a PNG image |
+| `get_window` | Capture a GUI window (`TGFrame`) as a PNG image |
+| `reload` | Restart the server after rebuilding |
 
 ---
 
@@ -122,135 +243,20 @@ Or execute a script:
 
 ## Language overview
 
-### Everything is an expression
+See **[docs/language.md](docs/language.md)** for the full language reference.
+
+A quick taste:
 
 ```scheme
 (def {h} (new TH1F "foo" "bar" 100 -5. 5.))   ; create object
 (.FillRandom h gaus 10000)                      ; call method
-(.Draw h)                                       ; another method
-```
+(.Draw h)
 
-Unquoted symbols auto-convert to strings, so `gaus` and `"gaus"` are identical.
-
-### Method calls
-
-```scheme
-(.Method obj arg1 arg2)     ; instance method
-(::StaticMethod Class arg)  ; static / namespace-scoped method
-```
-
-### `doto` — multiple methods on one object
-
-```scheme
-(doto canvas
-  {SetGrid}
-  {SetLogx}
-  {>> {GetXaxis} {SetTitle "mass [GeV]"}}   ; sub-object pipeline
-  {Update})
-```
-
-The `{>> {Step1} {Step2}}` form threads the object through a mini-pipeline,
-useful when you need to call a method on a sub-object (e.g. an axis).
-
-### `|` — tail strings in Q-expressions
-
-A `|` inside a Q-expression starts an inline string that runs to end-of-line
-or to the closing `}`, whichever comes first — no quotes needed:
-
-```scheme
-{.Filter | pt > 20 && eta < 2.4}          ; same as {.Filter "pt > 20 && eta < 2.4"}
-{SetTitle | #tau [ps]}                     ; special characters need no escaping
-{.Define "col" | sqrt(x*x + y*y)}         ; earlier args can still be quoted normally
-```
-
-Multiple `|` strings can appear on separate lines within one Q-expression:
-
-```scheme
-{1 | foo
- 0 1 2 | bar}           ; equivalent to {1 "foo" 0 1 2 "bar"}
-```
-
-The only character that cannot appear in an inline string is `}`.
-
-### `->` — method chaining
-
-```scheme
-(-> dataFrame
+(-> dataFrame                                   ; method chaining
   {.Filter | pt > 10}
-  {.Define "eta2" | eta*eta}
-  {.Histo1D "eta2"}
+  {.Histo1D "pt"}
   {.DrawClone})
 ```
-
-### `@name` — look up named objects
-
-```scheme
-(doto @myCanvas
-  {Modified}
-  {Update})
-```
-
-### Lambdas
-
-```scheme
-(def {myFilter}
-  (\{x} {> x 0.5}))
-
-(.Filter df myFilter {"x"})
-```
-
-### `annotate` — documenting symbols for AI-assisted analysis
-
-Attach a human-readable description to any symbol with `annotate`:
-
-```scheme
-(def {fitRange} {2.9 3.2})
-(annotate fitRange "J/psi fit window in GeV — widen to include more background")
-
-(def {nBins} 128)
-(annotate nBins "Histogram binning — increase for better mass resolution at the cost of stats")
-```
-
-Annotations are accessible at any time:
-
-```scheme
-(annotations)   ; => {{"fitRange" "J/psi fit window ..."} {"nBins" "Histogram binning ..."}}
-```
-
-When running with `--mcp`, the `list_annotations` tool exposes all annotations to the
-connected AI assistant. This lets you mark the meaningful knobs in your analysis script
-so the assistant knows exactly what to suggest changes to:
-
-```scheme
-; The assistant calls list_annotations, sees "nBins", reads its description,
-; and can propose (def {nBins} 256) with the right context.
-```
-
----
-
-## MCP server
-
-ROOTure includes a [Model Context Protocol](https://modelcontextprotocol.io) server
-so AI assistants (e.g. Claude) can evaluate expressions, inspect results, and capture
-canvas images — enabling AI-assisted interactive analysis.
-
-Start with the MCP flag:
-
-```sh
-./build/rooture --mcp
-```
-
-Available MCP tools:
-
-| Tool | Description |
-|------|-------------|
-| `eval` | Evaluate any rooture expression |
-| `list_symbols` | List all user-defined symbols |
-| `list_annotations` | List all `annotate`d symbols with their descriptions |
-| `list_canvases` | List open ROOT canvases |
-| `get_canvas` | Capture a canvas as a PNG image |
-| `get_window` | Capture a GUI window (`TGFrame`) as a PNG image |
-| `reload` | Restart the server after rebuilding |
 
 ---
 
