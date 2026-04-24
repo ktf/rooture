@@ -91,6 +91,10 @@ loads it, and calls `get_window` to inspect the layout.
 </tr>
 </table>
 
+The full session diary — including the spline feature, two bugs found and fixed,
+and a χ²/ndf display added for the smooth mode — is documented in
+[`docs/spline-vibe-coding.md`](docs/spline-vibe-coding.md).
+
 The `annotate` form lets you leave semantic notes in the script that the assistant
 can read back via `list_annotations` — marking the meaningful knobs so it knows
 exactly what to suggest changes to:
