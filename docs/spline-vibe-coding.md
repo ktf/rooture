@@ -352,6 +352,97 @@ Verified: selecting `pol2` (id 2) and clicking Fit uses `pol2`.
 
 ---
 
+## Improving the smooth mode — adding chi²/ndf display
+
+After the bug fixes, the smooth mode showed "Spline (N pts)" in the result label
+while the fit modes showed chi²/ndf.  The user asked: "why not chi²/ndf for the
+smooth case?"
+
+<table>
+<tr>
+<th width="55%">Attempt</th>
+<th>Result</th>
+</tr>
+
+<tr>
+<td>
+
+**Attempt 1 — rooture `dotimes` loop.**
+
+Compute χ² = Σ(data − spline)² / data over all histogram bins in
+a rooture loop:
+
+```scheme
+(= {chi2} 0.)
+(= {nused} 0)
+(dotimes {ib} (.GetNbinsX h) {do
+  (= {data} (.GetBinContent h (+ ib 1)))
+  (if (> data 0.)
+    {do
+      (= {xc} (.GetBinCenter h (+ ib 1)))
+      (= {sv} (.Eval sp xc))
+      (= {chi2} (+ chi2 (/ (* (- data sv) (- data sv)) data)))
+      (= {nused} (+ nused 1))}
+    {})})
+```
+
+</td>
+<td>
+
+Hangs.  100 iterations × up to 5 Cling method calls each ≈ 500
+round-trips through rooture's Cling dispatch (type probe, alias
+declaration, Execute).  Too slow to complete interactively.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+**Attempt 2 — single `process-line` block with injected pointers.**
+
+`(str obj)` for a TOBJ returns its raw pointer as a hex string.
+Build one C++ compound statement that injects the `h`, `sp`, and
+`res-lbl` pointers, runs the loop in C++, and writes the formatted
+result directly to the label — all in one Cling call:
+
+```scheme
+(process-line (concat
+  "{ TH1F* __h=(TH1F*)" (str h) ";"
+  " TSpline3* __sp=(TSpline3*)" (str sp) ";"
+  " double __chi2=0; int __ndf=0;"
+  " for(int b=1;b<=__h->GetNbinsX();b++){"
+  "   double d=__h->GetBinContent(b); if(d<=0) continue;"
+  "   double x=__h->GetBinCenter(b);"
+  "   double s=__sp->Eval(x);"
+  "   __chi2+=(d-s)*(d-s)/d; __ndf++;}"
+  " __ndf-=" (str n) ";"
+  " ((TGLabel*)" (str res-lbl)
+  ")->SetText(new TGString(Form("
+  "\"chi2 = %.1f  ndf = %d\",__chi2,__ndf))); }"))
+```
+
+ndf = occupied bins − n control points.
+
+</td>
+<td>
+
+Returns instantly.  With 5 control points:
+`chi2 = 3093.1  ndf = 28` — poor fit as expected (points spread
+across the empty tails).  With 15 points:
+`chi2 = 62.6  ndf = 24` — spline closely follows the peak.
+
+The pattern generalises: whenever a rooture loop over many bins
+would make hundreds of Cling calls, replace it with a single
+`process-line` block and inject object pointers via `(str obj)`.
+
+</td>
+</tr>
+
+</table>
+
+---
+
 ## Key takeaways
 
 - **Native rooture first.** Before reaching for `ProcessLine`, ask whether
@@ -382,6 +473,13 @@ Verified: selecting `pol2` (id 2) and clicking Fit uses `pol2`.
   `rooture-env.sh`, relative loads silently hit the stale install prefix.
   Edits to source files are invisible until either `cmake --install` or the
   working-directory fix is in place.
+
+- **For bin-by-bin loops, use `process-line` with injected pointers.**
+  A rooture `dotimes` over 100 histogram bins makes ~500 Cling round-trips and
+  hangs.  Instead, build a single C++ compound statement with `concat` and
+  inject raw object addresses via `(str obj)` (which formats a TOBJ as its hex
+  pointer).  The C++ loop runs natively and the result is written directly to
+  the target widget — zero additional Cling overhead.
 
 - **Closures snapshot globals by value.** `lenv_copy` copies all bindings
   present in the global env at lambda-definition time into the closure's own

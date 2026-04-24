@@ -120,8 +120,20 @@
     (= {x} (+ xmin (/ (* i (- xmax xmin)) (- n 1))))
     (.SetPoint gr i x (.GetBinContent h (.FindBin h x)))})
   (= {sp} (new TSpline3 "spline" gr))
-  (.SetText res-lbl
-    (new TGString (concat "Spline (" (str n) " pts)")))
+  ;;; compute chi2/ndf in one C++ call — inject raw pointers via (str obj)
+  ;;; avoids a slow rooture loop (100 iterations x 3 Cling calls each)
+  (process-line (concat
+    "{ TH1F* __h=(TH1F*)" (str h) ";"
+    " TSpline3* __sp=(TSpline3*)" (str sp) ";"
+    " double __chi2=0; int __ndf=0;"
+    " for(int b=1;b<=__h->GetNbinsX();b++){"
+    "   double d=__h->GetBinContent(b); if(d<=0) continue;"
+    "   double x=__h->GetBinCenter(b);"
+    "   double s=__sp->Eval(x);"
+    "   __chi2+=(d-s)*(d-s)/d; __ndf++;}"
+    " __ndf-=" (str n) ";"
+    " ((TGLabel*)" (str res-lbl)
+    ")->SetText(new TGString(Form(\"chi2 = %.1f  ndf = %d\",__chi2,__ndf))); }"))
   (.cd canvas)
   (.Draw h "HIST")
   (.Draw sp "same")
