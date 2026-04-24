@@ -89,22 +89,6 @@ loads it, and calls `get_window` to inspect the layout.
 
 </td>
 </tr>
-<tr>
-<td>
-
-> "The chi² label doesn't update after I move a slider."
-
-Claude calls `get_window` again, sees the stale text,
-and diagnoses the missing `Layout` call — fixing it
-without leaving the conversation.
-
-</td>
-<td>
-
-![Fixed GUI](docs/gratification.png)
-
-</td>
-</tr>
 </table>
 
 The `annotate` form lets you leave semantic notes in the script that the assistant
