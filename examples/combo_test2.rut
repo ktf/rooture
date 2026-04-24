@@ -1,0 +1,70 @@
+;;; combo_test2.rut — mirrors fit_gui.rut state before combo creation
+(load stdlib.rut)
+(.Load gSystem "libGui")
+(global "gClient")
+
+(def {win} (new TGMainFrame (.GetRoot gClient) 600 560))
+(def {ec} (new TRootEmbeddedCanvas "fit_canvas2" win 580 340))
+(.AddFrame win ec (new TGLayoutHints 65 5 5 5 2))
+
+(def {gen-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win gen-row (new TGLayoutHints 65 5 5 2 2))
+
+(def {mu-lbl} (new TGLabel gen-row "mu = 0.0"))
+(.AddFrame gen-row mu-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {mu-sl}
+  (doto (new TGHSlider gen-row 160 3 -1)
+    {SetRange -30 30}
+    {SetPosition 0}))
+(.AddFrame gen-row mu-sl (new TGLayoutHints 36 2 15 4 4))
+
+(def {sig-lbl} (new TGLabel gen-row "sigma = 1.0"))
+(.AddFrame gen-row sig-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {sig-sl}
+  (doto (new TGHSlider gen-row 160 3 -1)
+    {SetRange 1 50}
+    {SetPosition 10}))
+(.AddFrame gen-row sig-sl (new TGLayoutHints 36 2 5 4 4))
+
+(def {n-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win n-row (new TGLayoutHints 65 5 5 2 2))
+
+(def {n-lbl} (new TGLabel n-row "N = 10000"))
+(.AddFrame n-row n-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {n-sl}
+  (doto (new TGHSlider n-row 300 3 -1)
+    {SetRange 1 100}
+    {SetPosition 100}))
+(.AddFrame n-row n-sl (new TGLayoutHints 36 2 5 4 4))
+
+(def {npts-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win npts-row (new TGLayoutHints 65 5 5 2 2))
+
+(def {npts-lbl} (new TGLabel npts-row "Control pts: 5"))
+(.AddFrame npts-row npts-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {npts-sl}
+  (doto (new TGHSlider npts-row 200 3 -1)
+    {SetRange 3 20}
+    {SetPosition 5}))
+(.AddFrame npts-row npts-sl (new TGLayoutHints 36 2 5 4 4))
+
+(def {fit-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win fit-row (new TGLayoutHints 65 5 5 2 2))
+
+(.AddFrame fit-row (new TGLabel fit-row "Fit function:") (new TGLayoutHints 18 5 5 4 4))
+
+(def {combo}
+  (doto (new TGComboBox fit-row -1)
+    {AddEntry "gaus" 0}
+    {AddEntry "pol1" 1}
+    {AddEntry "pol2" 2}
+    {AddEntry "pol3" 3}
+    {AddEntry "smooth" 4}
+    {Resize 90 22}
+    {Select 0}))
+
+(print "entries:" (.GetNumberOfEntries combo))

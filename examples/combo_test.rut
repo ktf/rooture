@@ -1,0 +1,12 @@
+;;; combo_test.rut — minimal repro for the 5th doto entry bug
+(load stdlib.rut)
+(.Load gSystem "libGui")
+(global "gClient")
+(def {tw} (new TGMainFrame (.GetRoot gClient) 400 100))
+(def {tc} (doto (new TGComboBox tw -1)
+    {AddEntry "a" 0}
+    {AddEntry "b" 1}
+    {AddEntry "c" 2}
+    {AddEntry "d" 3}
+    {AddEntry "e" 4}))
+(print "entries:" (.GetNumberOfEntries tc))

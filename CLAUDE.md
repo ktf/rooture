@@ -35,6 +35,19 @@ The underlying rooture builtin `save-window` accepts a TGFrame object and a path
 - `libASImage` is loaded on demand by `save-window`; no manual `(.Load gSystem
   "libASImage")` is needed.
 
+## Prefer native rooture over ProcessLine
+
+Rooture examples should use **native rooture syntax** as much as possible.
+`(. ProcessLine gInterpreter "...")` and `(. Calc gInterpreter "...")` are
+escape hatches for things that genuinely cannot be expressed otherwise (e.g.
+declaring a parameterised `TF1` with a custom `double f(double*, double*)`
+signature that the callable bridge cannot produce).
+
+Before reaching for `ProcessLine`, ask: can this be done with `new`, method
+calls, `dotimes`, or a rooture lambda?  If yes, do it that way.  The goal is
+to demonstrate how expressive rooture itself is, not to use it as a wrapper
+around Cling string-eval.
+
 ## Rooture language quirks
 
 ### Undefined symbols auto-convert to strings

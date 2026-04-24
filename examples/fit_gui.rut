@@ -2,6 +2,7 @@
 ;;;
 ;;; Fill a Gaussian histogram with controllable mean and sigma,
 ;;; then fit it with a user-selected function and report the fit quality.
+;;; Includes a TSpline3 smoothing mode with a variable number of control points.
 ;;;
 ;;;   (load examples/fit_gui.rut)
 
@@ -10,7 +11,7 @@
 (global "gClient")
 
 ;;; ── window ───────────────────────────────────────────────────────────────
-(def {win} (new TGMainFrame (.GetRoot gClient) 600 520))
+(def {win} (new TGMainFrame (.GetRoot gClient) 600 560))
 
 ;;; ── canvas ───────────────────────────────────────────────────────────────
 (def {ec} (new TRootEmbeddedCanvas "fit_canvas" win 580 340))
@@ -51,6 +52,19 @@
     {SetPosition 100}))
 (.AddFrame n-row n-sl (new TGLayoutHints 36 2 5 4 4))
 
+;;; ── control points row (visible only when "spline" is selected) ──────────
+(def {npts-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win npts-row (new TGLayoutHints 65 5 5 2 2))
+
+(def {npts-lbl} (new TGLabel npts-row "Control pts: 5"))
+(.AddFrame npts-row npts-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {npts-sl}
+  (doto (new TGHSlider npts-row 200 3 -1)
+    {SetRange 3 20}
+    {SetPosition 5}))
+(.AddFrame npts-row npts-sl (new TGLayoutHints 36 2 5 4 4))
+
 ;;; ── fit controls ─────────────────────────────────────────────────────────
 (def {fit-row} (new TGHorizontalFrame win 580 36))
 (.AddFrame win fit-row (new TGLayoutHints 65 5 5 2 2))
@@ -63,6 +77,7 @@
     {AddEntry "pol1" 1}
     {AddEntry "pol2" 2}
     {AddEntry "pol3" 3}
+    {AddEntry "smooth" 4}
     {Resize 90 22}
     {Select 0}))
 (.AddFrame fit-row combo (new TGLayoutHints 18 2 15 2 2))
@@ -81,43 +96,77 @@
 
 ;;; ── redraw: update labels, refill histogram ──────────────────────────────
 (def {redraw} (\{} {do
-  (def {mu}      (/ (.GetPosition mu-sl)  10.))
-  (def {sigma}   (/ (.GetPosition sig-sl) 10.))
-  (def {nentries} (* (.GetPosition n-sl) 100))
+  (= {mu}       (/ (.GetPosition mu-sl)  10.))
+  (= {sigma}    (/ (.GetPosition sig-sl) 10.))
+  (= {nentries} (* (.GetPosition n-sl) 100))
   (.SetText mu-lbl  (new TGString (concat "mu = "    (str mu))))
   (.SetText sig-lbl (new TGString (concat "sigma = " (str sigma))))
   (.SetText n-lbl   (new TGString (concat "N = "     (str nentries))))
   (doto gf {SetParameters 1. mu sigma})
-  (doto h
-    {Reset}
-    {FillRandom gf nentries})
+  (doto h {Reset} {FillRandom gf nentries})
   (.cd canvas)
-  (doto h {Draw "HIST"})
+  (.Draw h "HIST")
+  (.Modified canvas)}))
+
+;;; ── spline smoothing ─────────────────────────────────────────────────────
+;;; Sample the histogram at N evenly-spaced x positions, build a TGraph,
+;;; and draw a TSpline3 through those points.  Pure rooture — no ProcessLine.
+(def {do-spline} (\{} {do
+  (= {n}    (.GetPosition npts-sl))
+  (= {xmin} -10.)
+  (= {xmax}   10.)
+  (= {gr} (new TGraph n))
+  (dotimes {i} n {do
+    (= {x} (+ xmin (/ (* i (- xmax xmin)) (- n 1))))
+    (.SetPoint gr i x (.GetBinContent h (.FindBin h x)))})
+  (= {sp} (new TSpline3 "spline" gr))
+  (.SetText res-lbl
+    (new TGString (concat "Spline (" (str n) " pts)")))
+  (.cd canvas)
+  (.Draw h "HIST")
+  (.Draw sp "same")
   (.Modified canvas)}))
 
 ;;; ── fit callback ─────────────────────────────────────────────────────────
-(def {fit-fns} {"gaus" "pol1" "pol2" "pol3"})
-
 (def {do-fit} (\{} {do
-  (def {sel}   (.GetSelected combo))
-  (def {fname} (if (== sel 0) {"gaus"}
-               {(if (== sel 1) {"pol1"}
-               {(if (== sel 2) {"pol2"}
-               {"pol3"})})}))
-  (.Fit h fname "Q")
-  (def {fn} (.GetFunction h fname))
-  (.SetText res-lbl
-    (new TGString (concat "chi2 = " (str (.GetChisquare fn))
-                          "  ndf = " (str (.GetNDF fn)))))
-  (.cd canvas)
-  (.Draw h "HIST")
-  (.Draw fn "SAME")
-  (.Modified canvas)}))
+  (= {sel} (.GetSelected combo))
+  (if (== sel 4.)
+    {do-spline}
+    {do
+      (= {fname} (if (== sel 0.) {"gaus"}
+                 {(if (== sel 1.) {"pol1"}
+                 {(if (== sel 2.) {"pol2"}
+                 {"pol3"})})}))
+      (.Fit h fname "Q")
+      (= {fn} (.GetFunction h fname))
+      (.SetText res-lbl
+        (new TGString (concat "chi2 = " (str (.GetChisquare fn))
+                              "  ndf = " (str (.GetNDF fn)))))
+      (.cd canvas)
+      (.Draw h "HIST")
+      (.Draw fn "SAME")
+      (.Modified canvas)})}))
+
+;;; ── combo → show/hide the control-points row ─────────────────────────────
+(def {on-combo-change} (\{id} {do
+  (if (== id 4.)
+    {do (.ShowFrame win npts-row) (.Layout win)}
+    {do (.HideFrame win npts-row) (.Layout win)})}))
+
+;;; ── npts slider label update ─────────────────────────────────────────────
+(connect npts-sl "PositionChanged(Int_t)"
+  (\{} {do
+    (.SetText npts-lbl
+      (new TGString (concat "Control pts: " (str (.GetPosition npts-sl)))))}))
 
 (connect mu-sl   "PositionChanged(Int_t)" redraw)
 (connect sig-sl  "PositionChanged(Int_t)" redraw)
 (connect n-sl    "PositionChanged(Int_t)" redraw)
 (connect fit-btn "Clicked()" do-fit)
+(connect combo   "Selected(Int_t)" on-combo-change)
+
+;;; ── build and show window ────────────────────────────────────────────────
+(.HideFrame win npts-row)
 
 (doto win
   {SetWindowName "Gaussian Fit GUI"}

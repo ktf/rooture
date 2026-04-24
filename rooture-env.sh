@@ -18,4 +18,9 @@ cd "$(dirname "$ENVRC")" || exit 1
 # shellcheck disable=SC1090
 source "$(basename "$ENVRC")"
 
+# Change to the source directory so that (load examples/foo.rut) resolves
+# against the *source* tree, not the stale installed copy.
+SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SOURCE_DIR" || exit 1
+
 exec rooture "$@"
