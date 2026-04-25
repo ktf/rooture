@@ -1,0 +1,42 @@
+;;; bench_method_dispatch.rut
+;;;
+;;; Measures the cost of calling the same method repeatedly in a dotimes loop.
+;;; The bottleneck without caching is TMethodCall construction on every call.
+;;; Expected improvement: near-zero overhead after the first (cache-miss) call.
+;;;
+;;;   (load examples/bench_method_dispatch.rut)
+
+(load stdlib.rut)
+
+(def {h}  (new TH1F "bench_h" "bench" 100 -5. 5.))
+(def {sw} (new TStopwatch))
+
+;;; ── single-arg integer (kLong return) ─────────────────────────────────────
+;;; GetBinContent(Int_t bin) → Double_t, called with a constant LVAL_NUM arg.
+;;; The cache key will be "TH1F::GetBinContent(L)" — one miss then all hits.
+
+(.FillRandom h gaus 10000)
+
+(.Start sw 1)
+(dotimes {i} 500 {.GetBinContent h 1})
+(.Stop sw)
+(print "500x GetBinContent(1)   :" (.RealTime sw) "s")
+
+;;; ── single-arg float (kDouble return) ─────────────────────────────────────
+;;; GetRandom() → Double_t, no args; key = "TH1F::GetRandom()"
+
+(.Start sw 1)
+(dotimes {i} 500 {.GetRandom h})
+(.Stop sw)
+(print "500x GetRandom()        :" (.RealTime sw) "s")
+
+;;; ── two-arg void (SetBinContent) ───────────────────────────────────────────
+;;; SetBinContent(Int_t, Double_t) → void; key = "TH1F::SetBinContent(L,D)"
+;;; Tests LVAL_NUM + LVAL_FLOAT mix with correct coercion.
+
+(.Start sw 1)
+(dotimes {i} 500 {.SetBinContent h 1 0.5})
+(.Stop sw)
+(print "500x SetBinContent(1,0.5):" (.RealTime sw) "s")
+
+(print "done")

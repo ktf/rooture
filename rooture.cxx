@@ -19,6 +19,7 @@
 #include "TException.h"
 #include "TInterpreter.h"
 #include "TMethod.h"
+#include "TMethodArg.h"
 #include "TFile.h"
 #include "TStyle.h"
 #include "TRandom.h"
@@ -30,6 +31,8 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <unordered_map>
+#include <memory>
 #include <atomic>
 #include <regex>
 #include <climits>
@@ -51,6 +54,57 @@ enum { LVAL_ERR, LVAL_NUM,  LVAL_FLOAT, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR };
 
 static bool g_debug = false;
+
+// ---------------------------------------------------------------------------
+// TMethodCall cache: avoids repeated overload resolution for hot call sites.
+// Keyed by "ClassName::MethodName(L,D,O,...)" where L=Long/int, D=Double/float,
+// O=Object-pointer.  String args and callable args are not cached.
+// ---------------------------------------------------------------------------
+
+// Which SetParam overload to call for a given C++ parameter type.
+// Derived from TMethodArg::GetFullTypeName() at cache-population time so that
+// LVAL_NUM (Long_t) is correctly promoted to Double_t / Float_t when the
+// method signature requires it, and 64-bit integer types get the right overload.
+enum class ParamKind : uint8_t {
+  kLong,    // int, long, bool, pointer, enum → SetParam(Long_t)
+  kFloat,   // float, Float_t, Float16_t      → SetParam(Float_t)
+  kDouble,  // double, Double_t, Double32_t   → SetParam(Double_t)
+  kLong64,  // long long, Long64_t            → SetParam(Long64_t)
+  kULong64  // unsigned long long, ULong64_t  → SetParam(ULong64_t)
+};
+
+static ParamKind classify_param(const char* tn) {
+  // Unsigned 64-bit must be checked before signed (ULong64_t contains "Long64").
+  if (strstr(tn, "ULong64") || strstr(tn, "unsigned long long") || strstr(tn, "uint64"))
+    return ParamKind::kULong64;
+  if (strstr(tn, "Long64") || strstr(tn, "long long") || strstr(tn, "int64"))
+    return ParamKind::kLong64;
+  // Double before Float (Double32_t still matches "Double").
+  if (strstr(tn, "double") || strstr(tn, "Double"))
+    return ParamKind::kDouble;
+  if (strstr(tn, "float") || strstr(tn, "Float"))
+    return ParamKind::kFloat;
+  return ParamKind::kLong;
+}
+
+struct CachedMethodCall {
+  TClass*                       cached_cls;   // obj_cls at population time
+  std::unique_ptr<TMethodCall>  mc;
+  TMethodCall::EReturnType      ret_type;
+  bool                          is_ptr_return;
+  TClass*                       ptr_ret_cls;  // valid when is_ptr_return
+  std::vector<ParamKind>        param_kinds;  // per-parameter SetParam overload
+};
+static std::unordered_map<std::string, CachedMethodCall> g_method_cache;
+
+// Typed argument collected before lval_to_cpp_arg consumes the lval list.
+struct CacheArg {
+  int         type; // LVAL_NUM / LVAL_FLOAT / LVAL_STR / LVAL_TOBJ
+  long        num;
+  double      flt;
+  std::string str;
+  void*       obj;
+};
 
 static int             g_pipe_fds[2];
 static replxx::Replxx* g_rx = nullptr;
@@ -1050,6 +1104,31 @@ lval* builtin_member(lenv *e, lval *a) {
   std::string class_name  = obj->cls ? obj->cls->GetName() : "void";
   void*       obj_ptr     = obj->obj;
   TClass*     obj_cls     = obj->cls;
+
+  // Collect typed arg snapshots for the cache BEFORE lval_to_cpp_arg frees them.
+  std::string           cache_key;
+  std::vector<CacheArg> cache_args;
+  if (!has_callable) {
+    cache_key = class_name + "::" + method_name + "(";
+    bool cacheable = true;
+    for (int i = 0; i < a->count; i++) {
+      if (i) cache_key += ",";
+      lval* v = a->cell[i];
+      CacheArg ca; ca.type = v->type; ca.num = 0; ca.flt = 0.0; ca.obj = nullptr;
+      switch (v->type) {
+        case LVAL_NUM:   cache_key += "L"; ca.num = (long)v->num;  break;
+        case LVAL_FLOAT: cache_key += "D"; ca.flt = v->floating;   break;
+        case LVAL_TOBJ:  cache_key += "O"; ca.obj = v->obj;        break;
+        // LVAL_STR: no SetParam(const char*) in this ROOT version — skip cache
+        default:         cacheable = false;                         break;
+      }
+      if (!cacheable) break;
+      cache_args.push_back(ca);
+    }
+    if (!cacheable) cache_key = "";
+    else            cache_key += ")";
+  }
+
   std::string args = lval_to_cpp_arg(e, a, 0);
   lval_del(name); lval_del(obj); lval_del(a);
 
@@ -1217,10 +1296,76 @@ lval* builtin_member(lenv *e, lval *a) {
       [&]{ gInterpreter->ProcessLine((base + ";").c_str()); });
   }
 
+  // ── cache hit path ──────────────────────────────────────────────────────
+  // Uses Execute(void* obj, const void* args[], int nargs, void* ret) which
+  // calls the Cling JIT wrapper directly — bypassing the per-call mutex and
+  // cling::Value type-check loop of the SetParam/exec() path.
+  if (!cache_key.empty()) {
+    auto it = g_method_cache.find(cache_key);
+    if (it != g_method_cache.end() && it->second.cached_cls == obj_cls) {
+      CachedMethodCall& cached = it->second;
+
+      // Pack typed argument values into uint64_t storage, one slot per arg.
+      // The Cling wrapper reads each slot as *(ParamType*)args[i]; storing
+      // all types in uint64_t is safe on little-endian 64-bit (arm64/x86-64):
+      // smaller types occupy the low bytes, so the cast reads correctly.
+      const int nargs = (int)cache_args.size();
+      uint64_t   arg_vals[8] = {};          // up to 8 args on the stack
+      const void* arg_ptrs[8] = {};
+      for (int i = 0; i < nargs && i < 8; i++) {
+        const CacheArg& ca = cache_args[i];
+        ParamKind pk = (i < (int)cached.param_kinds.size())
+                       ? cached.param_kinds[i] : ParamKind::kLong;
+        double dval = (ca.type == LVAL_FLOAT) ? ca.flt : (double)ca.num;
+        long   ival = (ca.type == LVAL_FLOAT) ? (long)ca.flt : ca.num;
+        switch (pk) {
+          case ParamKind::kFloat: {
+            Float_t f = (Float_t)dval;  memcpy(&arg_vals[i], &f, sizeof(f)); break;
+          }
+          case ParamKind::kDouble: {
+            Double_t d = dval;          memcpy(&arg_vals[i], &d, sizeof(d)); break;
+          }
+          case ParamKind::kLong64: {
+            Long64_t ll = (Long64_t)ival; memcpy(&arg_vals[i], &ll, sizeof(ll)); break;
+          }
+          case ParamKind::kULong64: {
+            ULong64_t ull = (ULong64_t)(unsigned long)ival;
+            memcpy(&arg_vals[i], &ull, sizeof(ull)); break;
+          }
+          default: {  // kLong — int, bool, pointer, enum
+            Long_t l = (ca.type == LVAL_TOBJ) ? (Long_t)(intptr_t)ca.obj : (Long_t)ival;
+            memcpy(&arg_vals[i], &l, sizeof(l)); break;
+          }
+        }
+        arg_ptrs[i] = &arg_vals[i];
+      }
+
+      if (pad_snapshot) { pad_snapshot->cd(); gROOT->SetSelectedPad(pad_snapshot); }
+      switch (cached.ret_type) {
+        case TMethodCall::kLong: {
+          Longptr_t ret = 0;
+          cached.mc->Execute(obj_ptr, arg_ptrs, nargs, &ret);
+          if (cached.is_ptr_return) return lval_tobj((void*)ret, cached.ptr_ret_cls);
+          return lval_num((long)ret);
+        }
+        case TMethodCall::kDouble: {
+          Double_t ret = 0;
+          cached.mc->Execute(obj_ptr, arg_ptrs, nargs, &ret);
+          return lval_floating(ret);
+        }
+        default:  // kNone / kOther+void
+          cached.mc->Execute(obj_ptr, arg_ptrs, nargs, nullptr);
+          return lval_qexpr();
+      }
+    }
+  }
+  // ── end cache hit path ───────────────────────────────────────────────────
+
   TMethodCall mc(obj_cls, method_name.c_str(), args.c_str());
   if (!mc.IsValid()) {
     // Method not found directly — try smart-pointer dereference via operator->().
     // First try TMethodCall (works for non-template classes).
+    cache_key = "";  // smart-ptr and Cling paths are not cached
     TMethodCall mc_arrow(obj_cls, "operator->", "");
     if (mc_arrow.IsValid() && mc_arrow.ReturnType() == TMethodCall::kLong) {
       Long_t inner_ptr = 0;
@@ -1259,61 +1404,102 @@ lval* builtin_member(lenv *e, lval *a) {
     gROOT->SetSelectedPad(pad_snapshot);
   }
 
-  switch (mc.ReturnType()) {
+  // ── cache miss: execute, collect return metadata, then populate cache ────
+  TMethodCall::EReturnType ret_type = mc.ReturnType();
+  bool    is_ptr_return = false;
+  TClass* ptr_ret_cls   = nullptr;
+  // Only cache for the TMethodCall-handled return types.
+  // Non-void kOther needs cling_new_auto_typed (not cacheable).
+  // Smart-pointer classes (operator->) already cleared cache_key above.
+  bool cache_this = !cache_key.empty();
+  lval* result = nullptr;
+
+  switch (ret_type) {
     case TMethodCall::kLong: {
-      // Could be an integral or a raw pointer
       Long_t ret = 0;
       mc.Execute(obj_ptr, ret);
-      TMethod* m = obj_cls ? obj_cls->GetMethodAny(method_name.c_str()) : nullptr;
-      std::string retname = m ? m->GetReturnTypeName() : "";
+      TFunction* mf = mc.GetMethod();
+      std::string retname = mf ? mf->GetReturnTypeName() : "";
       if (!retname.empty() && retname.back() == '*') {
         // Raw pointer return — strip '*' and look up class
         std::string bare = retname.substr(0, retname.size() - 1);
-        // trim trailing space
         while (!bare.empty() && bare.back() == ' ') bare.pop_back();
-        TClass* ret_cls = TClass::GetClass(bare.c_str());
-        if (!ret_cls && ret != 0) {
-          // Name lookup failed — recover dynamic type via Cling typeid
+        ptr_ret_cls = TClass::GetClass(bare.c_str());
+        if (!ptr_ret_cls && ret != 0) {
+          // Name lookup failed — recover dynamic type via Cling typeid.
+          // The result is pointer-instance-specific; don't cache.
+          cache_this = false;
           static std::atomic<int> rut_ptr_n{0};
           std::string pvar = "__rut_p" + std::to_string(rut_ptr_n++);
           gInterpreter->ProcessLine(
             ("auto* " + pvar + " = (" + bare + "*)(Long_t)" + std::to_string((Long_t)ret) + ";").c_str());
-          ret_cls = (TClass*)gInterpreter->Calc(
+          ptr_ret_cls = (TClass*)gInterpreter->Calc(
             ("(Long_t)TClass::GetClass(typeid(*" + pvar + "))").c_str());
         }
-        return lval_tobj((void*)ret, ret_cls);
+        is_ptr_return = true;
+        result = lval_tobj((void*)ret, ptr_ret_cls);
+        break;
       }
-      return lval_num((long)ret);
+      result = lval_num((long)ret);
+      break;
     }
     case TMethodCall::kDouble: {
       Double_t ret = 0;
       mc.Execute(obj_ptr, ret);
-      return lval_floating(ret);
+      result = lval_floating(ret);
+      break;
     }
     case TMethodCall::kOther: {
-      // kOther can fire for void returns in some ROOT versions — check first.
-      TMethod* m = obj_cls ? obj_cls->GetMethodAny(method_name.c_str()) : nullptr;
-      std::string retname = m ? m->GetReturnTypeName() : "";
+      TFunction* mf = mc.GetMethod();
+      std::string retname = mf ? mf->GetReturnTypeName() : "";
       if (retname == "void") {
         mc.Execute(obj_ptr);
-        return lval_qexpr();
+        result = lval_qexpr();
+        break;
       }
-      // Non-void value-type return — use typeid path for correct TClass
-      // even for template methods where GetMethodAny may not resolve.
+      // Non-void kOther — Cling typeid path; not cacheable.
+      cache_this = false;
       std::string base = "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
                        + method_name + "(" + args + ")";
-      return cling_new_auto_typed(base,
-        [&]{ mc.Execute(obj_ptr); });
+      return cling_new_auto_typed(base, [&]{ mc.Execute(obj_ptr); });
     }
     case TMethodCall::kString: {
       char* sret = nullptr;
       mc.Execute(obj_ptr, &sret);
-      return lval_str(sret ? sret : "");
+      result = lval_str(sret ? sret : "");
+      break;
     }
     default:  // kNone (void)
       mc.Execute(obj_ptr);
-      return lval_qexpr();
+      result = lval_qexpr();
+      break;
   }
+
+  // Populate the cache so future calls with the same (class, method, arg-type-sig)
+  // skip TMethodCall construction entirely.
+  if (cache_this) {
+    CachedMethodCall entry;
+    entry.cached_cls    = obj_cls;
+    entry.mc            = std::make_unique<TMethodCall>(obj_cls, method_name.c_str(), args.c_str());
+    entry.ret_type      = ret_type;
+    entry.is_ptr_return = is_ptr_return;
+    entry.ptr_ret_cls   = ptr_ret_cls;
+    // Derive the SetParam overload for each parameter from its C++ type name.
+    // Use mc.GetMethod() (already resolved) instead of GetMethodAny, which
+    // fails for methods inherited from base classes on some ROOT class hierarchies.
+    TMethod* m2 = static_cast<TMethod*>(mc.GetMethod());
+    if (m2) {
+      TList* margs = m2->GetListOfMethodArgs();
+      TIter  next(margs);
+      while (TObject* o = next()) {
+        TMethodArg* ma = static_cast<TMethodArg*>(o);
+        entry.param_kinds.push_back(classify_param(ma->GetFullTypeName()));
+      }
+    }
+    g_method_cache[cache_key] = std::move(entry);
+  }
+
+  return result;
 }
 
 // (:: Method ClassName args...)  — static method call
