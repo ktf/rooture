@@ -1713,7 +1713,6 @@ lval* builtin_ord(lenv* e, lval* a, const char* op) {
       lval_del(a);
       return lval_num(r);
     case LVAL_FLOAT:
-      lval_del(a);
       if (strcmp(op, ">")  == 0) {
         r = (a->cell[0]->floating >  a->cell[1]->floating);
       }
@@ -1726,6 +1725,7 @@ lval* builtin_ord(lenv* e, lval* a, const char* op) {
       if (strcmp(op, "<=") == 0) {
         r = (a->cell[0]->floating <= a->cell[1]->floating);
       }
+      lval_del(a);
       return lval_num(r);
     default:
       return lval_err("Guru Meditation");
