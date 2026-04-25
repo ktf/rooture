@@ -366,3 +366,26 @@ before delegating to `cling_new_auto_typed`.
   prints behind a `static std::unordered_set<std::string>` so each unique
   call signature prints at most once per process run.
 
+- **Use-after-free in `builtin_ord` (LVAL_FLOAT case) caused a segfault
+  inside `dotimes`.**  The LVAL_FLOAT branch of the comparison operators
+  (`>`, `<`, `>=`, `<=`) called `lval_del(a)` *before* reading
+  `a->cell[0]->floating` and `a->cell[1]->floating`.  On macOS the freed
+  memory usually survived intact in the system allocator — the comparisons
+  returned correct results and the bug lay dormant.  It only manifested as a
+  segfault inside a tight `dotimes` loop, where the allocator reused the freed
+  cells quickly enough to corrupt the values before the access.
+
+  The diagnosis sequence:
+  1. Added step-by-step `(print "step N")` markers to `do-spline` in
+     `fit_gui.rut`.  The crash consistently appeared after `"step6: nbins= 100"`,
+     i.e., inside the chi² `dotimes` loop, not in spline construction.
+  2. The ROOT signal handler printed a backtrace pointing to
+     `builtin_ord` line 1717 — the floating comparison after the premature free.
+  3. Fix: move `lval_del(a)` to *after* the `if/strcmp` comparisons, matching
+     the LVAL_NUM branch pattern.
+
+  The bug had no impact on purely integer comparisons (`LVAL_NUM` branch was
+  correct), and the latent float case only triggered once the caching work
+  made `(> data 0.)` inside a long `dotimes` loop feasible without excessive
+  Cling overhead.
+
