@@ -1297,64 +1297,90 @@ lval* builtin_member(lenv *e, lval *a) {
   }
 
   // ── cache hit path ──────────────────────────────────────────────────────
-  // Uses Execute(void* obj, const void* args[], int nargs, void* ret) which
-  // calls the Cling JIT wrapper directly — bypassing the per-call mutex and
-  // cling::Value type-check loop of the SetParam/exec() path.
   if (!cache_key.empty()) {
     auto it = g_method_cache.find(cache_key);
     if (it != g_method_cache.end() && it->second.cached_cls == obj_cls) {
       CachedMethodCall& cached = it->second;
-
-      // Pack typed argument values into uint64_t storage, one slot per arg.
-      // The Cling wrapper reads each slot as *(ParamType*)args[i]; storing
-      // all types in uint64_t is safe on little-endian 64-bit (arm64/x86-64):
-      // smaller types occupy the low bytes, so the cast reads correctly.
       const int nargs = (int)cache_args.size();
-      uint64_t   arg_vals[8] = {};          // up to 8 args on the stack
-      const void* arg_ptrs[8] = {};
-      for (int i = 0; i < nargs && i < 8; i++) {
-        const CacheArg& ca = cache_args[i];
-        ParamKind pk = (i < (int)cached.param_kinds.size())
-                       ? cached.param_kinds[i] : ParamKind::kLong;
-        double dval = (ca.type == LVAL_FLOAT) ? ca.flt : (double)ca.num;
-        long   ival = (ca.type == LVAL_FLOAT) ? (long)ca.flt : ca.num;
-        switch (pk) {
-          case ParamKind::kFloat: {
-            Float_t f = (Float_t)dval;  memcpy(&arg_vals[i], &f, sizeof(f)); break;
-          }
-          case ParamKind::kDouble: {
-            Double_t d = dval;          memcpy(&arg_vals[i], &d, sizeof(d)); break;
-          }
-          case ParamKind::kLong64: {
-            Long64_t ll = (Long64_t)ival; memcpy(&arg_vals[i], &ll, sizeof(ll)); break;
-          }
-          case ParamKind::kULong64: {
-            ULong64_t ull = (ULong64_t)(unsigned long)ival;
-            memcpy(&arg_vals[i], &ull, sizeof(ull)); break;
-          }
-          default: {  // kLong — int, bool, pointer, enum
-            Long_t l = (ca.type == LVAL_TOBJ) ? (Long_t)(intptr_t)ca.obj : (Long_t)ival;
-            memcpy(&arg_vals[i], &l, sizeof(l)); break;
-          }
-        }
-        arg_ptrs[i] = &arg_vals[i];
-      }
 
       if (pad_snapshot) { pad_snapshot->cd(); gROOT->SetSelectedPad(pad_snapshot); }
+
+      // Helper: set parameters on the cached TMethodCall from the current
+      // call's typed arg snapshots.  Used by kLong and as a fallback.
+      auto set_params = [&]() {
+        cached.mc->ResetParam();
+        for (int i = 0; i < nargs; i++) {
+          const CacheArg& ca = cache_args[i];
+          ParamKind pk = (i < (int)cached.param_kinds.size())
+                         ? cached.param_kinds[i] : ParamKind::kLong;
+          double dval = (ca.type == LVAL_FLOAT) ? ca.flt : (double)ca.num;
+          long   ival = (ca.type == LVAL_FLOAT) ? (long)ca.flt : ca.num;
+          switch (pk) {
+            case ParamKind::kFloat:   cached.mc->SetParam((Float_t)dval);   break;
+            case ParamKind::kDouble:  cached.mc->SetParam((Double_t)dval);  break;
+            case ParamKind::kLong64:  cached.mc->SetParam((Long64_t)ival);  break;
+            case ParamKind::kULong64: cached.mc->SetParam((ULong64_t)(unsigned long)ival); break;
+            default: {
+              Long_t l = (ca.type == LVAL_TOBJ) ? (Long_t)(intptr_t)ca.obj : (Long_t)ival;
+              cached.mc->SetParam(l); break;
+            }
+          }
+        }
+      };
+
       switch (cached.ret_type) {
         case TMethodCall::kLong: {
-          Longptr_t ret = 0;
-          cached.mc->Execute(obj_ptr, arg_ptrs, nargs, &ret);
+          // Use SetParam + Execute(Long_t&) rather than ExecWithArgsAndReturn.
+          // ExecWithArgsAndReturn writes only sizeof(ReturnType) bytes into the
+          // return buffer; for Int_t (32-bit) returns, the high 32 bits of the
+          // Long_t buffer stay zero, giving wrong values for negative results
+          // (e.g. a TGHSlider position of -25 becomes 4294967271 instead of -25).
+          // Execute(Long_t&) always promotes to Long_t with proper sign extension.
+          set_params();
+          Long_t ret = 0;
+          cached.mc->Execute(obj_ptr, ret);
           if (cached.is_ptr_return) return lval_tobj((void*)ret, cached.ptr_ret_cls);
           return lval_num((long)ret);
         }
         case TMethodCall::kDouble: {
+          // ExecWithArgsAndReturn is safe for Double_t: always 8 bytes, no
+          // sign-extension issue.  Pack args directly into typed storage.
+          uint64_t   arg_vals[8] = {};
+          const void* arg_ptrs[8] = {};
+          for (int i = 0; i < nargs && i < 8; i++) {
+            const CacheArg& ca = cache_args[i];
+            ParamKind pk = (i < (int)cached.param_kinds.size())
+                           ? cached.param_kinds[i] : ParamKind::kLong;
+            double dval = (ca.type == LVAL_FLOAT) ? ca.flt : (double)ca.num;
+            long   ival = (ca.type == LVAL_FLOAT) ? (long)ca.flt : ca.num;
+            switch (pk) {
+              case ParamKind::kFloat: {
+                Float_t f = (Float_t)dval; memcpy(&arg_vals[i], &f, sizeof(f)); break;
+              }
+              case ParamKind::kDouble: {
+                Double_t d = dval;         memcpy(&arg_vals[i], &d, sizeof(d)); break;
+              }
+              case ParamKind::kLong64: {
+                Long64_t ll = (Long64_t)ival; memcpy(&arg_vals[i], &ll, sizeof(ll)); break;
+              }
+              case ParamKind::kULong64: {
+                ULong64_t ull = (ULong64_t)(unsigned long)ival;
+                memcpy(&arg_vals[i], &ull, sizeof(ull)); break;
+              }
+              default: {  // kLong — int, bool, pointer, enum
+                Long_t l = (ca.type == LVAL_TOBJ) ? (Long_t)(intptr_t)ca.obj : (Long_t)ival;
+                memcpy(&arg_vals[i], &l, sizeof(l)); break;
+              }
+            }
+            arg_ptrs[i] = &arg_vals[i];
+          }
           Double_t ret = 0;
           cached.mc->Execute(obj_ptr, arg_ptrs, nargs, &ret);
           return lval_floating(ret);
         }
         default:  // kNone / kOther+void
-          cached.mc->Execute(obj_ptr, arg_ptrs, nargs, nullptr);
+          set_params();
+          cached.mc->Execute(obj_ptr);
           return lval_qexpr();
       }
     }
