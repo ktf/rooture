@@ -130,7 +130,16 @@ Use `(connect widget "Signal()" lambda)` to wire a ROOT signal to a rooture func
 ```
 
 - `connect` returns an integer callback ID.
-- The lambda receives no arguments (signal parameters are not forwarded yet).
+- **Signal arguments are never forwarded.** The rooture shim is declared as `static void fire()` with zero parameters. ROOT drops the signal argument (e.g. the `Int_t` from `Selected(Int_t)`) before reaching rooture. **Always use 0-formal lambdas** (`\{}`) for every signal callback, even when the signal carries a value. Query widget state directly inside the callback instead:
+  ```scheme
+  ; WRONG — 1-formal lambda is partially applied, body never executes:
+  (connect combo "Selected(Int_t)" (\{id} {doSomethingWith id}))
+
+  ; CORRECT — 0-formal, reads state from widget directly:
+  (connect combo "Selected(Int_t)" (\{} {do
+    (= {sel} (.GetSelected combo))
+    ...}))
+  ```
 - Use `(str num)` to convert a number to a string for label updates.
 - Use `(def {var} val)` — **not** `(= var val)` — to update global variables from
   inside the callback. `=` only writes to the lambda's local scope.
@@ -150,6 +159,75 @@ rooture's `connect` builtin:
 
 The deferred-pipe design is essential: running Cling builtins (`new`, `.method`)
 **inside** a Cling-dispatched slot causes silent re-entrancy failures.
+
+---
+
+## Dynamic show/hide of widget rows
+
+Use `ShowFrame`/`HideFrame` + `Layout` to reveal or hide entire rows based on widget state.
+A typical pattern is a combo box that controls which parameter row is visible:
+
+```scheme
+;;; build the rows and add them to win unconditionally
+(def {deg-row}  (new TGHorizontalFrame win 580 36))
+(.AddFrame win deg-row  (new TGLayoutHints 65 5 5 2 2))
+(def {npts-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win npts-row (new TGLayoutHints 65 5 5 2 2))
+
+;;; callback — hide all optional rows, then show the relevant one
+(def {on-combo-change} (\{} {do
+  (= {sel} (.GetSelected combo))
+  (.HideFrame win deg-row)
+  (.HideFrame win npts-row)
+  (if (== sel 1.) {.ShowFrame win deg-row}  {})
+  (if (== sel 2.) {.ShowFrame win npts-row} {})
+  (.Layout win)}))
+
+(connect combo "Selected(Int_t)" on-combo-change)
+
+;;; apply initial state AFTER windows are mapped
+(doto win
+  {MapSubwindows}
+  {Resize (.GetDefaultWidth win) (.GetDefaultHeight win)}
+  {MapRaised})
+(on-combo-change)   ; <-- must come after MapRaised
+```
+
+**Critical timing rule**: `HideFrame` calls `UnmapWindow()` internally. If the frame has
+never been mapped yet (i.e. you call `HideFrame` before `MapSubwindows`), `UnmapWindow()`
+is a no-op, and `MapSubwindows` subsequently maps all children — overriding the hide.
+Always apply the initial show/hide state **after** `MapSubwindows` + `MapRaised`.
+
+**Use flat `if` sequences, not nested `if/do`**: when multiple rows can be independently
+shown or hidden, hide all of them first and then conditionally show the right one:
+
+```scheme
+; preferred — clear and correct
+(.HideFrame win row-a)
+(.HideFrame win row-b)
+(if (== sel 1.) {.ShowFrame win row-a} {})
+(if (== sel 2.) {.ShowFrame win row-b} {})
+
+; avoid — nested do/if chains are error-prone and harder to read
+(if (== sel 1.)
+  {do (.ShowFrame win row-a) (.HideFrame win row-b)}
+  {do (.HideFrame win row-a) (if (== sel 2.) ...)})
+```
+
+---
+
+## Runtime inspection of bound symbols
+
+To verify that a reload applied correctly or to diagnose why a callback isn't working,
+use `(print symbol)` — `lval_print` renders a lambda as `(\ formals body)`:
+
+```scheme
+(print on-combo-change)
+; prints: (\ {} (do (= {sel} (.GetSelected combo)) ...))
+```
+
+If the formals show `{id}` when you expected `{}`, the old definition is still active
+and the callback is being partially applied (body never executes). Reload the script.
 
 ---
 
@@ -197,3 +275,11 @@ See `examples/hello_gui.rut` for the runnable version.
 - Enum constants like `kLHintsCenterX` are not in scope; use their numeric values.
 - **`def` vs `=` in callbacks**: use `(def {var} val)` to update globals; `=` only
   writes to the lambda's local scope and the change won't be visible outside.
+- **Signal argument not forwarded**: the rooture shim has zero parameters. A lambda with
+  one or more formals will be partially applied (body never runs) when the signal fires.
+  Always use `\{}` (0 formals) for every `connect` callback.
+- **`HideFrame` before `MapSubwindows` is a no-op**: `HideFrame` calls `UnmapWindow()`
+  which does nothing on an unmapped window. Call `HideFrame`/`ShowFrame` only after
+  `MapSubwindows` + `MapRaised` (or equivalent `MapWindow`).
+- **Prefer `MapRaised` over `MapWindow`** for top-level frames — it brings the window
+  to the front, which is important when reloading scripts that re-create the same window.

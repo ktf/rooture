@@ -366,8 +366,101 @@ before delegating to `cling_new_auto_typed`.
   prints behind a `static std::unordered_set<std::string>` so each unique
   call signature prints at most once per process run.
 
-- **Use-after-free in `builtin_ord` (LVAL_FLOAT case) caused a segfault
-  inside `dotimes`.**  The LVAL_FLOAT branch of the comparison operators
+---
+
+## GUI debugging session — show/hide rows on combo selection
+
+This section records the investigation that followed the introduction of
+the degree-slider and control-points-slider rows in `fit_gui.rut`.
+
+### Symptom
+
+After adding a degree slider for polynomial fits and keeping the control-points
+slider for spline mode, both slider rows were always visible regardless of which
+fit function was selected in the combo box.
+
+### Step 1 — add print markers
+
+Added `(print "step N: ...")` between each major operation in the callback and at
+the startup initialisation code. This quickly confirmed which functions were and
+weren't being reached.
+
+### Step 2 — read back the running definition
+
+Used MCP eval with `(print on-combo-change)` to print the lambda actually bound
+to the symbol at runtime.  `lval_print` renders lambdas as `(\ formals body)`,
+so this shows exactly what rooture is running, not just what the source file says.
+This is invaluable when a script has been partially reloaded or a def was silently
+skipped.
+
+### Step 3 — discover HideFrame timing issue
+
+`(.HideFrame win row)` before `MapSubwindows` silently has no effect:
+`TGCompositeFrame::HideFrame` calls `f->UnmapWindow()`, but windows that have
+never been mapped have nothing to unmap, so `MapSubwindows` later maps them all
+anyway.
+
+**Fix**: call `HideFrame` (or equivalently, call the combo-change callback) *after*
+`MapSubwindows` + `MapRaised`.  Wrapping the initial show/hide state in a zero-arg
+function call after `MapRaised` is the correct pattern:
+
+```scheme
+(doto win {MapSubwindows} {Resize ...} {MapRaised})
+(on-combo-change)   ; ← apply initial state now that windows are mapped
+```
+
+### Step 4 — discover signal argument not forwarded
+
+After fixing the timing issue, the slider rows were hidden correctly on startup but
+still did not appear when the user changed the combo selection.
+
+The rooture `connect` shim is declared in Cling as `static void fire() { ... }` —
+a slot with **no parameters**.  ROOT's signal/slot mechanism allows connecting a
+signal with parameters (`Selected(Int_t)`) to a slot with fewer parameters; it
+simply drops the trailing arguments.  The Int_t item-id never reaches rooture.
+
+A lambda with formals `(\{id} ...)` bound to a zero-arg signal call undergoes
+**partial application** — the body is never evaluated because not all formals are
+bound.  The callback silently does nothing.
+
+**Fix**: use a **0-formal lambda** for all `connect` callbacks; read widget state
+from the widget itself rather than from the signal argument:
+
+```scheme
+; Wrong — id is never bound, body never runs:
+(def {on-combo-change} (\{id} {do (if (== id 1.) ...) ...}))
+
+; Correct — 0 formals, read state directly:
+(def {on-combo-change} (\{} {do
+  (= {sel} (.GetSelected combo))
+  ...}))
+```
+
+This mirrors how `do-fit` reads the selection: `(= {sel} (.GetSelected combo))`.
+
+> **Lesson**: signal parameters are not forwarded to rooture callbacks.  Always
+> write callbacks as `(\{} {do ...})` and query widget state explicitly.
+
+### Step 5 — simplify nested if
+
+Earlier attempts used a nested `(if ... {do ... (if ...)})` pattern inside the
+callback body.  While syntactically valid, nested `if`/`do` combinations are
+difficult to read and error-prone.  Replacing with a flat sequence — always hide
+both rows, then conditionally show the relevant one — made the logic robust:
+
+```scheme
+(def {on-combo-change} (\{} {do
+  (.HideFrame win deg-row)
+  (.HideFrame win npts-row)
+  (if (== sel 1.) {.ShowFrame win deg-row}  {})
+  (if (== sel 2.) {.ShowFrame win npts-row} {})
+  (.Layout win)}))
+```
+
+---
+
+## Interpreter bug: use-after-free in `builtin_ord` (LVAL_FLOAT case) caused a segfault
+  inside `dotimes`.  The LVAL_FLOAT branch of the comparison operators
   (`>`, `<`, `>=`, `<=`) called `lval_del(a)` *before* reading
   `a->cell[0]->floating` and `a->cell[1]->floating`.  On macOS the freed
   memory usually survived intact in the system allocator — the comparisons

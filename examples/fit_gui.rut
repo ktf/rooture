@@ -52,7 +52,20 @@
     {SetPosition 100}))
 (.AddFrame n-row n-sl (new TGLayoutHints 36 2 5 4 4))
 
-;;; ── control points row (visible only when "spline" is selected) ──────────
+;;; ── polynomial degree row (visible only when "poly" is selected) ────────
+(def {deg-row} (new TGHorizontalFrame win 580 36))
+(.AddFrame win deg-row (new TGLayoutHints 65 5 5 2 2))
+
+(def {deg-lbl} (new TGLabel deg-row "Degree: 1"))
+(.AddFrame deg-row deg-lbl (new TGLayoutHints 36 5 5 4 4))
+
+(def {deg-sl}
+  (doto (new TGHSlider deg-row 200 3 -1)
+    {SetRange 1 10}
+    {SetPosition 1}))
+(.AddFrame deg-row deg-sl (new TGLayoutHints 36 2 5 4 4))
+
+;;; ── control points row (visible only when "smooth" is selected) ──────────
 (def {npts-row} (new TGHorizontalFrame win 580 36))
 (.AddFrame win npts-row (new TGLayoutHints 65 5 5 2 2))
 
@@ -73,11 +86,9 @@
 
 (def {combo}
   (doto (new TGComboBox fit-row -1)
-    {AddEntry "gaus" 0}
-    {AddEntry "pol1" 1}
-    {AddEntry "pol2" 2}
-    {AddEntry "pol3" 3}
-    {AddEntry "smooth" 4}
+    {AddEntry "gaus"   0}
+    {AddEntry "poly"   1}
+    {AddEntry "smooth" 2}
     {Resize 90 22}
     {Select 0}))
 (.AddFrame fit-row combo (new TGLayoutHints 18 2 15 2 2))
@@ -146,13 +157,12 @@
 ;;; ── fit callback ─────────────────────────────────────────────────────────
 (def {do-fit} (\{} {do
   (= {sel} (.GetSelected combo))
-  (if (== sel 4.)
+  (if (== sel 2.)
     {do-spline}
     {do
-      (= {fname} (if (== sel 0.) {"gaus"}
-                 {(if (== sel 1.) {"pol1"}
-                 {(if (== sel 2.) {"pol2"}
-                 {"pol3"})})}))
+      (= {fname} (if (== sel 0.)
+                   {"gaus"}
+                   {(concat "pol" (str (.GetPosition deg-sl)))}))
       (.Fit h fname "Q")
       (= {fn} (.GetFunction h fname))
       (.SetText res-lbl
@@ -163,11 +173,22 @@
       (.Draw fn "SAME")
       (.Modified canvas)})}))
 
-;;; ── combo → show/hide the control-points row ─────────────────────────────
-(def {on-combo-change} (\{id} {do
-  (if (== id 4.)
-    {do (.ShowFrame win npts-row) (.Layout win)}
-    {do (.HideFrame win npts-row) (.Layout win)})}))
+;;; ── combo → show/hide the parameter rows ────────────────────────────────
+;;; Note: ROOT drops the Int_t signal arg before reaching the rooture shim,
+;;; so we take 0 formals and read the selection via GetSelected directly.
+(def {on-combo-change} (\{} {do
+  (= {sel} (.GetSelected combo))
+  (.HideFrame win deg-row)
+  (.HideFrame win npts-row)
+  (if (== sel 1.) {.ShowFrame win deg-row}  {})
+  (if (== sel 2.) {.ShowFrame win npts-row} {})
+  (.Layout win)}))
+
+;;; ── degree slider label update ───────────────────────────────────────────
+(connect deg-sl "PositionChanged(Int_t)"
+  (\{} {do
+    (.SetText deg-lbl
+      (new TGString (concat "Degree: " (str (.GetPosition deg-sl)))))}))
 
 ;;; ── npts slider label update ─────────────────────────────────────────────
 (connect npts-sl "PositionChanged(Int_t)"
@@ -182,12 +203,15 @@
 (connect combo   "Selected(Int_t)" on-combo-change)
 
 ;;; ── build and show window ────────────────────────────────────────────────
-(.HideFrame win npts-row)
-
 (doto win
   {SetWindowName "Gaussian Fit GUI"}
   {MapSubwindows}
   {Resize (.GetDefaultWidth win) (.GetDefaultHeight win)}
   {MapRaised})
+
+;;; Apply initial show/hide state after windows are mapped so that
+;;; HideFrame's UnmapWindow call takes effect.  Combo starts at 0 (gaus),
+;;; so GetSelected will return 0 and both parameter rows will be hidden.
+(on-combo-change)
 
 (redraw)
