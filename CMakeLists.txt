@@ -34,7 +34,14 @@ elseif(NOT EXISTS ${PARSER_C})
     "Install tree-sitter and run: tree-sitter generate --no-bindings")
 endif()
 
-add_executable(rooture rooture.cxx mpc.c ${PARSER_C})
+add_executable(rooture
+  rut_lang.cxx
+  rut_root.cxx
+  rut_jitfn.cxx
+  rut_repl.cxx
+  mpc.c
+  ${PARSER_C}
+)
 target_include_directories(rooture PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/src     # exposes tree_sitter/parser.h
