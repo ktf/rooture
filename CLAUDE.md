@@ -35,6 +35,15 @@ The underlying rooture builtin `save-window` accepts a TGFrame object and a path
 - `libASImage` is loaded on demand by `save-window`; no manual `(.Load gSystem
   "libASImage")` is needed.
 
+## Cling errors are never acceptable noise
+
+Any error printed by Cling (e.g. `error: no matching constructor`, `error: no member named '...'`) **must be eliminated**, even if it is technically "just" a failed probe that is immediately retried successfully.  These errors pollute the user's terminal, slow down execution (Cling error-recovery is expensive), and make it harder to spot real problems.
+
+When Cling errors appear:
+- Add caching so the failing probe is skipped on subsequent calls.
+- Restructure the probe order so the winning form is tried first.
+- Do not leave known-failing probes in the hot path.
+
 ## Prefer native rooture over ProcessLine
 
 Rooture examples should use **native rooture syntax** as much as possible.

@@ -51,7 +51,8 @@ const TSLanguage* tree_sitter_rooture();
 
 /* Create Enumeration of Possible lval Types */
 enum { LVAL_ERR, LVAL_NUM,  LVAL_FLOAT, LVAL_SYM, LVAL_STR,
-       LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR };
+       LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR,
+       LVAL_JITFN };
 
 static bool g_debug = false;
 
@@ -373,6 +374,14 @@ lval* lval_lambda(lval* formals, lval* body) {
   return v;  
 }
 
+lval* lval_jitfn(const char* name, long nparams) {
+  lval* v = (lval*)malloc(sizeof(lval));
+  v->type = LVAL_JITFN;
+  v->sym  = strdup(name);
+  v->num  = nparams;
+  return v;
+}
+
 const char* ltype_name(int t) {
   switch(t) {
     case LVAL_FUN: return "Function";
@@ -385,6 +394,7 @@ const char* ltype_name(int t) {
     case LVAL_TMETHOD: return "Method";
     case LVAL_SEXPR: return "S-Expression";
     case LVAL_QEXPR: return "Q-Expression";
+    case LVAL_JITFN: return "JitFn";
     default: return "Unknown";
   }
 }
@@ -462,6 +472,7 @@ void lval_del(lval* v) {
     case LVAL_ERR: free(v->err); break;
     case LVAL_SYM: free(v->sym); break;
     case LVAL_STR: free(v->str); break;
+    case LVAL_JITFN: free(v->sym); break;
     /* If Sexpr or Qexpr then delete all elements inside */
     case LVAL_QEXPR:
     case LVAL_SEXPR:
@@ -550,7 +561,8 @@ static std::string ptr_to_hex(void* p) {
   return buf;
 }
 
-std::string lval_to_cpp_arg(lenv* e, lval* a, int offset);  // forward decl
+std::string lval_to_cpp_arg(lenv* e, lval* a, int offset,
+                             const std::vector<bool>* deref_mask = nullptr);  // forward decl
 
 // ---- Callable bridge -------------------------------------------------------
 
@@ -590,12 +602,14 @@ static void emit_jit_wrapper(const std::string& key, lval* fn) {
     for (int i = 0; i < fn->formals->count; i++)
       if (strcmp(fn->formals->cell[i]->sym, "&") != 0) nargs++;
 
+  // C++20 abbreviated function template: valid at global scope and lets RDF
+  // (or any other caller) instantiate with the actual argument types.
   std::string decl = "double " + key + "_wrapper(";
   std::string arr;
   for (int i = 0; i < nargs; i++) {
     if (i) { decl += ", "; arr += ", "; }
-    decl += "double _a" + std::to_string(i);
-    arr  += "_a" + std::to_string(i);
+    decl += "auto _a" + std::to_string(i);
+    arr  += "(double)_a" + std::to_string(i);
   }
   decl += ") { ";
   if (nargs > 0)
@@ -609,7 +623,67 @@ static void emit_jit_wrapper(const std::string& key, lval* fn) {
 
 // ---------------------------------------------------------------------------
 
-std::string lval_to_cpp_arg(lenv* e, lval* a, int offset) {
+// build_deref_mask: return mask[i]=true if the i-th method argument is a reference
+// type (meaning rooture should emit *((Cls*)ptr) rather than ((Cls*)ptr)).
+// Uses two strategies:
+//   S1: iterate GetListOfMethods() → TMethodArg::GetFullTypeName() — works for most classes.
+//   S2: per-TOBJ-arg GetMethodWithPrototype probe — fallback for template-class methods
+//       where GetListOfMethodArgs() returns nothing (ROOT reflection limitation).
+// Returns empty vector if no information could be determined.
+static std::vector<bool> build_deref_mask(TClass* cls, const char* method_name,
+                                           lval* a, int offset) {
+  if (!cls || !method_name) return {};
+  int nargs = a->count - offset;
+  if (nargs <= 0) return {};
+
+  // S1: iterate method list, check reflected arg types.
+  {
+    TIter next(cls->GetListOfMethods());
+    TObject* obj;
+    while ((obj = next())) {
+      TMethod* m = (TMethod*)obj;
+      if (strcmp(m->GetName(), method_name) != 0) continue;
+      if (m->GetNargs() < nargs || m->GetNargs() - m->GetNargsOpt() > nargs) continue;
+      TList* al = m->GetListOfMethodArgs();
+      if (!al || al->GetSize() == 0) continue;  // template method — args not reflected
+      std::vector<bool> mask;
+      TIter mi(al);
+      TObject* aobj;
+      while ((aobj = mi())) {
+        TMethodArg* ma = (TMethodArg*)aobj;
+        std::string ft = ma->GetFullTypeName();
+        mask.push_back(ft.find('&') != std::string::npos);
+      }
+      if (!mask.empty()) return mask;
+    }
+  }
+
+  // S2: for each TOBJ argument, probe whether the class accepts the arg type as
+  // a pointer.  If GetMethodWithPrototype fails for the pointer form but succeeds
+  // for the const-reference form, the argument needs dereferencing.
+  // (Works even when GetListOfMethodArgs() is empty for template methods.)
+  std::vector<bool> mask(nargs, false);
+  bool any_deref = false;
+  for (int i = offset; i < a->count; i++) {
+    lval* v = a->cell[i];
+    if (v->type != LVAL_TOBJ || !v->cls) continue;
+    int idx = i - offset;
+    std::string cname = v->cls->GetName();
+    std::string ptr_proto  = cname + "*";
+    std::string ref_proto  = cname + "&";
+    std::string cref_proto = "const " + cname + "&";
+    bool ptr_ok = (cls->GetMethodWithPrototype(method_name, ptr_proto.c_str())  != nullptr);
+    if (!ptr_ok) {
+      bool ref_ok = (cls->GetMethodWithPrototype(method_name, ref_proto.c_str())  != nullptr) ||
+                    (cls->GetMethodWithPrototype(method_name, cref_proto.c_str()) != nullptr);
+      if (ref_ok) { mask[idx] = true; any_deref = true; }
+    }
+  }
+  return any_deref ? mask : std::vector<bool>{};
+}
+
+std::string lval_to_cpp_arg(lenv* e, lval* a, int offset,
+                             const std::vector<bool>* deref_mask) {
   std::string args;
   bool first = true;
   for (int i = offset; i < a->count; i++) {
@@ -621,11 +695,36 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset) {
       case LVAL_FLOAT: args += std::to_string(v->floating); break;
       case LVAL_STR:   args += "\"" + escape_for_cling_str(v->str) + "\""; break;
       case LVAL_TOBJ:
-        if (v->cls)
-          args += "((" + std::string(v->cls->GetName()) + "*)" + ptr_to_hex(v->obj) + ")";
-        else
+        if (v->cls) {
+          int arg_idx = i - offset;
+          bool deref = deref_mask && arg_idx < (int)deref_mask->size() && (*deref_mask)[arg_idx];
+          std::string ptr_expr = "((" + std::string(v->cls->GetName()) + "*)" + ptr_to_hex(v->obj) + ")";
+          args += deref ? ("*" + ptr_expr) : ptr_expr;
+        } else {
           args += ptr_to_hex(v->obj);
+        }
         break;
+      case LVAL_JITFN:
+        args += v->sym;
+        break;
+      case LVAL_QEXPR: {
+        // Q-expression of strings → inline std::vector<std::string>{"a","b",...}
+        // This avoids push_back dispatch issues for column-name vectors.
+        bool all_str = (v->count > 0);
+        for (int j = 0; j < v->count && all_str; j++)
+          if (v->cell[j]->type != LVAL_STR) all_str = false;
+        if (all_str) {
+          args += "std::vector<std::string>{";
+          for (int j = 0; j < v->count; j++) {
+            if (j) args += ",";
+            args += "\"" + escape_for_cling_str(v->cell[j]->str) + "\"";
+          }
+          args += "}";
+        } else {
+          rut_print("Cannot use Q-expr with non-string elements as C++ argument.\n");
+        }
+        break;
+      }
       case LVAL_FUN:
         if (v->builtin == nullptr) {
           std::string key = register_rooture_callable(e, v);
@@ -670,6 +769,7 @@ void lval_print(lval* v) {
     case LVAL_STR:   lval_print_str(v); break;
     case LVAL_SEXPR: lval_expr_print(v, '(', ')'); break;
     case LVAL_QEXPR: lval_expr_print(v, '{', '}'); break;
+    case LVAL_JITFN: rut_print("<jit-fn %s/%ld>", v->sym, v->num); break;
   }
 }
 
@@ -798,8 +898,10 @@ lval* lval_copy(lval* v) {
       x->err = strdup(v->err); break;
     case LVAL_SYM:
       x->sym = strdup(v->sym); break;
-    case LVAL_STR: 
+    case LVAL_STR:
       x->str = strdup(v->str); break;
+    case LVAL_JITFN:
+      x->sym = strdup(v->sym); x->num = v->num; break;
 
     /* Copy Lists by copying each sub-expression */
     case LVAL_SEXPR:
@@ -836,8 +938,15 @@ lval* lval_call(lenv* e, lval* f, lval* a) {
 
     /* Pop the first symbol from the formals */
     lval* sym = lval_pop(f->formals, 0);
+    /* Typed formal {type name} — unwrap to the name symbol for binding */
+    if (sym->type == LVAL_QEXPR && sym->count == 2 &&
+        sym->cell[1]->type == LVAL_SYM) {
+      lval* name = lval_copy(sym->cell[1]);
+      lval_del(sym);
+      sym = name;
+    }
     /* Special Case to deal with '&' */
-    if (strcmp(sym->sym, "&") == 0) {
+    if (sym->type == LVAL_SYM && strcmp(sym->sym, "&") == 0) {
 
       /* Ensure '&' is followed by another symbol */
       if (f->formals->count != 1) {
@@ -1129,7 +1238,9 @@ lval* builtin_member(lenv *e, lval *a) {
     else            cache_key += ")";
   }
 
-  std::string args = lval_to_cpp_arg(e, a, 0);
+  auto deref_mask_m = build_deref_mask(obj_cls, method_name.c_str(), a, 0);
+  std::string args = lval_to_cpp_arg(e, a, 0,
+      deref_mask_m.empty() ? nullptr : &deref_mask_m);
   lval_del(name); lval_del(obj); lval_del(a);
 
   // Snapshot gPad before probe calls, which may trigger ROOT event processing
@@ -1185,28 +1296,67 @@ lval* builtin_member(lenv *e, lval *a) {
     // so try_direct stays true and direct dispatch is used as usual.
     bool try_direct = !obj_cls || obj_cls->GetMethodAny("operator->") == nullptr;
 
+    // Cache the winning probe form per normalised method+args signature.
+    // Key: everything from "->" onward, with hex addresses and string literals
+    // replaced by wildcards.  The object class is excluded so different template
+    // instantiations (e.g. RInterface<RRange<...>> vs RInterface<RJittedFilter>)
+    // share the same Histo3D / Define / … cache entry.
+    static std::unordered_map<std::string,int> probe_form_cache;
+    static const std::regex pfc_hex(R"(0x[0-9a-fA-F]+)");
+    static const std::regex pfc_str(R"("([^"\\]|\\.)*")");
+    auto make_probe_key = [](const std::string& s) -> std::string {
+      std::string t = std::regex_replace(s, pfc_hex, "*");
+      t = std::regex_replace(t, pfc_str, "\"*\"");
+      auto pos = t.find("->");
+      return (pos != std::string::npos) ? t.substr(pos) : t;
+    };
+    auto apply_probe_form = [&](const std::string& o, int form) -> std::string {
+      switch (form) {
+        case 2: return deref_args(o);
+        case 3: return arrow_form(o);
+        case 4: return deref_args(arrow_form(o));
+        default: return o;
+      }
+    };
+
     auto pick_expr = [&](const std::string& orig) -> std::pair<std::string,std::string> {
+      std::string key = make_probe_key(orig);
+
+      // Cache hit: jump straight to the known-good form, skipping failing probes.
+      auto cache_it = probe_form_cache.find(key);
+      if (cache_it != probe_form_cache.end()) {
+        std::string winning = apply_probe_form(orig, cache_it->second);
+        std::string n = std::to_string(rut_tmp_n++);
+        std::string al = "__rut_t" + n;
+        gInterpreter->ProcessLine(("using " + al + " = decltype(" + winning + ");").c_str());
+        return {winning, al};
+      }
+
       if (try_direct) {
-        // 1. direct, orig args
+        // 1. direct, orig args — skipped for smart-pointer objects (operator-> present)
         auto [e1, al1] = probe(orig);
-        if (!e1.empty()) return {e1, al1};
+        if (!e1.empty()) { probe_form_cache[key] = 1; return {e1, al1}; }
         // 2. direct, deref args (handles pointer-where-reference-expected)
         std::string da = deref_args(orig);
         if (da != orig) {
           auto [e2, al2] = probe(da);
-          if (!e2.empty()) return {e2, al2};
+          if (!e2.empty()) { probe_form_cache[key] = 2; return {e2, al2}; }
         }
       }
-      // 3. arrow (operator->), orig args (handles smart-pointer dispatch)
-      std::string ar = arrow_form(orig);
-      if (ar != orig) {
-        auto [e3, al3] = probe(ar);
-        if (!e3.empty()) return {e3, al3};
-        // 4. arrow + deref args
-        std::string ar_da = deref_args(ar);
-        if (ar_da != ar) {
-          auto [e4, al4] = probe(ar_da);
-          if (!e4.empty()) return {e4, al4};
+      // 3. arrow (operator->), orig args (handles smart-pointer dispatch, e.g. RResultPtr)
+      // For smart-pointer objects (!try_direct), probes 1&2 are skipped entirely:
+      // the method lives on the pointee, so direct dispatch always fails.
+      if (!try_direct) {
+        std::string ar = arrow_form(orig);
+        if (ar != orig) {
+          auto [e3, al3] = probe(ar);
+          if (!e3.empty()) { probe_form_cache[key] = 3; return {e3, al3}; }
+          // 4. arrow + deref args
+          std::string ar_da = deref_args(ar);
+          if (ar_da != ar) {
+            auto [e4, al4] = probe(ar_da);
+            if (!e4.empty()) { probe_form_cache[key] = 4; return {e4, al4}; }
+          }
         }
       }
       // All forms failed — return orig with whatever alias (likely undefined)
@@ -1940,11 +2090,16 @@ lval* builtin_lambda(lenv* e, lval* a) {
   LASSERT_TYPE("\\", a, 0, LVAL_QEXPR);
   LASSERT_TYPE("\\", a, 1, LVAL_QEXPR);
   
-  /* Check first Q-Expression contains only Symbols */
+  /* Check first Q-Expression contains only Symbols or {type name} typed formals */
   for (int i = 0; i < a->cell[0]->count; i++) {
-    LASSERT(a, (a->cell[0]->cell[i]->type == LVAL_SYM),
+    lval* f = a->cell[0]->cell[i];
+    bool is_sym = (f->type == LVAL_SYM);
+    bool is_typed = (f->type == LVAL_QEXPR && f->count == 2 &&
+                     (f->cell[0]->type == LVAL_SYM || f->cell[0]->type == LVAL_STR) &&
+                     f->cell[1]->type == LVAL_SYM);
+    LASSERT(a, (is_sym || is_typed),
       "Cannot define non-symbol. Got %s, Expected %s.",
-      ltype_name(a->cell[0]->cell[i]->type),ltype_name(LVAL_SYM));
+      ltype_name(f->type), ltype_name(LVAL_SYM));
   }
   
   /* Pop first two arguments and pass them to lval_lambda */
@@ -2284,21 +2439,64 @@ lval *builtin_new(lenv *e, lval* a) {
     lval_del(a);
     return lval_err("Unknown class '%s'", className.c_str());
   }
+  {
+    std::string simple = className;
+    auto dpos = simple.rfind("::");
+    if (dpos != std::string::npos) simple = simple.substr(dpos + 2);
+    auto deref_mask_c = build_deref_mask(cls, simple.c_str(), a, 1);
+    if (!deref_mask_c.empty()) {
+      // Reflection says which params are references — build args with correct form
+      // directly, skipping the try/retry probe loop below.
+      std::string rargs = lval_to_cpp_arg(e, a, 1, &deref_mask_c);
+      lval_del(a);
+      std::string expr = "new " + className + "(" + rargs + ");";
+      TInterpreter::EErrorCode ec = TInterpreter::kNoError;
+      void* obj = (void*)gInterpreter->Calc(expr.c_str(), &ec);
+      if (!obj || ec != TInterpreter::kNoError)
+        return lval_err("Constructor failed for '%s'", className.c_str());
+      TClass* real_cls = (TClass*)gInterpreter->Calc(
+          ("(Long_t)TClass::GetClass(typeid(*((" + className + "*)" +
+           ptr_to_hex(obj) + ")))").c_str());
+      return lval_tobj(obj, real_cls ? real_cls : cls);
+    }
+  }
   std::string args = lval_to_cpp_arg(e, a, 1);
   lval_del(a);
 
   // Try direct args first; if that fails (e.g. pointer where reference
   // expected), retry with TOBJ pointer args dereferenced: ((T*)p) → (*((T*)p))
+  // Cache the working form per (className, arg-type-pattern) to avoid
+  // re-probing on every call (e.g. RDataFrame(TChain&) vs RDataFrame(TChain*)).
   static const std::regex ctor_arg_re(R"(\(\([^)*]+\*\)(0x[0-9a-fA-F]+)\)(?!->))");
+  static const std::regex hex_re(R"(0x[0-9a-fA-F]+)");
+  static std::unordered_map<std::string,bool> ctor_deref_cache;
   auto try_ctor = [&](const std::string& ctorArgs) -> void* {
     std::string expr = "new " + className + "(" + ctorArgs + ");";
-    return (void*)gInterpreter->Calc(expr.c_str());
+    TInterpreter::EErrorCode ec = TInterpreter::kNoError;
+    void* result = (void*)gInterpreter->Calc(expr.c_str(), &ec);
+    return (ec == TInterpreter::kNoError) ? result : nullptr;
   };
-  void *obj = try_ctor(args);
-  if (!obj) {
-    std::string derefed = std::regex_replace(args, ctor_arg_re, "(*$&)");
-    if (derefed != args)
-      obj = try_ctor(derefed);
+  std::string cache_key = className + ":" + std::regex_replace(args, hex_re, "*");
+  void *obj = nullptr;
+  {
+    auto it = ctor_deref_cache.find(cache_key);
+    if (it != ctor_deref_cache.end()) {
+      std::string effective = it->second
+          ? std::regex_replace(args, ctor_arg_re, "(*$&)") : args;
+      obj = try_ctor(effective);
+    } else {
+      obj = try_ctor(args);
+      if (!obj) {
+        std::string derefed = std::regex_replace(args, ctor_arg_re, "(*$&)");
+        if (derefed != args) {
+          obj = try_ctor(derefed);
+          ctor_deref_cache[cache_key] = (bool)obj;
+          if (!obj) obj = nullptr;
+        }
+      } else {
+        ctor_deref_cache[cache_key] = false;
+      }
+    }
   }
   if (!obj)
     return lval_err("Constructor failed for '%s'", className.c_str());
@@ -2552,6 +2750,371 @@ lval* builtin_annotations(lenv* e, lval* a) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// jit-fn transpiler
+// ---------------------------------------------------------------------------
+
+// Returns true if v contains no side-effects (assignments, loops, method
+// calls, new) — used to decide whether an `if` can become a ternary.
+static bool rut_is_pure(lval* v) {
+  if (!v) return true;
+  if (v->type == LVAL_NUM || v->type == LVAL_FLOAT ||
+      v->type == LVAL_STR || v->type == LVAL_SYM)
+    return true;
+  if (v->type == LVAL_QEXPR) {
+    if (v->count == 1) return rut_is_pure(v->cell[0]);
+    return false;
+  }
+  if (v->type != LVAL_SEXPR || v->count == 0) return false;
+  lval* head = v->cell[0];
+  if (head->type != LVAL_SYM) return false;
+  const char* s = head->sym;
+  // Side-effecting forms
+  if (strcmp(s, "=") == 0 || strcmp(s, "def") == 0) return false;
+  if (strcmp(s, "dotimes") == 0 || strcmp(s, "do") == 0) return false;
+  if (strcmp(s, "new") == 0) return false;
+  if (s[0] == '.') return false;  // method call
+  // Arithmetic / comparison / not / :: — check children
+  for (int i = 1; i < v->count; i++)
+    if (!rut_is_pure(v->cell[i])) return false;
+  return true;
+}
+
+// Forward declaration
+static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail = false);
+
+// Transpile a single expression to a C++ expression string (no semicolon).
+static std::string rut_to_cpp_expr(lval* v) {
+  if (!v) return "/*null*/";
+  if (v->type == LVAL_NUM) return std::to_string(v->num);
+  if (v->type == LVAL_FLOAT) {
+    char buf[32]; snprintf(buf, sizeof(buf), "%.17g", v->floating);
+    return buf;
+  }
+  if (v->type == LVAL_STR)
+    return "\"" + escape_for_cling_str(v->str) + "\"";
+  if (v->type == LVAL_SYM) return v->sym;
+
+  // Unwrap single-element Q-expression
+  if (v->type == LVAL_QEXPR) {
+    if (v->count == 1) return rut_to_cpp_expr(v->cell[0]);
+    return "/*unsupported-qexpr*/";
+  }
+
+  if (v->type != LVAL_SEXPR || v->count == 0)
+    return "/*unsupported*/";
+
+  lval* head = v->cell[0];
+  if (head->type != LVAL_SYM) return "/*unsupported-head*/";
+  const char* s = head->sym;
+
+  // Binary arithmetic / comparison
+  const char* binop = nullptr;
+  if (strcmp(s, "+")  == 0) binop = "+";
+  if (strcmp(s, "-")  == 0) binop = "-";
+  if (strcmp(s, "*")  == 0) binop = "*";
+  if (strcmp(s, "/")  == 0) binop = "/";
+  if (strcmp(s, "<")  == 0) binop = "<";
+  if (strcmp(s, ">")  == 0) binop = ">";
+  if (strcmp(s, "<=") == 0) binop = "<=";
+  if (strcmp(s, ">=") == 0) binop = ">=";
+  if (strcmp(s, "==") == 0) binop = "==";
+  if (strcmp(s, "!=") == 0) binop = "!=";
+  if (binop && v->count >= 3) {
+    std::string result = rut_to_cpp_expr(v->cell[1]);
+    for (int i = 2; i < v->count; i++)
+      result = "(" + result + " " + binop + " " + rut_to_cpp_expr(v->cell[i]) + ")";
+    return result;
+  }
+
+  // (not expr)
+  if (strcmp(s, "not") == 0 && v->count == 2)
+    return "(!(" + rut_to_cpp_expr(v->cell[1]) + "))";
+
+  // (:: Method ClassName args...) — static call
+  if (strcmp(s, "::") == 0 && v->count >= 3) {
+    lval* meth = v->cell[1];
+    lval* cls  = v->cell[2];
+    std::string call = std::string(cls->type == LVAL_SYM ? cls->sym : cls->str)
+                       + "::" + std::string(meth->sym) + "(";
+    for (int i = 3; i < v->count; i++) {
+      if (i > 3) call += ", ";
+      call += rut_to_cpp_expr(v->cell[i]);
+    }
+    call += ")";
+    return call;
+  }
+  // (::Method ClassName args...) — sugared static call (method name starts with ::)
+  if (s[0] == ':' && s[1] == ':' && v->count >= 2) {
+    lval* cls = v->cell[1];
+    std::string call = std::string(cls->type == LVAL_SYM ? cls->sym : cls->str)
+                       + "::" + std::string(s + 2) + "(";
+    for (int i = 2; i < v->count; i++) {
+      if (i > 2) call += ", ";
+      call += rut_to_cpp_expr(v->cell[i]);
+    }
+    call += ")";
+    return call;
+  }
+
+  // (.Method obj args...) — instance call, raw AST form
+  if (s[0] == '.' && s[1] != '\0' && v->count >= 2) {
+    std::string call = rut_to_cpp_expr(v->cell[1]) + "->" + std::string(s + 1) + "(";
+    for (int i = 2; i < v->count; i++) {
+      if (i > 2) call += ", ";
+      call += rut_to_cpp_expr(v->cell[i]);
+    }
+    call += ")";
+    return call;
+  }
+
+  // (new ClassName args...)
+  if (strcmp(s, "new") == 0 && v->count >= 2) {
+    lval* cls = v->cell[1];
+    std::string cname = (cls->type == LVAL_SYM) ? cls->sym : cls->str;
+    std::string call = "new " + cname + "(";
+    for (int i = 2; i < v->count; i++) {
+      if (i > 2) call += ", ";
+      call += rut_to_cpp_expr(v->cell[i]);
+    }
+    call += ")";
+    return call;
+  }
+
+  // (if cond {true} {false}) — ternary when both branches are pure
+  if (strcmp(s, "if") == 0 && v->count == 3) {
+    // (if cond {}) — no false branch; not valid as expression
+    return "/*unsupported-if-expr*/";
+  }
+  if (strcmp(s, "if") == 0 && v->count == 4) {
+    lval* tb = v->cell[2];
+    lval* fb = v->cell[3];
+    bool tb_pure = rut_is_pure(tb);
+    bool fb_pure = rut_is_pure(fb);
+    if (tb_pure && fb_pure) {
+      std::string te = (tb->type == LVAL_QEXPR && tb->count == 0) ? "0" : rut_to_cpp_expr(tb);
+      std::string fe = (fb->type == LVAL_QEXPR && fb->count == 0) ? "0" : rut_to_cpp_expr(fb);
+      return "(" + rut_to_cpp_expr(v->cell[1]) + " ? " + te + " : " + fe + ")";
+    }
+  }
+
+  return "/*unsupported-" + std::string(s) + "*/";
+}
+
+// Transpile a statement (or block) to C++ code ending with '\n'.
+// When tail=true the last expression in tail position is emitted as `return expr;`.
+static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail) {
+  if (!v) return "";
+
+  // Unwrap QEXPR used as a statement (raw AST body cells).
+  // {do e1 e2 ...} in raw AST is a QEXPR [SYM do, e1, e2, ...] — treat as do-block.
+  if (v->type == LVAL_QEXPR) {
+    if (v->count == 0) return "";
+    if (v->count == 1) return rut_to_cpp_stmt(v->cell[0], ind, tail);
+    // {do e1 e2 ...} sugar: first element is the symbol "do"
+    int start = 0;
+    if (v->cell[0]->type == LVAL_SYM && strcmp(v->cell[0]->sym, "do") == 0)
+      start = 1;
+    std::string out;
+    for (int i = start; i < v->count; i++)
+      out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1));
+    return out;
+  }
+
+  if (v->type != LVAL_SEXPR || v->count == 0) {
+    if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
+    return ind + rut_to_cpp_expr(v) + ";\n";
+  }
+
+  lval* head = v->cell[0];
+  if (head->type != LVAL_SYM) {
+    if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
+    return ind + rut_to_cpp_expr(v) + ";\n";
+  }
+  const char* s = head->sym;
+
+  // (do e1 e2 ...) — last child inherits tail
+  if (strcmp(s, "do") == 0) {
+    std::string out;
+    for (int i = 1; i < v->count; i++)
+      out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1));
+    return out;
+  }
+
+  // (= {varname} rhs)
+  if (strcmp(s, "=") == 0 && v->count == 3) {
+    lval* sym_q = v->cell[1];
+    std::string varname;
+    if (sym_q->type == LVAL_QEXPR && sym_q->count == 1 && sym_q->cell[0]->type == LVAL_SYM)
+      varname = sym_q->cell[0]->sym;
+    else
+      varname = "/*bad-var*/";
+    return ind + "auto " + varname + " = " + rut_to_cpp_expr(v->cell[2]) + ";\n";
+  }
+
+  // (dotimes {i} N {body})
+  if (strcmp(s, "dotimes") == 0 && v->count == 4) {
+    lval* sym_q = v->cell[1];
+    std::string ivar = (sym_q->type == LVAL_QEXPR && sym_q->count == 1 &&
+                        sym_q->cell[0]->type == LVAL_SYM)
+                       ? sym_q->cell[0]->sym : "i";
+    std::string n    = rut_to_cpp_expr(v->cell[2]);
+    std::string body = rut_to_cpp_stmt(v->cell[3], ind + "  ");
+    return ind + "for(int " + ivar + " = 0; " + ivar + " < " + n + "; ++" + ivar + ") {\n"
+           + body + ind + "}\n";
+  }
+
+  // (if cond {} {false-body}) — pure-empty true branch → negated if
+  if (strcmp(s, "if") == 0 && v->count == 4) {
+    lval* tb = v->cell[2];
+    lval* fb = v->cell[3];
+    bool tb_empty = (tb->type == LVAL_QEXPR && tb->count == 0);
+    bool fb_empty = (fb->type == LVAL_QEXPR && fb->count == 0);
+
+    if (tb_empty && fb_empty) return "";
+    if (tb_empty) {
+      return ind + "if(!(" + rut_to_cpp_expr(v->cell[1]) + ")) {\n"
+             + rut_to_cpp_stmt(fb, ind + "  ")
+             + ind + "}\n";
+    }
+    if (fb_empty) {
+      return ind + "if(" + rut_to_cpp_expr(v->cell[1]) + ") {\n"
+             + rut_to_cpp_stmt(tb, ind + "  ")
+             + ind + "}\n";
+    }
+    // Both branches non-empty — check if pure (ternary as statement)
+    if (rut_is_pure(tb) && rut_is_pure(fb)) {
+      if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
+      return ind + rut_to_cpp_expr(v) + ";\n";
+    }
+    // Full if/else
+    return ind + "if(" + rut_to_cpp_expr(v->cell[1]) + ") {\n"
+           + rut_to_cpp_stmt(tb, ind + "  ")
+           + ind + "} else {\n"
+           + rut_to_cpp_stmt(fb, ind + "  ")
+           + ind + "}\n";
+  }
+
+  // (.Method obj args...) — instance method call as statement
+  if (s[0] == '.' && s[1] != '\0' && v->count >= 2) {
+    if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
+    return ind + rut_to_cpp_expr(v) + ";\n";
+  }
+
+  // Anything else: try as expression statement
+  if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
+  return ind + rut_to_cpp_expr(v) + ";\n";
+}
+
+static std::atomic<int> g_jit_counter{0};
+
+// (jit-fn lambda) — transpile a rooture lambda to a native C++ void function,
+// JIT-declare it via gInterpreter->Declare, and return an LVAL_JITFN.
+lval* builtin_jit_fn(lenv* e, lval* a) {
+  // Accept (jit-fn lambda) or (jit-fn rettype lambda).
+  // Per-parameter types are expressed inline in the formals as {type name},
+  // e.g. (\{{float snp} tgl} {body}) — untyped formals default to "auto".
+  if (a->count < 1 || a->count > 2) {
+    lval_del(a);
+    return lval_err("jit-fn: expected 1 or 2 arguments, got %d", a->count);
+  }
+  std::string explicit_ret;
+  int fn_idx = 0;
+  if (a->count == 2) {
+    if (a->cell[0]->type != LVAL_STR) {
+      lval_del(a);
+      return lval_err("jit-fn: first argument must be a return-type string (e.g. void, float, bool)");
+    }
+    explicit_ret = a->cell[0]->str;
+    fn_idx = 1;
+  }
+  if (a->cell[fn_idx]->type != LVAL_FUN) {
+    lval_del(a);
+    return lval_err("jit-fn: argument %d must be a function", fn_idx);
+  }
+  lval* fn = a->cell[fn_idx];
+  if (fn->builtin) {
+    lval_del(a);
+    return lval_err("jit-fn: cannot JIT a builtin");
+  }
+
+  // Count non-& formals (formals may be SYM or {type name} QEXPR)
+  int nparams = 0;
+  for (int i = 0; i < fn->formals->count; i++) {
+    lval* f = fn->formals->cell[i];
+    if (f->type == LVAL_SYM && strcmp(f->sym, "&") == 0) continue;
+    nparams++;
+  }
+
+  std::string name = "__rut_jit_" + std::to_string(g_jit_counter++);
+
+  // fn->body is a QEXPR with one child (the body expression)
+  lval* body_node = (fn->body->count == 1) ? fn->body->cell[0] : fn->body;
+
+  // Determine if the last expression in tail position is returnable (pure).
+  // Walk do-blocks and QEXPRs to find the final node.
+  auto find_tail = [](lval* node) -> lval* {
+    while (true) {
+      if (!node) return nullptr;
+      if (node->type == LVAL_QEXPR) {
+        if (node->count == 0) return nullptr;
+        node = node->cell[node->count - 1]; continue;
+      }
+      if (node->type == LVAL_SEXPR && node->count > 1 &&
+          node->cell[0]->type == LVAL_SYM &&
+          strcmp(node->cell[0]->sym, "do") == 0) {
+        node = node->cell[node->count - 1]; continue;
+      }
+      return node;
+    }
+  };
+  lval* tail_node = find_tail(body_node);
+  bool returns_value = explicit_ret.empty() ? (tail_node && rut_is_pure(tail_node))
+                                            : (explicit_ret != "void");
+  std::string ret_type = explicit_ret.empty() ? (returns_value ? "auto" : "void")
+                                              : explicit_ret;
+
+  // Build signature. Each formal is either:
+  //   LVAL_SYM  "name"         → auto name   (C++20 abbreviated function template)
+  //   LVAL_QEXPR {type name}   → type name   (explicit, e.g. {float snp})
+  // Explicit types make the function concrete so RDF CallableTraits can resolve
+  // argument types directly (needed when branch types differ from double).
+  std::string sig = ret_type + " " + name + "(";
+  for (int i = 0, pi = 0; i < fn->formals->count; i++) {
+    lval* formal = fn->formals->cell[i];
+    if (formal->type == LVAL_SYM && strcmp(formal->sym, "&") == 0) continue;
+    if (pi++) sig += ", ";
+    if (formal->type == LVAL_QEXPR && formal->count == 2 &&
+        (formal->cell[0]->type == LVAL_SYM || formal->cell[0]->type == LVAL_STR) &&
+        formal->cell[1]->type == LVAL_SYM) {
+      // {type name} — explicit param type; type may be SYM (unevaluated inside QEXPR)
+      std::string pname = (formal->cell[0]->type == LVAL_SYM)
+                          ? std::string(formal->cell[0]->sym)
+                          : std::string(formal->cell[0]->str);
+      sig += pname + " " + std::string(formal->cell[1]->sym);
+    } else if (formal->type == LVAL_SYM) {
+      sig += "auto " + std::string(formal->sym);
+    } else {
+      lval_del(a);
+      return lval_err("jit-fn: invalid formal — expected symbol or {type name}");
+    }
+  }
+  sig += ")";
+
+  std::string body = rut_to_cpp_stmt(body_node, "  ", returns_value);
+  std::string code = sig + " {\n" + body + "}\n";
+
+  if (g_debug) rut_print("[jit-fn] declaring:\n%s\n", code.c_str());
+
+  if (!gInterpreter->Declare(code.c_str())) {
+    lval_del(a);
+    return lval_err("jit-fn: Declare failed for %s", name.c_str());
+  }
+
+  lval_del(a);
+  return lval_jitfn(name.c_str(), nparams);
+}
+
 void lenv_add_builtins(lenv* e) {
   /* List Functions */
   lenv_add_builtin(e, "list", builtin_list);
@@ -2606,6 +3169,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtin(e, "save-png", builtin_save_png);
   lenv_add_builtin(e, "save-window", builtin_save_window);
   lenv_add_builtin(e, "dotimes",    builtin_dotimes);
+  lenv_add_builtin(e, "jit-fn",     builtin_jit_fn);
 
   /*A few TObjects */
   lenv_add_global_object(e, "gSystem",      gSystem,      TClass::GetClass("TSystem"));
@@ -3139,8 +3703,11 @@ int main(int argc, char** argv) {
   /* Define them with the following Language */
   mpca_lang(MPCA_LANG_DEFAULT,
     "                                                         \
-      floating : /-?[0-9]+[.][0-9]*/                          \
-               | /-?[.][0-9]+/ ;                              \
+      floating : /-?[0-9]+[.][0-9]*[eE][+-]?[0-9]+/           \
+               | /-?[0-9]+[.][0-9]*/                           \
+               | /-?[.][0-9]+[eE][+-]?[0-9]+/                  \
+               | /-?[.][0-9]+/                                  \
+               | /-?[0-9]+[eE][+-]?[0-9]+/ ;                  \
       number   : /-?[0-9]+/ ;                                 \
       symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@~]+/ ;          \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \

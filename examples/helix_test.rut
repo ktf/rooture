@@ -1,0 +1,90 @@
+;;; helix_test.rut
+;;;
+;;; Minimal 3D helix display for debugging — no GUI, no density pads.
+;;; Draws 50 track helices from O2 AO2D data into a single canvas.
+;;;
+;;; Usage:
+;;;   (load "/Users/ktf/src/rooture/examples/helix_test.rut")
+
+(load stdlib.rut)
+(global "gInterpreter")
+
+;;; ── File / chain ─────────────────────────────────────────────────────────
+(def {aod-path} "/Users/ktf/src/data/2024/LHC24ar/559575/apass1/2050/o2_ctf_run00559575_orbit0059692928_tf0000474395_epn011/001/AO2D.root")
+
+(def {trk-chain} (new TChain "O2track_iu"))
+(def {cov-chain} (new TChain "O2trackcov_iu"))
+
+(def {f-keys} (.GetListOfKeys (new TFile aod-path "READ")))
+(def {nkeys}  (.GetEntries f-keys))
+
+(dotimes {i} nkeys {do
+  (= {k} (.At f-keys i))
+  (if (== (.GetClassName k) "TDirectoryFile")
+    {do
+      (= {dn} (.GetName k))
+      (.Add trk-chain (concat aod-path "?#" dn "/O2track_iu"))
+      (.Add cov-chain (concat aod-path "?#" dn "/O2trackcov_iu"))}
+    {})})
+
+(.AddFriend trk-chain cov-chain)
+
+;;; ── JIT helix callable ───────────────────────────────────────────────────
+;;; O2 track branches are Float_t — use explicit float params so RDF's
+;;; CallableTraits can match the branch type without a .Define cast.
+(def {helix-fn}
+  (jit-fn void
+    (\{{float snp} {float tgl} {float alpha} {float refx} {float refy} {float refz} {float s1pt}} {do
+      (= {bz}   5.)
+      (= {kB2C} 2.99792458e-4)
+      (= {npts} 60)
+      (= {tmin} -120.)
+      (= {dt}   (/ (- 230. tmin) (- npts 1)))
+      (= {C}    (* s1pt bz kB2C))
+      (if (< (::Abs TMath C) 1e-9) {}
+        {do
+          (= {snp2} (if (< snp -1.) {-1.} {(if (> snp 1.) {1.} {snp})}))
+          (= {phi0} (::ASin TMath snp2))
+          (= {cs0}  (::Cos TMath phi0))
+          (= {xc}   (- refx (/ snp2 C)))
+          (= {yc}   (+ refy (/ cs0  C)))
+          (= {ca}   (::Cos TMath alpha))
+          (= {sa}   (::Sin TMath alpha))
+          (= {pl}   (new TPolyLine3D npts))
+          (dotimes {ip} npts {do
+            (= {t}  (+ tmin (* ip dt)))
+            (= {ph} (+ phi0 (* C t)))
+            (= {xl} (+ xc (/ (::Sin TMath ph) C)))
+            (= {yl} (- yc (/ (::Cos TMath ph) C)))
+            (.SetPoint pl ip
+              (- (* xl ca) (* yl sa))
+              (+ (* xl sa) (* yl ca))
+              (+ refz (* tgl t)))})
+          (= {pt}  (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))}))
+          (= {col} (if (< pt 0.5) {861}
+                     {(if (< pt 1.) {433}
+                        {(if (< pt 2.) {418} {807})})}))
+          (.SetLineColor pl col)
+          (.SetLineWidth pl 1)
+          (.Draw pl "SAMEL")})})))
+
+(print "helix-fn:" helix-fn)
+
+;;; ── Canvas and TView ─────────────────────────────────────────────────────
+(def {c} (new TCanvas "c" "Helix test" 800 800))
+
+;;; Invisible polyline spanning the TPC volume establishes the TView/axes.
+(def {dummy} (new TPolyLine3D 2))
+(.SetPoint dummy 0 -260. -260. -260.)
+(.SetPoint dummy 1  260.  260.  260.)
+(.SetLineColor dummy 0)
+(.Draw dummy "L")
+
+;;; ── Foreach ──────────────────────────────────────────────────────────────
+(print "Running Foreach...")
+(-> (new ROOT::RDataFrame trk-chain)
+  {.Range 50}
+  {.Foreach helix-fn {"fSnp" "fTgl" "fAlpha" "fX" "fY" "fZ" "fSigned1Pt"}})
+(print "Foreach done.")
+
+(.Update c)

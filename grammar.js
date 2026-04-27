@@ -44,8 +44,18 @@ module.exports = grammar({
     inlinestr: ($) => token(/[^}\n]*/),
 
     // Literals
-    float:  ($) => token(choice(/-?[0-9]+\.[0-9]*/, /-?\.[0-9]+/)),
-    number: ($) => token(/-?[0-9]+/),
+    // Each float alternative is written WITHOUT optional groups so that
+    // tree-sitter's DFA does not stop at an early accepting state.
+    // "with exponent" alternatives come first so maximal munch always wins.
+    // Explicit priorities: float(2) > number(1) > symbol(0).
+    float: ($) => token(prec(2, choice(
+      /-?[0-9]+\.[0-9]*[eE][+-]?[0-9]+/,  // 1.5e-3  2.99792458e-4
+      /-?[0-9]+\.[0-9]*/,                   // 1.5     2.0
+      /-?\.[0-9]+[eE][+-]?[0-9]+/,         // .5e2
+      /-?\.[0-9]+/,                          // .5
+      /-?[0-9]+[eE][+-]?[0-9]+/,           // 1e-9    2e4
+    ))),
+    number: ($) => token(prec(1, /-?[0-9]+/)),
     string: ($) => token(/"([^"\\]|\\.)*"/),
 
     // .Method — shorthand for (. Method ...)

@@ -1,0 +1,84 @@
+;;; tests/jit_fn.rut — tests for the (jit-fn lambda) builtin
+;;;
+;;; Verifies that jit-fn transpiles rooture lambdas to native C++ functions,
+;;; JIT-declares them, and returns correct values.
+;;;
+;;; Uses (process-line "(long)__rut_jit_N(...)") to call the declared function
+;;; and get back its result as a Long_t — no extra introspection builtin needed.
+;;;
+;;; The counter starts at 0 per process, so function names are deterministic:
+;;;   sq        → __rut_jit_0
+;;;   double-x  → __rut_jit_1
+;;;   sum2      → __rut_jit_2
+;;;   clamp01   → __rut_jit_3
+;;;   my-abs    → __rut_jit_4
+;;;   noop      → __rut_jit_5  (void)
+
+(load stdlib.rut)
+(global "gInterpreter")
+
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)}}))
+
+;;; ── 1. Pure expression body: auto return ────────────────────────────────────
+;;; (\{x} {(* x x)}) → auto __rut_jit_0(auto x) { return (x * x); }
+
+(def {sq} (jit-fn (\{x} {(* x x)})))
+
+(assert-eq "sq(3)" (process-line "(long)__rut_jit_0(3.0)") 9)
+(assert-eq "sq(0)" (process-line "(long)__rut_jit_0(0.0)") 0)
+
+;;; ── 2. do block, last expr is a variable (sym) — auto return ────────────────
+;;; (\{x} {do (= {y} (* x 2.)) y})
+;;;   → auto __rut_jit_1(auto x) { auto y = (x * 2.0); return y; }
+
+(def {double-x} (jit-fn (\{x} {do (= {y} (* x 2.)) y})))
+
+(assert-eq "double(5)"  (process-line "(long)__rut_jit_1(5.0)")  10)
+(assert-eq "double(-3)" (process-line "(long)__rut_jit_1(-3.0)") -6)
+
+;;; ── 3. Two parameters — auto return ─────────────────────────────────────────
+;;; (\{x y} {(+ x y)}) → auto __rut_jit_2(auto x, auto y) { return (x + y); }
+
+(def {sum2} (jit-fn (\{x y} {(+ x y)})))
+
+(assert-eq "sum2(3,4)" (process-line "(long)__rut_jit_2(3.0, 4.0)") 7)
+
+;;; ── 4. Nested if (nested ternaries) — auto return ───────────────────────────
+;;; clamp to [0, 1]
+
+(def {clamp01} (jit-fn (\{x} {(if (< x 0.) {0.} {(if (> x 1.) {1.} {x})})})))
+
+(assert-eq "clamp(2.0)→100"  (process-line "(long)(100*__rut_jit_3(2.0))")  100)
+(assert-eq "clamp(-1.0)→0"   (process-line "(long)(100*__rut_jit_3(-1.0))") 0)
+(assert-eq "clamp(0.5)→50"   (process-line "(long)(100*__rut_jit_3(0.5))")  50)
+
+;;; ── 5. Static method call — auto return ─────────────────────────────────────
+;;; (::Abs TMath x) → TMath::Abs(x)
+
+(def {my-abs} (jit-fn (\{x} {(::Abs TMath x)})))
+
+(assert-eq "abs(-5)"  (process-line "(long)__rut_jit_4(-5.0)") 5)
+(assert-eq "abs(7)"   (process-line "(long)__rut_jit_4(7.0)")  7)
+
+;;; ── 6. Void body — side-effecting do block ───────────────────────────────────
+;;; Last statement is a method call → void return.
+;;; (\{x} {do (= {pl} (new TPolyLine3D 2)) (.SetPoint pl 0 x x x)})
+;;;   → void __rut_jit_5(auto x) { auto pl = new TPolyLine3D(2);
+;;;                                 pl->SetPoint(0, x, x, x); }
+
+(def {noop} (jit-fn (\{x} {do
+  (= {pl} (new TPolyLine3D 2))
+  (.SetPoint pl 0 x x x)})))
+
+;;; Call directly via process-line to confirm it runs without error.
+(process-line "__rut_jit_5(42.0)")
+(print "void jit-fn PASS")
+
+;;; ── Done ──────────────────────────────��────────────────────────��─────────────
+(print "All jit-fn tests passed.")
+(exit 0)

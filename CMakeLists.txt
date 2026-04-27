@@ -87,3 +87,12 @@ add_test(
 set_tests_properties(dotimes PROPERTIES
   PASS_REGULAR_EXPRESSION "All dotimes tests passed"
 )
+
+add_test(
+  NAME jit_fn
+  COMMAND $<TARGET_FILE:rooture> tests/jit_fn.rut
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(jit_fn PROPERTIES
+  PASS_REGULAR_EXPRESSION "All jit-fn tests passed"
+)
