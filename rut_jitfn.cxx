@@ -65,6 +65,12 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
         else if (found->type == LVAL_FLOAT) {
           char buf[32]; snprintf(buf, sizeof(buf), "%.17g", found->floating);
           r = buf;
+        } else if (found->type == LVAL_TOBJ && found->obj) {
+          // Fold a heap object to a stable pointer cast: ((ClassName*)0xADDR)
+          // The address is baked in at compile time; the value is read at runtime.
+          std::string cls_name = found->cls ? std::string(found->cls->GetName()) : "void";
+          char addr_buf[32]; snprintf(addr_buf, sizeof(addr_buf), "%p", found->obj);
+          r = "((" + cls_name + "*)" + std::string(addr_buf) + ")";
         }
         lval_del(found);
         if (!r.empty()) return r;

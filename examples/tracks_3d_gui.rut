@@ -45,6 +45,19 @@
 ;;; every update-helices call.
 (def {rdf-helix} (new ROOT::RDataFrame trk-chain))
 
+;;; Mutable threshold box — a single-element TArrayI on the heap.
+;;; filter-fn captures its address at compile time and reads the value at
+;;; runtime, so the threshold can be updated without recompiling the filter.
+(def {min-cls-box} (new TArrayI 1))
+(.SetAt min-cls-box 0 0)
+
+;;; filter-fn compiled once.  The transpiler folds min-cls-box to its C++
+;;; pointer address; GetAt(0) reads the current threshold at call time.
+(def {filter-fn}
+  (jit-fn bool
+    (\{{UChar_t fTPCNClsFindable} {Char_t fTPCNClsFindableMinusFound}}
+      {(>= (- fTPCNClsFindable fTPCNClsFindableMinusFound) (.GetAt min-cls-box 0))})))
+
 ;;; ── Fill TH3D once (sample of 500k tracks) ───────────────────────────────
 ;;; Axes: eta × sigma(pT)/pT × N_TPC cls
 (def {h3raw}
@@ -219,19 +232,12 @@
   (.SetPoint dummy 1  260.  260.  260.)
   (.SetLineColor dummy 0)
   (.Draw dummy "L")
-  ;;; Compile a fresh filter-fn with minCls baked in as a literal.
-  ;;; The jit-fn transpiler constant-folds closed-over LVAL_NUM variables,
-  ;;; so no .Define column is needed — raw branch types are used directly.
-  (= {cur-filter}
-    (jit-fn bool
-      (\{{UChar_t fTPCNClsFindable} {Char_t fTPCNClsFindableMinusFound}}
-        {(>= (- fTPCNClsFindable fTPCNClsFindableMinusFound) minCls)})))
-  ;;; Limit raw entries so the drawn helix count is proportional to the cut:
-  ;;; at ~30% pass rate (minCls≈130) we approach the 200 cap; at 0.4% (minCls≈150)
-  ;;; only ~2 helices are drawn, matching the visual sparsity of pads 1 and 2.
+  ;;; Update threshold in the box — filter-fn reads it via its captured pointer.
+  (.SetAt min-cls-box minCls 0)
+  ;;; Limit raw entries so drawn helix count is proportional to the cut.
   (-> rdf-helix
     {.Range 500}
-    {.Filter cur-filter {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
+    {.Filter filter-fn {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
     {.Range 200}
     {.Foreach helix-fn helix-cols})
   (draw-cylinder 2.  -250. 250. 5 12 400 2)   ;;; beam pipe      (kYellow=400)
@@ -242,9 +248,7 @@
 
 (def {redraw} (\{} {
   do
-  (= {minCls} (.GetPosition sl))
-  (.SetText lbl-v (new TGString (concat "  " (str minCls))))
-  (.Layout win)
+  (update-label)
   (update-density)
   (update-scatter)
   (update-helices)
@@ -256,7 +260,14 @@
 (update-helices)
 
 ;;; ── Wire slider and show window ──────────────────────────────────────────
-(connect sl "PositionChanged(Int_t)" redraw)
+;;; Label updates live while dragging; plots redraw only on release.
+(def {update-label} (\{} {do
+  (= {minCls} (.GetPosition sl))
+  (.SetText lbl-v (new TGString (concat "  " (str minCls))))
+  (.Layout win)}))
+
+(connect sl "PositionChanged(Int_t)" update-label)
+(connect sl "Released()" redraw)
 
 (.SetWindowName win "TPC Cluster Cut")
 (.MapSubwindows win)
