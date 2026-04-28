@@ -57,6 +57,36 @@ calls, `dotimes`, or a rooture lambda?  If yes, do it that way.  The goal is
 to demonstrate how expressive rooture itself is, not to use it as a wrapper
 around Cling string-eval.
 
+## Use jit-fn for RDataFrame column and filter functions
+
+When passing callables to `RDataFrame::Define` or `RDataFrame::Filter`, always
+use `jit-fn` rather than C++ string expressions.  String expressions are an
+escape hatch of last resort; jit-fn callables are idiomatic rooture and compile
+to native C++ function pointers that RDF's `CallableTraits` can resolve without
+ambiguity.
+
+```scheme
+;;; preferred — idiomatic rooture
+(def {phi-fn}
+  (jit-fn float (\{{float fAlpha} {float fSnp}}
+    {(+ fAlpha (::ASin TMath fSnp))})))
+
+(-> rdf {.Define "phi" phi-fn {"fAlpha" "fSnp"}})
+
+;;; avoid — C++ string eval, opaque to the rooture reader
+(-> rdf {.Define "phi" "fAlpha + TMath::ASin(fSnp)"})
+```
+
+Rules:
+- Always declare explicit C++ types in formals (`{float name}`, `{UChar_t name}`,
+  etc.) so RDF `CallableTraits` resolves argument types without `.Define` casts.
+- Use the typed return form `(jit-fn rettype lambda)` for all non-void columns
+  (`float`, `int`, `bool`, …).
+- Filter functions use `(jit-fn bool lambda)` with the column list as the second
+  argument to `.Filter`.
+- Shared column functions (e.g. `ncls-fn`, `sigpt-fn`) should be defined once at
+  the top of the script and reused across multiple RDataFrame pipelines.
+
 ## Rooture language quirks
 
 ### Undefined symbols auto-convert to strings

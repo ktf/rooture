@@ -1,10 +1,11 @@
 ;;; tracks_3d_gui.rut
 ;;;
 ;;; 3-D track explorer for ALICE AO2D data.
-;;; Single canvas, three pads:
-;;;   pad1 (left)   — COLZ density: eta × sigma(pT)/pT
-;;;   pad2 (centre) — 3D scatter:   eta × log2(sigma(pT)/pT) × N_TPC cls
-;;;   pad3 (right)  — 3D helices:   actual track trajectories in global X/Y/Z
+;;; Single canvas, four pads (2×2):
+;;;   pad1 (top-left)  — COLZ density: phi × sigma(pT)/pT
+;;;   pad2 (top-right) — COLZ density: eta × log2(sigma(pT)/pT)
+;;;   pad4 (bot-left)  — transverse X-Y section: cluster density in global X/Y
+;;;   pad3 (bot-right) — 3D helices: actual track trajectories in global X/Y/Z
 ;;; A slider filters by minimum number of TPC clusters.
 ;;;
 ;;; Usage:
@@ -14,6 +15,11 @@
 (.Load gSystem "libGui")
 (global "gClient")
 (global "gInterpreter")
+(def {sw-load} (doto (new TStopwatch) {Start}))
+(def {t0} (\{msg} {do
+  (.Stop sw-load)
+  (print (concat msg " " (str (.RealTime sw-load)) "s"))
+  (.Continue sw-load)}))
 
 ;;; ── File / chains ────────────────────────────────────────────────────────
 (def {aod-path} "/Users/ktf/src/data/2024/LHC24ar/559575/apass1/2050/o2_ctf_run00559575_orbit0059692928_tf0000474395_epn011/001/AO2D.root")
@@ -39,11 +45,11 @@
 
 (.AddFriend trk-chain extra-chain)
 (.AddFriend trk-chain cov-chain)
+(t0 "chains")
 
-;;; ── RDataFrame node reused across slider updates ─────────────────────────
-;;; Pre-creating it here avoids rebuilding the event-loop infrastructure on
-;;; every update-helices call.
+;;; ── RDataFrame nodes reused across slider updates ────────────────────────
 (def {rdf-helix} (new ROOT::RDataFrame trk-chain))
+(def {rdf-pt}    (new ROOT::RDataFrame trk-chain))
 
 ;;; Mutable threshold box — a single-element TArrayI on the heap.
 ;;; filter-fn captures its address at compile time and reads the value at
@@ -58,14 +64,104 @@
     (\{{UChar_t fTPCNClsFindable} {Char_t fTPCNClsFindableMinusFound}}
       {(>= (- fTPCNClsFindable fTPCNClsFindableMinusFound) (.GetAt min-cls-box 0))})))
 
+;;; ── Per-collision mean pT accumulators ───────────────────────────────────
+;;; fIndexCollisions resets to 0 each timeframe; the same index from different
+;;; DFs accumulates together, which is acceptable for a distribution in a
+;;; single homogeneous run.
+(def {n-coll-max} 20000)
+(def {sum-pt-box} (new TArrayF n-coll-max))
+(def {cnt-box}    (new TArrayI n-coll-max))
+;;; Distribution histogram: one entry per collision = mean pT of its tracks.
+(def {h-mean-pt}
+  (new TH1F "hmeanpt" ";#LT p_{T} #GT (GeV/c);Collisions" 50 0. 2.))
+
+(t0 "accumulators+filter-fn")
+
+;;; ── JIT-compiled column and filter functions ─────────────────────────────
+;;; Compiled once; passed directly to RDataFrame::Define / Filter as native
+;;; C++ function pointers — zero interpreter overhead per entry.
+
+;;; phi = fAlpha + arcsin(fSnp)
+(def {phi-fn}
+  (jit-fn float (\{{float fAlpha} {float fSnp}}
+    {(+ fAlpha (::ASin TMath fSnp))})))
+
+;;; sigma(pT)/pT = fSigma1Pt / |fSigned1Pt|
+(def {sigpt-fn}
+  (jit-fn float (\{{float fSigma1Pt} {float fSigned1Pt}}
+    {(/ fSigma1Pt (::Abs TMath fSigned1Pt))})))
+
+;;; N_TPC clusters found  (UChar_t - Char_t → int via promotion)
+(def {ncls-fn}
+  (jit-fn int (\{{UChar_t fTPCNClsFindable} {Char_t fTPCNClsFindableMinusFound}}
+    {(- fTPCNClsFindable fTPCNClsFindableMinusFound)})))
+
+;;; eta = arcsinh(tan(lambda))
+(def {eta-fn}
+  (jit-fn float (\{{float fTgl}}
+    {(::ASinH TMath fTgl)})))
+
+;;; log2(sigPt) — operates on the already-defined sigPt derived column
+(def {log2sp-fn}
+  (jit-fn float (\{{float sigPt}}
+    {(::Log2 TMath sigPt)})))
+
+;;; validity filter: fSigma1Pt > 0 and fSigned1Pt != 0
+(def {sigpt-valid-fn}
+  (jit-fn bool (\{{float fSigma1Pt} {float fSigned1Pt}}
+    {(if (> fSigma1Pt 0.) {(!= fSigned1Pt 0.)} {0})})))
+
+;;; pT = 1 / |q/pT|  (guarded against zero)
+(def {pt-fn}
+  (jit-fn float (\{{float fSigned1Pt}}
+    {(if (== fSigned1Pt 0.) {0.} {(/ 1. (::Abs TMath fSigned1Pt))})})))
+
+;;; global X: xg = fX*cos(alpha) - fY*sin(alpha)
+(def {xg-fn}
+  (jit-fn float (\{{float fX} {float fAlpha} {float fY}}
+    {(- (* fX (::Cos TMath fAlpha)) (* fY (::Sin TMath fAlpha)))})))
+
+;;; global Y: yg = fX*sin(alpha) + fY*cos(alpha)
+(def {yg-fn}
+  (jit-fn float (\{{float fX} {float fAlpha} {float fY}}
+    {(+ (* fX (::Sin TMath fAlpha)) (* fY (::Cos TMath fAlpha)))})))
+
+(t0 "column jit-fns (phi/sigpt/ncls/eta/log2sp/sigpt-valid/pt/xg/yg)")
+
+;;; fill-accum-fn: per-entry — adds pT and count into the accumulator arrays.
+;;; fIndexCollisions can be negative (O2 sentinel for ambiguous/no collision) — skip those.
+(def {fill-accum-fn}
+  (jit-fn void (\{{float fSigned1Pt} {int fIndexCollisions}}
+    {(if (>= fIndexCollisions 0)
+      {(if (< fIndexCollisions n-coll-max)
+        {do
+          (= {pt} (if (== fSigned1Pt 0.) {0.} {(/ 1. (::Abs TMath fSigned1Pt))}))
+          (.SetAt sum-pt-box (+ (.GetAt sum-pt-box fIndexCollisions) pt) fIndexCollisions)
+          (.SetAt cnt-box    (+ (.GetAt cnt-box    fIndexCollisions) 1)  fIndexCollisions)}
+        {})}
+      {})})))
+
+;;; build-mean-fn: called once after Foreach — fills h-mean-pt from accumulators
+(def {build-mean-fn}
+  (jit-fn void (\{}
+    {do
+      (.Reset h-mean-pt)
+      (dotimes {ic} n-coll-max {do
+        (= {c} (.GetAt cnt-box ic))
+        (if (> c 0)
+          {(.Fill h-mean-pt (/ (.GetAt sum-pt-box ic) c))}
+          {})})})))
+
+(t0 "accum jit-fns (fill-accum/build-mean)")
+
 ;;; ── Fill TH3D once (sample of 500k tracks) ───────────────────────────────
 ;;; Axes: phi × sigma(pT)/pT × N_TPC cls
 (def {h3raw}
   (-> (new ROOT::RDataFrame trk-chain)
     {.Range 500000}
-    {.Define "phi"   "fAlpha + TMath::ASin(fSnp)"}
-    {.Define "sigPt" "fSigma1Pt / std::abs(fSigned1Pt)"}
-    {.Define "nCls"  "int(fTPCNClsFindable) - int(fTPCNClsFindableMinusFound)"}
+    {.Define "phi"   phi-fn   {"fAlpha" "fSnp"}}
+    {.Define "sigPt" sigpt-fn {"fSigma1Pt" "fSigned1Pt"}}
+    {.Define "nCls"  ncls-fn  {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
     {.Histo3D (new ROOT::RDF::TH3DModel
                  "h3raw" ";#varphi;#sigma(p_{T})/p_{T};N_{TPC cls}"
                  40 -3.14159 3.14159  50 0. 0.5  161 -0.5 160.5)
@@ -75,15 +171,33 @@
 (def {h3log}
   (-> (new ROOT::RDataFrame trk-chain)
     {.Range 500000}
-    {.Define "eta"    "TMath::ASinH(fTgl)"}
-    {.Define "sigPt"  "fSigma1Pt / std::abs(fSigned1Pt)"}
-    {.Define "log2sp" "TMath::Log2(sigPt)"}
-    {.Define "nCls"   "int(fTPCNClsFindable) - int(fTPCNClsFindableMinusFound)"}
-    {.Filter "fSigma1Pt>0&&fSigned1Pt!=0"}
+    {.Define "eta"    eta-fn    {"fTgl"}}
+    {.Define "sigPt"  sigpt-fn  {"fSigma1Pt" "fSigned1Pt"}}
+    {.Define "log2sp" log2sp-fn {"sigPt"}}
+    {.Define "nCls"   ncls-fn   {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
+    {.Filter sigpt-valid-fn {"fSigma1Pt" "fSigned1Pt"}}
     {.Histo3D (new ROOT::RDF::TH3DModel
                  "h3log" ";#eta;log_{2}(#sigma(p_{T})/p_{T});N_{TPC cls}"
                  40 -2. 2.  60 -6. 4.  161 -0.5 160.5)
               "eta" "log2sp" "nCls"}))
+
+
+;;; ── Fill TH3D for transverse X-Y section (pad4) ─────────────────────────
+;;; Global X/Y from local-to-global rotation: xg = fX*cos(α) - fY*sin(α),
+;;;                                            yg = fX*sin(α) + fY*cos(α).
+;;; Third axis is N_TPC cls so the slider cut applies via SetRange + Project3D.
+(def {h3xy}
+  (-> (new ROOT::RDataFrame trk-chain)
+    {.Range 500000}
+    {.Define "xg"   xg-fn   {"fX" "fAlpha" "fY"}}
+    {.Define "yg"   yg-fn   {"fX" "fAlpha" "fY"}}
+    {.Define "nCls" ncls-fn {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
+    {.Histo3D (new ROOT::RDF::TH3DModel
+                 "h3xy" ";X (cm);Y (cm);N_{TPC cls}"
+                 65 -260. 260.  65 -260. 260.  161 -0.5 160.5)
+              "xg" "yg" "nCls"}))
+
+(t0 "h3raw+h3log+h3xy defined (lazy)")
 
 ;;; Column names for the helix Foreach — passed as a Q-expression of strings
 ;;; so rooture emits std::vector<std::string>{"fSnp",...} inline in Cling.
@@ -129,6 +243,8 @@
           (.SetLineWidth pl lw)
           (.Draw pl "SAMEL")})})))
 
+(t0 "helix-fn+draw-cylinder")
+
 ;;; ── GUI window (created before initial draws so sl is bound) ─────────────
 (def {win} (new TGMainFrame (.GetRoot gClient) 460 70))
 
@@ -145,20 +261,30 @@
 (.AddFrame hf lbl-v (new TGLayoutHints 16 8 5 5 5))
 (.AddFrame win hf   (new TGLayoutHints 65 5 5 8 8))
 
-;;; ── Single canvas with three equal pads ──────────────────────────────────
-(def {c} (new TCanvas "c" "ALICE track explorer" 2400 750))
+;;; ── Single canvas: 3 pads top row, 2 pads bottom row ────────────────────
+(def {c} (new TCanvas "c" "ALICE track explorer" 1800 1100))
 
-(def {pad1} (doto (new TPad "pad1" "density" 0.    0. 0.333 1.)
+(def {pad1} (doto (new TPad "pad1" "density" 0.     0.5 0.333 1.)
+  {SetRightMargin 0.16}
+  {SetLeftMargin  0.12}
+  {Draw}))
+
+(def {pad2} (doto (new TPad "pad2" "scatter" 0.333  0.5 0.667 1.)
+  {SetRightMargin 0.16}
+  {SetLeftMargin  0.12}
+  {Draw}))
+
+(def {pad5} (doto (new TPad "pad5" "ptspec"  0.667  0.5 1.    1.)
+  {SetRightMargin 0.05}
+  {SetLeftMargin  0.14}
+  {Draw}))
+
+(def {pad4} (doto (new TPad "pad4" "section" 0.     0.  0.5   0.5)
   {SetRightMargin 0.16}
   {SetLeftMargin  0.13}
   {Draw}))
 
-(def {pad2} (doto (new TPad "pad2" "scatter" 0.333 0. 0.667 1.)
-  {SetRightMargin 0.15}
-  {SetLeftMargin  0.14}
-  {Draw}))
-
-(def {pad3} (doto (new TPad "pad3" "helices" 0.667 0. 1.    1.)
+(def {pad3} (doto (new TPad "pad3" "helices" 0.5    0.  1.    0.5)
   {SetRightMargin 0.05}
   {SetLeftMargin  0.05}
   {Draw}))
@@ -189,6 +315,58 @@
                         ";#eta;log_{2}(#sigma(p_{T})/p_{T})"))
   (.cd pad2)
   (.Draw hp "COLZ")
+  (.Update c)
+  (.RaiseWindow c)
+}))
+
+;;; pad5: distribution of per-collision mean pT for tracks passing the cluster cut.
+;;; Uses mutable TArrayF/TArrayI accumulators filled via fill-accum-fn (Foreach),
+;;; then build-mean-fn loops over them at native C++ speed to fill h-mean-pt.
+(def {update-pt} (\{} {do
+  (= {minCls} (.GetPosition sl))
+  (.SetAt min-cls-box minCls 0)
+  (print "update-pt: resetting arrays")
+  (.Reset sum-pt-box 0.)
+  (.Reset cnt-box 0)
+  (print "update-pt: starting foreach")
+  (-> rdf-pt
+    {.Range 200000}
+    {.Filter sigpt-valid-fn {"fSigma1Pt" "fSigned1Pt"}}
+    {.Filter filter-fn {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
+    {.Foreach fill-accum-fn {"fSigned1Pt" "fIndexCollisions"}})
+  (print "update-pt: building histogram")
+  (build-mean-fn)
+  (.SetTitle h-mean-pt
+    (concat "N_{TPC cls} #geq " (str minCls) ";#LT p_{T} #GT (GeV/c);Collisions"))
+  (.cd pad5)
+  (.SetLogy pad5 0)
+  (.Draw h-mean-pt)
+  (.Update c)
+  (.RaiseWindow c)
+}))
+
+;;; pad4: transverse X-Y cluster density — shows the 18 TPC sectors
+;;; Guide circles mark beam pipe (r=2), inner TPC wall (r=83), outer TPC wall (r=246).
+(def {update-xy} (\{} {do
+  (= {minCls} (.GetPosition sl))
+  (.SetRange (.GetZaxis h3xy) (+ minCls 1) 162)
+  (= {hp} (.Project3D h3xy "yx"))
+  (.SetRange (.GetZaxis h3xy) 0 162)
+  (.SetTitle hp (concat "N_{TPC cls} #geq " (str minCls) ";X (cm);Y (cm)"))
+  (.cd pad4)
+  (.Draw hp "COLZ")
+  ;;; beam pipe
+  (= {a1} (doto (new TArc 0. 0. 2.)
+    {SetFillStyle 0} {SetLineColor 400} {SetLineWidth 2}))
+  (.Draw a1 "SAMEL")
+  ;;; inner TPC wall
+  (= {a2} (doto (new TArc 0. 0. 83.)
+    {SetFillStyle 0} {SetLineColor 921} {SetLineWidth 1}))
+  (.Draw a2 "SAMEL")
+  ;;; outer TPC wall
+  (= {a3} (doto (new TArc 0. 0. 246.)
+    {SetFillStyle 0} {SetLineColor 920} {SetLineWidth 1}))
+  (.Draw a3 "SAMEL")
   (.Update c)
   (.RaiseWindow c)
 }))
@@ -230,9 +408,10 @@
   (.cd pad3)
   (.Clear pad3)
   ;;; Establish TView spanning the full TPC volume before Foreach draws anything.
+  ;;; Outer TPC radius is ~246 cm, endcaps at ±250 cm — bounding box ±270.
   (= {dummy} (new TPolyLine3D 2))
-  (.SetPoint dummy 0 -260. -260. -260.)
-  (.SetPoint dummy 1  260.  260.  260.)
+  (.SetPoint dummy 0 -270. -270. -270.)
+  (.SetPoint dummy 1  270.  270.  270.)
   (.SetLineColor dummy 0)
   (.Draw dummy "L")
   (.Start sw)
@@ -249,8 +428,9 @@
   (= {t-rdf} (.RealTime sw))
 
   (.Start sw)
-  (draw-cylinder 2.  -250. 250. 5 12 400 2)   ;;; beam pipe      (kYellow=400)
-  (draw-cylinder 83. -250. 250. 3  8 921 1)   ;;; inner TPC wall (kGray+1=921)
+  (draw-cylinder 2.   -250. 250. 5 12 400 2)   ;;; beam pipe        (kYellow=400)
+  (draw-cylinder 83.  -250. 250. 3  8 921 1)   ;;; inner TPC wall   (kGray+1=921)
+  (draw-cylinder 246. -250. 250. 3  8 920 1)   ;;; outer TPC wall   (kGray=920)
   (.Stop sw)
   (= {t-cyl} (.RealTime sw))
 
@@ -268,13 +448,18 @@
   (update-label)
   (update-density)
   (update-scatter)
+  (update-pt)
+  (update-xy)
   (update-helices)
 }))
 
 ;;; ── Initial draws ────────────────────────────────────────────────────────
-(update-density)
-(update-scatter)
-(update-helices)
+(t0 "GUI+canvas setup")
+(update-density)  (t0 "update-density")
+(update-scatter)  (t0 "update-scatter")
+(update-pt)       (t0 "update-pt")
+(update-xy)       (t0 "update-xy")
+(update-helices)  (t0 "update-helices")
 
 ;;; ── Wire slider and show window ──────────────────────────────────────────
 ;;; Label updates live while dragging; plots redraw only on release.
