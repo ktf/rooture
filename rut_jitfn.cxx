@@ -4,6 +4,14 @@
 // jit-fn transpiler
 // ---------------------------------------------------------------------------
 
+// Sanitise a rooture identifier to a valid C++ identifier:
+// rooture allows '-' in symbol names; C++ uses '_'.
+static std::string to_cpp_id(const char* s) {
+  std::string r(s);
+  for (char& c : r) if (c == '-') c = '_';
+  return r;
+}
+
 // Transpilation context: formal parameter names (emitted as-is) and
 // the closure environment for constant-folding free variables.
 struct JitCtx {
@@ -52,8 +60,9 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   if (v->type == LVAL_STR)
     return "\"" + escape_for_cling_str(v->str) + "\"";
   if (v->type == LVAL_SYM) {
+    std::string cid = to_cpp_id(v->sym);
     // If it's a formal parameter, emit as a C++ identifier.
-    if (ctx.params.count(v->sym)) return v->sym;
+    if (ctx.params.count(cid)) return cid;
     // Try constant-folding from the closure environment.
     if (ctx.env) {
       lval tmp; tmp.type = LVAL_SYM; tmp.sym = v->sym;
@@ -76,7 +85,7 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
         if (!r.empty()) return r;
       }
     }
-    return v->sym;  // fallback: emit as C++ identifier
+    return cid;  // fallback: emit as C++ identifier (hyphens → underscores)
   }
 
   // Unwrap single-element Q-expression
@@ -231,7 +240,7 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
     lval* sym_q = v->cell[1];
     std::string varname;
     if (sym_q->type == LVAL_QEXPR && sym_q->count == 1 && sym_q->cell[0]->type == LVAL_SYM)
-      varname = sym_q->cell[0]->sym;
+      varname = to_cpp_id(sym_q->cell[0]->sym);
     else
       varname = "/*bad-var*/";
     return ind + "auto " + varname + " = " + rut_to_cpp_expr(v->cell[2], ctx) + ";\n";
@@ -242,7 +251,7 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
     lval* sym_q = v->cell[1];
     std::string ivar = (sym_q->type == LVAL_QEXPR && sym_q->count == 1 &&
                         sym_q->cell[0]->type == LVAL_SYM)
-                       ? sym_q->cell[0]->sym : "i";
+                       ? to_cpp_id(sym_q->cell[0]->sym) : "i";
     std::string n    = rut_to_cpp_expr(v->cell[2], ctx);
     std::string body = rut_to_cpp_stmt(v->cell[3], ind + "  ", false, ctx);
     return ind + "for(int " + ivar + " = 0; " + ivar + " < " + n + "; ++" + ivar + ") {\n"
@@ -332,10 +341,10 @@ lval* builtin_jit_fn(lenv* e, lval* a) {
   for (int i = 0; i < fn->formals->count; i++) {
     lval* formal = fn->formals->cell[i];
     if (formal->type == LVAL_SYM)
-      ctx.params.insert(formal->sym);
+      ctx.params.insert(to_cpp_id(formal->sym));
     else if (formal->type == LVAL_QEXPR && formal->count == 2 &&
              formal->cell[1]->type == LVAL_SYM)
-      ctx.params.insert(formal->cell[1]->sym);
+      ctx.params.insert(to_cpp_id(formal->cell[1]->sym));
   }
 
   // Count non-& formals (formals may be SYM or {type name} QEXPR)
@@ -391,9 +400,9 @@ lval* builtin_jit_fn(lenv* e, lval* a) {
       std::string pname = (formal->cell[0]->type == LVAL_SYM)
                           ? std::string(formal->cell[0]->sym)
                           : std::string(formal->cell[0]->str);
-      sig += pname + " " + std::string(formal->cell[1]->sym);
+      sig += pname + " " + to_cpp_id(formal->cell[1]->sym);
     } else if (formal->type == LVAL_SYM) {
-      sig += "auto " + std::string(formal->sym);
+      sig += "auto " + to_cpp_id(formal->sym);
     } else {
       lval_del(a);
       return lval_err("jit-fn: invalid formal — expected symbol or {type name}");

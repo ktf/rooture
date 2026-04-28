@@ -186,9 +186,10 @@ lval* lval_lambda(lval* formals, lval* body) {
 
 lval* lval_jitfn(const char* name, long nparams) {
   lval* v = (lval*)malloc(sizeof(lval));
-  v->type = LVAL_JITFN;
-  v->sym  = strdup(name);
-  v->num  = nparams;
+  v->type    = LVAL_JITFN;
+  v->sym     = strdup(name);
+  v->num     = nparams;
+  v->builtin = nullptr;
   return v;
 }
 
@@ -516,6 +517,34 @@ lval* lval_call(lenv* e, lval* f, lval* a) {
   /* If Builtin then simply apply that */
   if (f->builtin) { return f->builtin(e, a); }
 
+  /* LVAL_JITFN — generate a ProcessLine call with serialised arguments */
+  if (f->type == LVAL_JITFN) {
+    std::string call = std::string(f->sym) + "(";
+    for (int i = 0; i < a->count; i++) {
+      if (i) call += ", ";
+      lval* arg = a->cell[i];
+      switch (arg->type) {
+        case LVAL_NUM:
+          call += std::to_string(arg->num); break;
+        case LVAL_FLOAT: {
+          char b[32]; snprintf(b, sizeof(b), "%.17g", arg->floating);
+          call += b; break;
+        }
+        case LVAL_STR:
+          call += "\"" + escape_for_cling_str(arg->str) + "\""; break;
+        case LVAL_TOBJ: {
+          std::string cn = arg->cls ? std::string(arg->cls->GetName()) : "void";
+          call += "((" + cn + "*)" + ptr_to_hex(arg->obj) + ")"; break;
+        }
+        default: call += "0"; break;
+      }
+    }
+    call += ")";
+    gInterpreter->ProcessLine(call.c_str());
+    lval_del(a);
+    return lval_sexpr();
+  }
+
   /* Record Argument Counts */
   int given = a->count;
   int total = f->formals->count;
@@ -657,9 +686,8 @@ lval* lval_eval_sexpr(lenv* e, lval* v) {
   if (v->count == 0) { return v; }
   if (v->count == 1) {
     lval* x = lval_take(v, 0);
-    /* If the single element is a function, call it with zero arguments.
-       This makes (fn) correctly invoke fn rather than just returning it. */
-    if (x->type == LVAL_FUN) {
+    /* If the single element is a callable, invoke it with zero arguments. */
+    if (x->type == LVAL_FUN || x->type == LVAL_JITFN) {
       lval* result = lval_call(e, x, lval_sexpr());
       lval_del(x);
       return result;
@@ -667,9 +695,9 @@ lval* lval_eval_sexpr(lenv* e, lval* v) {
     return x;
   }
 
-  /* Ensure first element is a function after evaluation */
+  /* Ensure first element is a callable after evaluation */
   lval* f = lval_pop(v, 0);
-  if (f->type != LVAL_FUN) {
+  if (f->type != LVAL_FUN && f->type != LVAL_JITFN) {
     lval* err = lval_err(
       "S-Expression starts with incorrect type. "
       "Got %s, Expected %s.",
