@@ -40,6 +40,11 @@
 (.AddFriend trk-chain extra-chain)
 (.AddFriend trk-chain cov-chain)
 
+;;; ── RDataFrame node reused across slider updates ─────────────────────────
+;;; Pre-creating it here avoids rebuilding the event-loop infrastructure on
+;;; every update-helices call.
+(def {rdf-helix} (new ROOT::RDataFrame trk-chain))
+
 ;;; ── Fill TH3D once (sample of 500k tracks) ───────────────────────────────
 ;;; Axes: eta × sigma(pT)/pT × N_TPC cls
 (def {h3raw}
@@ -206,20 +211,27 @@
 ;;; pad3: true 3D helix view — uses helix-fn (jit-compiled above)
 (def {update-helices} (\{} {do
   (= {minCls} (.GetPosition sl))
-  (= {cut-str} (concat "int(fTPCNClsFindable)-int(fTPCNClsFindableMinusFound)>=" (str minCls)))
   (.cd pad3)
   (.Clear pad3)
   ;;; Establish TView spanning the full TPC volume before Foreach draws anything.
-  ;;; A zero-colour invisible poly with extreme endpoints creates the 3D axes.
   (= {dummy} (new TPolyLine3D 2))
   (.SetPoint dummy 0 -260. -260. -260.)
   (.SetPoint dummy 1  260.  260.  260.)
   (.SetLineColor dummy 0)
   (.Draw dummy "L")
-  ;;; Per-track helix loop via RDataFrame Foreach — helix-fn is a native C++
-  ;;; function (jit-fn), so RDataFrame deduces its Float_t parameter types directly.
-  (-> (new ROOT::RDataFrame trk-chain)
-    {.Filter cut-str}
+  ;;; Compile a fresh filter-fn with minCls baked in as a literal.
+  ;;; The jit-fn transpiler constant-folds closed-over LVAL_NUM variables,
+  ;;; so no .Define column is needed — raw branch types are used directly.
+  (= {cur-filter}
+    (jit-fn bool
+      (\{{UChar_t fTPCNClsFindable} {Char_t fTPCNClsFindableMinusFound}}
+        {(>= (- fTPCNClsFindable fTPCNClsFindableMinusFound) minCls)})))
+  ;;; Limit raw entries so the drawn helix count is proportional to the cut:
+  ;;; at ~30% pass rate (minCls≈130) we approach the 200 cap; at 0.4% (minCls≈150)
+  ;;; only ~2 helices are drawn, matching the visual sparsity of pads 1 and 2.
+  (-> rdf-helix
+    {.Range 500}
+    {.Filter cur-filter {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
     {.Range 200}
     {.Foreach helix-fn helix-cols})
   (draw-cylinder 2.  -250. 250. 5 12 400 2)   ;;; beam pipe      (kYellow=400)

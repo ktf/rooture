@@ -4,6 +4,13 @@
 // jit-fn transpiler
 // ---------------------------------------------------------------------------
 
+// Transpilation context: formal parameter names (emitted as-is) and
+// the closure environment for constant-folding free variables.
+struct JitCtx {
+  std::set<std::string> params;  // formal param names — never folded
+  lenv* env;                      // closure env — LVAL_NUM/FLOAT literals folded
+};
+
 // Returns true if v contains no side-effects (assignments, loops, method
 // calls, new) — used to decide whether an `if` can become a ternary.
 static bool rut_is_pure(lval* v) {
@@ -31,10 +38,11 @@ static bool rut_is_pure(lval* v) {
 }
 
 // Forward declaration
-static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail = false);
+static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
+                                   bool tail, const JitCtx& ctx);
 
 // Transpile a single expression to a C++ expression string (no semicolon).
-static std::string rut_to_cpp_expr(lval* v) {
+static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   if (!v) return "/*null*/";
   if (v->type == LVAL_NUM) return std::to_string(v->num);
   if (v->type == LVAL_FLOAT) {
@@ -43,11 +51,31 @@ static std::string rut_to_cpp_expr(lval* v) {
   }
   if (v->type == LVAL_STR)
     return "\"" + escape_for_cling_str(v->str) + "\"";
-  if (v->type == LVAL_SYM) return v->sym;
+  if (v->type == LVAL_SYM) {
+    // If it's a formal parameter, emit as a C++ identifier.
+    if (ctx.params.count(v->sym)) return v->sym;
+    // Try constant-folding from the closure environment.
+    if (ctx.env) {
+      lval tmp; tmp.type = LVAL_SYM; tmp.sym = v->sym;
+      lval* found = lenv_get(ctx.env, &tmp);
+      if (found) {
+        std::string r;
+        if (found->type == LVAL_NUM)
+          r = std::to_string(found->num);
+        else if (found->type == LVAL_FLOAT) {
+          char buf[32]; snprintf(buf, sizeof(buf), "%.17g", found->floating);
+          r = buf;
+        }
+        lval_del(found);
+        if (!r.empty()) return r;
+      }
+    }
+    return v->sym;  // fallback: emit as C++ identifier
+  }
 
   // Unwrap single-element Q-expression
   if (v->type == LVAL_QEXPR) {
-    if (v->count == 1) return rut_to_cpp_expr(v->cell[0]);
+    if (v->count == 1) return rut_to_cpp_expr(v->cell[0], ctx);
     return "/*unsupported-qexpr*/";
   }
 
@@ -71,15 +99,15 @@ static std::string rut_to_cpp_expr(lval* v) {
   if (strcmp(s, "==") == 0) binop = "==";
   if (strcmp(s, "!=") == 0) binop = "!=";
   if (binop && v->count >= 3) {
-    std::string result = rut_to_cpp_expr(v->cell[1]);
+    std::string result = rut_to_cpp_expr(v->cell[1], ctx);
     for (int i = 2; i < v->count; i++)
-      result = "(" + result + " " + binop + " " + rut_to_cpp_expr(v->cell[i]) + ")";
+      result = "(" + result + " " + binop + " " + rut_to_cpp_expr(v->cell[i], ctx) + ")";
     return result;
   }
 
   // (not expr)
   if (strcmp(s, "not") == 0 && v->count == 2)
-    return "(!(" + rut_to_cpp_expr(v->cell[1]) + "))";
+    return "(!(" + rut_to_cpp_expr(v->cell[1], ctx) + "))";
 
   // (:: Method ClassName args...) — static call
   if (strcmp(s, "::") == 0 && v->count >= 3) {
@@ -89,7 +117,7 @@ static std::string rut_to_cpp_expr(lval* v) {
                        + "::" + std::string(meth->sym) + "(";
     for (int i = 3; i < v->count; i++) {
       if (i > 3) call += ", ";
-      call += rut_to_cpp_expr(v->cell[i]);
+      call += rut_to_cpp_expr(v->cell[i], ctx);
     }
     call += ")";
     return call;
@@ -101,7 +129,7 @@ static std::string rut_to_cpp_expr(lval* v) {
                        + "::" + std::string(s + 2) + "(";
     for (int i = 2; i < v->count; i++) {
       if (i > 2) call += ", ";
-      call += rut_to_cpp_expr(v->cell[i]);
+      call += rut_to_cpp_expr(v->cell[i], ctx);
     }
     call += ")";
     return call;
@@ -109,10 +137,10 @@ static std::string rut_to_cpp_expr(lval* v) {
 
   // (.Method obj args...) — instance call, raw AST form
   if (s[0] == '.' && s[1] != '\0' && v->count >= 2) {
-    std::string call = rut_to_cpp_expr(v->cell[1]) + "->" + std::string(s + 1) + "(";
+    std::string call = rut_to_cpp_expr(v->cell[1], ctx) + "->" + std::string(s + 1) + "(";
     for (int i = 2; i < v->count; i++) {
       if (i > 2) call += ", ";
-      call += rut_to_cpp_expr(v->cell[i]);
+      call += rut_to_cpp_expr(v->cell[i], ctx);
     }
     call += ")";
     return call;
@@ -125,7 +153,7 @@ static std::string rut_to_cpp_expr(lval* v) {
     std::string call = "new " + cname + "(";
     for (int i = 2; i < v->count; i++) {
       if (i > 2) call += ", ";
-      call += rut_to_cpp_expr(v->cell[i]);
+      call += rut_to_cpp_expr(v->cell[i], ctx);
     }
     call += ")";
     return call;
@@ -142,9 +170,9 @@ static std::string rut_to_cpp_expr(lval* v) {
     bool tb_pure = rut_is_pure(tb);
     bool fb_pure = rut_is_pure(fb);
     if (tb_pure && fb_pure) {
-      std::string te = (tb->type == LVAL_QEXPR && tb->count == 0) ? "0" : rut_to_cpp_expr(tb);
-      std::string fe = (fb->type == LVAL_QEXPR && fb->count == 0) ? "0" : rut_to_cpp_expr(fb);
-      return "(" + rut_to_cpp_expr(v->cell[1]) + " ? " + te + " : " + fe + ")";
+      std::string te = (tb->type == LVAL_QEXPR && tb->count == 0) ? "0" : rut_to_cpp_expr(tb, ctx);
+      std::string fe = (fb->type == LVAL_QEXPR && fb->count == 0) ? "0" : rut_to_cpp_expr(fb, ctx);
+      return "(" + rut_to_cpp_expr(v->cell[1], ctx) + " ? " + te + " : " + fe + ")";
     }
   }
 
@@ -153,33 +181,34 @@ static std::string rut_to_cpp_expr(lval* v) {
 
 // Transpile a statement (or block) to C++ code ending with '\n'.
 // When tail=true the last expression in tail position is emitted as `return expr;`.
-static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail) {
+static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
+                                   bool tail, const JitCtx& ctx) {
   if (!v) return "";
 
   // Unwrap QEXPR used as a statement (raw AST body cells).
   // {do e1 e2 ...} in raw AST is a QEXPR [SYM do, e1, e2, ...] — treat as do-block.
   if (v->type == LVAL_QEXPR) {
     if (v->count == 0) return "";
-    if (v->count == 1) return rut_to_cpp_stmt(v->cell[0], ind, tail);
+    if (v->count == 1) return rut_to_cpp_stmt(v->cell[0], ind, tail, ctx);
     // {do e1 e2 ...} sugar: first element is the symbol "do"
     int start = 0;
     if (v->cell[0]->type == LVAL_SYM && strcmp(v->cell[0]->sym, "do") == 0)
       start = 1;
     std::string out;
     for (int i = start; i < v->count; i++)
-      out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1));
+      out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1), ctx);
     return out;
   }
 
   if (v->type != LVAL_SEXPR || v->count == 0) {
-    if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
-    return ind + rut_to_cpp_expr(v) + ";\n";
+    if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
+    return ind + rut_to_cpp_expr(v, ctx) + ";\n";
   }
 
   lval* head = v->cell[0];
   if (head->type != LVAL_SYM) {
-    if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
-    return ind + rut_to_cpp_expr(v) + ";\n";
+    if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
+    return ind + rut_to_cpp_expr(v, ctx) + ";\n";
   }
   const char* s = head->sym;
 
@@ -187,7 +216,7 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail) {
   if (strcmp(s, "do") == 0) {
     std::string out;
     for (int i = 1; i < v->count; i++)
-      out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1));
+      out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1), ctx);
     return out;
   }
 
@@ -199,7 +228,7 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail) {
       varname = sym_q->cell[0]->sym;
     else
       varname = "/*bad-var*/";
-    return ind + "auto " + varname + " = " + rut_to_cpp_expr(v->cell[2]) + ";\n";
+    return ind + "auto " + varname + " = " + rut_to_cpp_expr(v->cell[2], ctx) + ";\n";
   }
 
   // (dotimes {i} N {body})
@@ -208,8 +237,8 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail) {
     std::string ivar = (sym_q->type == LVAL_QEXPR && sym_q->count == 1 &&
                         sym_q->cell[0]->type == LVAL_SYM)
                        ? sym_q->cell[0]->sym : "i";
-    std::string n    = rut_to_cpp_expr(v->cell[2]);
-    std::string body = rut_to_cpp_stmt(v->cell[3], ind + "  ");
+    std::string n    = rut_to_cpp_expr(v->cell[2], ctx);
+    std::string body = rut_to_cpp_stmt(v->cell[3], ind + "  ", false, ctx);
     return ind + "for(int " + ivar + " = 0; " + ivar + " < " + n + "; ++" + ivar + ") {\n"
            + body + ind + "}\n";
   }
@@ -223,37 +252,37 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind, bool tail) {
 
     if (tb_empty && fb_empty) return "";
     if (tb_empty) {
-      return ind + "if(!(" + rut_to_cpp_expr(v->cell[1]) + ")) {\n"
-             + rut_to_cpp_stmt(fb, ind + "  ")
+      return ind + "if(!(" + rut_to_cpp_expr(v->cell[1], ctx) + ")) {\n"
+             + rut_to_cpp_stmt(fb, ind + "  ", false, ctx)
              + ind + "}\n";
     }
     if (fb_empty) {
-      return ind + "if(" + rut_to_cpp_expr(v->cell[1]) + ") {\n"
-             + rut_to_cpp_stmt(tb, ind + "  ")
+      return ind + "if(" + rut_to_cpp_expr(v->cell[1], ctx) + ") {\n"
+             + rut_to_cpp_stmt(tb, ind + "  ", false, ctx)
              + ind + "}\n";
     }
     // Both branches non-empty — check if pure (ternary as statement)
     if (rut_is_pure(tb) && rut_is_pure(fb)) {
-      if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
-      return ind + rut_to_cpp_expr(v) + ";\n";
+      if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
+      return ind + rut_to_cpp_expr(v, ctx) + ";\n";
     }
     // Full if/else
-    return ind + "if(" + rut_to_cpp_expr(v->cell[1]) + ") {\n"
-           + rut_to_cpp_stmt(tb, ind + "  ")
+    return ind + "if(" + rut_to_cpp_expr(v->cell[1], ctx) + ") {\n"
+           + rut_to_cpp_stmt(tb, ind + "  ", tail, ctx)
            + ind + "} else {\n"
-           + rut_to_cpp_stmt(fb, ind + "  ")
+           + rut_to_cpp_stmt(fb, ind + "  ", tail, ctx)
            + ind + "}\n";
   }
 
   // (.Method obj args...) — instance method call as statement
   if (s[0] == '.' && s[1] != '\0' && v->count >= 2) {
-    if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
-    return ind + rut_to_cpp_expr(v) + ";\n";
+    if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
+    return ind + rut_to_cpp_expr(v, ctx) + ";\n";
   }
 
   // Anything else: try as expression statement
-  if (tail) return ind + "return " + rut_to_cpp_expr(v) + ";\n";
-  return ind + rut_to_cpp_expr(v) + ";\n";
+  if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
+  return ind + rut_to_cpp_expr(v, ctx) + ";\n";
 }
 
 static std::atomic<int> g_jit_counter{0};
@@ -286,6 +315,21 @@ lval* builtin_jit_fn(lenv* e, lval* a) {
   if (fn->builtin) {
     lval_del(a);
     return lval_err("jit-fn: cannot JIT a builtin");
+  }
+
+  // Build transpilation context: collect formal parameter names so that free
+  // variables (not in formals) can be constant-folded from the calling env.
+  // NOTE: fn->env is always a fresh empty env (see lval_lambda); the caller's
+  // env `e` is where user-defined variables (like minCls) actually live.
+  JitCtx ctx;
+  ctx.env = e;
+  for (int i = 0; i < fn->formals->count; i++) {
+    lval* formal = fn->formals->cell[i];
+    if (formal->type == LVAL_SYM)
+      ctx.params.insert(formal->sym);
+    else if (formal->type == LVAL_QEXPR && formal->count == 2 &&
+             formal->cell[1]->type == LVAL_SYM)
+      ctx.params.insert(formal->cell[1]->sym);
   }
 
   // Count non-& formals (formals may be SYM or {type name} QEXPR)
@@ -351,7 +395,7 @@ lval* builtin_jit_fn(lenv* e, lval* a) {
   }
   sig += ")";
 
-  std::string body = rut_to_cpp_stmt(body_node, "  ", returns_value);
+  std::string body = rut_to_cpp_stmt(body_node, "  ", returns_value, ctx);
   std::string code = sig + " {\n" + body + "}\n";
 
   if (g_debug) rut_print("[jit-fn] declaring:\n%s\n", code.c_str());
