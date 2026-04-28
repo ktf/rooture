@@ -47,9 +47,8 @@
 (.AddFriend trk-chain cov-chain)
 (t0 "chains")
 
-;;; ── RDataFrame nodes reused across slider updates ────────────────────────
-(def {rdf-helix} (new ROOT::RDataFrame trk-chain))
-(def {rdf-pt}    (new ROOT::RDataFrame trk-chain))
+;;; ── RDataFrame base node (for dynamic per-slider queries) ────────────────
+(def {rdf-base} (new ROOT::RDataFrame trk-chain))
 
 ;;; Mutable threshold box — a single-element TArrayI on the heap.
 ;;; filter-fn captures its address at compile time and reads the value at
@@ -154,50 +153,60 @@
 
 (t0 "accum jit-fns (fill-accum/build-mean)")
 
-;;; ── Fill TH3D once (sample of 500k tracks) ───────────────────────────────
-;;; Axes: phi × sigma(pT)/pT × N_TPC cls
-(def {h3raw}
+;;; ── Single shared RDF node — all bulk histograms share one event loop ────
+;;; rdf-shared defines every derived column needed by h3raw, h3log and h3xy.
+;;; rdf-filtered branches off it with the sigPt validity filter + log2sp.
+;;; Booking Histo3D on these nodes does NOT trigger the event loop yet.
+;;; The single Foreach call below fires the loop and fills everything at once.
+(def {rdf-shared}
   (-> (new ROOT::RDataFrame trk-chain)
     {.Range 500000}
     {.Define "phi"   phi-fn   {"fAlpha" "fSnp"}}
     {.Define "sigPt" sigpt-fn {"fSigma1Pt" "fSigned1Pt"}}
     {.Define "nCls"  ncls-fn  {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
-    {.Histo3D (new ROOT::RDF::TH3DModel
-                 "h3raw" ";#varphi;#sigma(p_{T})/p_{T};N_{TPC cls}"
-                 40 -3.14159 3.14159  50 0. 0.5  161 -0.5 160.5)
-              "phi" "sigPt" "nCls"}))
+    {.Define "eta"   eta-fn   {"fTgl"}}
+    {.Define "xg"    xg-fn    {"fX" "fAlpha" "fY"}}
+    {.Define "yg"    yg-fn    {"fX" "fAlpha" "fY"}}))
 
-;;; ── Fill TH3D with log2(sigPt) axis (for pad2) ──────────────────────────
-(def {h3log}
-  (-> (new ROOT::RDataFrame trk-chain)
-    {.Range 500000}
-    {.Define "eta"    eta-fn    {"fTgl"}}
-    {.Define "sigPt"  sigpt-fn  {"fSigma1Pt" "fSigned1Pt"}}
-    {.Define "log2sp" log2sp-fn {"sigPt"}}
-    {.Define "nCls"   ncls-fn   {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
+(def {rdf-filtered}
+  (-> rdf-shared
     {.Filter sigpt-valid-fn {"fSigma1Pt" "fSigned1Pt"}}
-    {.Histo3D (new ROOT::RDF::TH3DModel
-                 "h3log" ";#eta;log_{2}(#sigma(p_{T})/p_{T});N_{TPC cls}"
-                 40 -2. 2.  60 -6. 4.  161 -0.5 160.5)
-              "eta" "log2sp" "nCls"}))
+    {.Define "log2sp" log2sp-fn {"sigPt"}}))
 
+;;; Book all three TH3D actions lazily on the shared graph.
+(def {h3raw}
+  (.Histo3D rdf-shared
+    (new ROOT::RDF::TH3DModel
+       "h3raw" ";#varphi;#sigma(p_{T})/p_{T};N_{TPC cls}"
+       40 -3.14159 3.14159  50 0. 0.5  161 -0.5 160.5)
+    "phi" "sigPt" "nCls"))
 
-;;; ── Fill TH3D for transverse X-Y section (pad4) ─────────────────────────
-;;; Global X/Y from local-to-global rotation: xg = fX*cos(α) - fY*sin(α),
-;;;                                            yg = fX*sin(α) + fY*cos(α).
-;;; Third axis is N_TPC cls so the slider cut applies via SetRange + Project3D.
+(def {h3log}
+  (.Histo3D rdf-filtered
+    (new ROOT::RDF::TH3DModel
+       "h3log" ";#eta;log_{2}(#sigma(p_{T})/p_{T});N_{TPC cls}"
+       40 -2. 2.  60 -6. 4.  161 -0.5 160.5)
+    "eta" "log2sp" "nCls"))
+
 (def {h3xy}
-  (-> (new ROOT::RDataFrame trk-chain)
-    {.Range 500000}
-    {.Define "xg"   xg-fn   {"fX" "fAlpha" "fY"}}
-    {.Define "yg"   yg-fn   {"fX" "fAlpha" "fY"}}
-    {.Define "nCls" ncls-fn {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
-    {.Histo3D (new ROOT::RDF::TH3DModel
-                 "h3xy" ";X (cm);Y (cm);N_{TPC cls}"
-                 65 -260. 260.  65 -260. 260.  161 -0.5 160.5)
-              "xg" "yg" "nCls"}))
+  (.Histo3D rdf-shared
+    (new ROOT::RDF::TH3DModel
+       "h3xy" ";X (cm);Y (cm);N_{TPC cls}"
+       65 -260. 260.  65 -260. 260.  161 -0.5 160.5)
+    "xg" "yg" "nCls"))
 
-(t0 "h3raw+h3log+h3xy defined (lazy)")
+(t0 "h3raw+h3log+h3xy booked (lazy)")
+
+;;; ── Single combined event loop ────────────────────────────────────────────
+;;; This Foreach is EAGER: it fires the RDF event loop immediately.
+;;; Because h3raw/h3log/h3xy are already booked on the same graph, RDF fills
+;;; all three histograms AND runs fill-accum-fn in one pass over 500k tracks.
+;;; min-cls-box[0]=0 here, so all tracks with valid sigPt pass the filter.
+(-> rdf-shared
+  {.Filter sigpt-valid-fn {"fSigma1Pt" "fSigned1Pt"}}
+  {.Foreach fill-accum-fn {"fSigned1Pt" "fIndexCollisions"}})
+
+(t0 "combined RDF pass (h3raw+h3log+h3xy+accumulators)")
 
 ;;; Column names for the helix Foreach — passed as a Q-expression of strings
 ;;; so rooture emits std::vector<std::string>{"fSnp",...} inline in Cling.
@@ -325,16 +334,13 @@
 (def {update-pt} (\{} {do
   (= {minCls} (.GetPosition sl))
   (.SetAt min-cls-box minCls 0)
-  (print "update-pt: resetting arrays")
   (.Reset sum-pt-box 0.)
   (.Reset cnt-box 0)
-  (print "update-pt: starting foreach")
-  (-> rdf-pt
+  (-> rdf-base
     {.Range 200000}
     {.Filter sigpt-valid-fn {"fSigma1Pt" "fSigned1Pt"}}
     {.Filter filter-fn {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
     {.Foreach fill-accum-fn {"fSigned1Pt" "fIndexCollisions"}})
-  (print "update-pt: building histogram")
   (build-mean-fn)
   (.SetTitle h-mean-pt
     (concat "N_{TPC cls} #geq " (str minCls) ";#LT p_{T} #GT (GeV/c);Collisions"))
@@ -419,7 +425,7 @@
   ;;; Update threshold in the box — filter-fn reads it via its captured pointer.
   (.SetAt min-cls-box minCls 0)
   ;;; Limit raw entries so drawn helix count is proportional to the cut.
-  (-> rdf-helix
+  (-> rdf-base
     {.Range 500}
     {.Filter filter-fn {"fTPCNClsFindable" "fTPCNClsFindableMinusFound"}}
     {.Range 200}
@@ -453,11 +459,19 @@
   (update-helices)
 }))
 
-;;; ── Initial draws ────────────────────────────────────────────────────────
+;;; ── Initial draws (histograms already filled by the combined RDF pass) ───
 (t0 "GUI+canvas setup")
 (update-density)  (t0 "update-density")
 (update-scatter)  (t0 "update-scatter")
-(update-pt)       (t0 "update-pt")
+;;; accumulators already filled at minCls=0 — just post-process and draw
+(build-mean-fn)
+(.SetTitle h-mean-pt ";#LT p_{T} #GT (GeV/c);Collisions")
+(.cd pad5)
+(.SetLogy pad5 0)
+(.Draw h-mean-pt)
+(.Update c)
+(.RaiseWindow c)
+(t0 "update-pt (initial)")
 (update-xy)       (t0 "update-xy")
 (update-helices)  (t0 "update-helices")
 
