@@ -11,6 +11,9 @@ static int             g_pipe_fds[2];
 static replxx::Replxx* g_rx = nullptr;
 static TSParser*       g_ts_parser = nullptr;
 
+// Saved for exec-based reload
+static char**      g_argv = nullptr;
+
 // MCP mode
 static bool        g_mcp_mode = false;
 static int         g_mcp_reply_fds[2];
@@ -424,7 +427,7 @@ static void mcp_thread_fn() {
       send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
         {"protocolVersion","2024-11-05"},
         {"capabilities",{{"tools",json::object()}}},
-        {"serverInfo",{{"name","rooture"},{"version","0.1.0"}}}
+        {"serverInfo",{{"name","rooture"},{"version","0.1.0 (" __DATE__ " " __TIME__ ")"}}}
       }}});
     } else if (method == "initialized") {
       /* notification — no response */
@@ -504,10 +507,20 @@ static void mcp_thread_fn() {
 
       } else if (tool == "reload") {
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
-          {"content", json::array({{{"type","text"},{"text","rooture MCP server exiting for reload."}}})}
+          {"content", json::array({{{"type","text"},{"text","Reloading rooture with new binary..."}}})}
         }}});
         fflush(g_mcp_out);
-        std::exit(0);
+        // Restore fd 1 to the real MCP stdout so the new process can set up
+        // correctly (it will dup+redirect fd 1 again during its own init).
+        dup2(fileno(g_mcp_out), STDOUT_FILENO);
+        // Close everything except stdin/stdout/stderr so the new image starts
+        // with a clean fd table.
+        { int maxfd = (int)sysconf(_SC_OPEN_MAX);
+          if (maxfd < 0 || maxfd > 4096) maxfd = 4096;
+          for (int fd = 3; fd < maxfd; fd++) close(fd); }
+        execv(g_argv[0], g_argv);
+        perror("execv");
+        std::exit(1);
 
       } else {
         send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
@@ -524,6 +537,7 @@ static void mcp_thread_fn() {
 }
 
 int main(int argc, char** argv) {
+  g_argv = argv;  // save before TApplication may shuffle argv
   const char* g_script_file = nullptr;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--debug") == 0)
