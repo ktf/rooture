@@ -132,13 +132,195 @@ Original: 35-line duplicated C++ lambda inside a ProcessLine string, called via
 
 ### draw-cylinder
 
-Beam pipe and TPC inner wall wireframes moved from ProcessLine to native rooture:
+Beam pipe and TPC inner wall wireframes moved from ProcessLine to native rooture
+and then — after profiling revealed they dominated render time — converted to a
+`jit-fn` (see [Performance profiling](#performance-profiling) below).
+
+---
+
+## Performance profiling and jit-fn direct call
+
+### Instrumentation
+
+`TStopwatch` timing was added inside `update-helices` to measure three phases:
 
 ```scheme
-(def {draw-cylinder} (\{r z1 z2 nCirc nSeg col lw} {do
-  (dotimes {ic} nCirc { ... TPolyLine3D circles ... })
-  (dotimes {ia} nSeg  { ... TPolyLine3D longitudinal lines ... })}))
+(.Start sw)
+(-> rdf-helix {.Range 500} {.Filter filter-fn cols} {.Range 200} {.Foreach helix-fn helix-cols})
+(.Stop sw) (= {t-rdf} (.RealTime sw))
+
+(.Start sw)
+(draw-cylinder 2. -250. 250. 5 12 400 2)
+(draw-cylinder 83. -250. 250. 3  8 921 1)
+(.Stop sw) (= {t-cyl} (.RealTime sw))
 ```
+
+Typical output with `draw-cylinder` as a rooture lambda:
+
+```
+helices: rdf=0.84s  cyl=5.06s  update=0.04s
+```
+
+The rooture interpreter dispatches ~584 Cling method calls per cylinder-pair update
+(2 cylinders × (nCirc × (nc+1 + 3 method calls) + nSeg × 4 calls)). Each call
+goes through `TMethodCall::Execute`, producing the 5 s overhead.
+
+### draw-cylinder as jit-fn
+
+Converting `draw-cylinder` to a `jit-fn` required two engine changes:
+
+**1. Hyphen-to-underscore sanitisation (`to_cpp_id`)**
+
+rooture symbol names may contain `-` (e.g. `two-pi`), which is not a valid C++
+identifier character.  A helper `to_cpp_id` was added to `rut_jitfn.cxx`:
+
+```cpp
+static std::string to_cpp_id(const char* s) {
+  std::string r(s);
+  for (char& c : r) if (c == '-') c = '_';
+  return r;
+}
+```
+
+Applied to: LVAL_SYM emission, `=` variable names, `dotimes` loop variable names,
+and formal parameter names inserted into `ctx.params`.
+
+**2. LVAL_JITFN direct call in `lval_call`**
+
+Calling `(draw-cylinder 2. ...)` from rooture must invoke the JIT-compiled function.
+Added a handler at the top of `lval_call` in `rut_lang.cxx`:
+
+```cpp
+if (f->type == LVAL_JITFN) {
+  std::string call = std::string(f->sym) + "(";
+  for (int i = 0; i < a->count; i++) {
+    if (i) call += ", ";
+    // serialise NUM/FLOAT/STR/TOBJ arguments to C++ literals
+    ...
+  }
+  call += ")";
+  gInterpreter->ProcessLine(call.c_str());
+  lval_del(a);
+  return lval_sexpr();
+}
+```
+
+`lval_eval_sexpr` was also updated to allow `LVAL_JITFN` through the type guard
+(previously only `LVAL_FUN` was accepted).
+
+**3. `lval_jitfn` / `lval_copy` initialise `builtin` to `nullptr`**
+
+`lval_jitfn` uses `malloc`; without explicitly setting `builtin = nullptr`, copied
+JITFN lvals had garbage in the `builtin` field and would mis-fire the builtin check.
+
+### Result after jit-fn conversion
+
+```
+helices: rdf=0.85s  cyl=0.008s  update=0.04s
+```
+
+650× speedup on cylinder drawing.  The `TStopwatch` instrumentation was removed
+once the bottleneck was resolved.
+
+---
+
+## Mutable threshold via LVAL_TOBJ constant-folding
+
+### Problem
+
+Naively, updating the cluster-count filter requires recompiling a new jit-fn on
+every slider move (1–2 s of `gInterpreter->Declare` overhead per update).
+
+### Solution
+
+A `TArrayI` of length 1 is allocated on the heap and its address folded into the
+filter jit-fn at compile time:
+
+```scheme
+(def {min-cls-box} (new TArrayI 1))
+(.SetAt min-cls-box 0 0)
+
+(def {filter-fn}
+  (jit-fn bool
+    (\{{UChar_t fTPCNClsFindable} {Char_t fTPCNClsFindableMinusFound}}
+      {(>= (- fTPCNClsFindable fTPCNClsFindableMinusFound) (.GetAt min-cls-box 0))})))
+```
+
+The transpiler sees `min-cls-box` as an `LVAL_TOBJ` in the calling environment and
+folds it to a C++ pointer cast:
+
+```cpp
+bool __rut_jit_0(UChar_t fTPCNClsFindable, Char_t fTPCNClsFindableMinusFound) {
+  return ((fTPCNClsFindable - fTPCNClsFindableMinusFound) >=
+          ((TArrayI*)0x1234abcd)->GetAt(0));
+}
+```
+
+On each slider release, rooture calls `(.SetAt min-cls-box minCls 0)` — no
+recompilation, the filter reads the updated value at runtime.
+
+### Constant-folding implementation (`JitCtx`)
+
+The transpiler carries a context struct:
+
+```cpp
+struct JitCtx {
+  std::set<std::string> params;  // formal parameter names — emitted as-is
+  lenv* env;                     // calling env — free variables folded from here
+};
+```
+
+Key: `ctx.env = e` (the calling environment), **not** `fn->env`.  Lambda creation
+via `lval_lambda` always sets `fn->env = lenv_new()` (empty); the actual bindings
+(like `min-cls-box`) only exist in the calling scope `e`.
+
+TOBJ folding in `rut_to_cpp_expr`:
+
+```cpp
+} else if (found->type == LVAL_TOBJ && found->obj) {
+  std::string cls_name = found->cls ? found->cls->GetName() : "void";
+  char addr_buf[32]; snprintf(addr_buf, sizeof(addr_buf), "%p", found->obj);
+  r = "((" + cls_name + "*)" + std::string(addr_buf) + ")";
+}
+```
+
+---
+
+## Slider and proportional helix display
+
+- **Label update** wired to `PositionChanged(Int_t)` (fires on every drag position).
+- **Redraw** wired to `Released()` (fires only on mouse release).
+
+This prevents expensive redraws while dragging.
+
+To keep the number of drawn helices proportional to the cluster cut (strict cuts
+should show fewer tracks), the RDF pipeline is:
+
+```scheme
+(-> rdf-helix
+  {.Range 500}      ; limit raw entries read from chain
+  {.Filter filter-fn cols}
+  {.Range 200}      ; cap drawn helices
+  {.Foreach helix-fn helix-cols})
+```
+
+At a 0.44% pass rate (minCls = 150), `.Range 500` yields ~2 helices drawn —
+visually reflecting the strict cut.
+
+---
+
+## AO2D branch types
+
+The `O2trackextra_002` branches `fTPCNClsFindable` and `fTPCNClsFindableMinusFound`
+are `UChar_t` / `Char_t` (ROOT's fixed-size 8-bit integer types), **not** `uint8_t` /
+`int8_t`.  Formals in the filter jit-fn must use the ROOT type names:
+
+```scheme
+(\{{UChar_t fTPCNClsFindable} {Char_t fTPCNClsFindableMinusFound}} ...)
+```
+
+Using `uint8_t` / `int8_t` causes RDF `CallableTraits` to fail to resolve the
+argument types.
 
 ---
 

@@ -156,15 +156,22 @@ TPC clusters found: `int(fTPCNClsFindable) - int(fTPCNClsFindableMinusFound)`
 
 ## TH3 with interactive cluster-cut slider
 
-See `examples/tracks_3d_gui.rut` for a full example that:
-1. Fills a TH3D (η × φ × N_TPC cls) from 500k sampled tracks.
-2. Shows a `TGHSlider` window; dragging it calls `TH3::Project3D("yx")` with a
-   Z-axis range cut and redraws the COLZ canvas live.
+See `examples/tracks_3d_gui.rut` for a full 3-pad interactive explorer:
 
-Key pattern for range-filtered projection:
+- **Pad 1**: φ × σ(pT)/pT density (COLZ), φ = `fAlpha + TMath::ASin(fSnp)`
+- **Pad 2**: η × log₂(σ(pT)/pT) density (COLZ)
+- **Pad 3**: true 3D helix trajectories drawn natively via `jit-fn` + `RDataFrame::Foreach`
+
+A `TGHSlider` sets the minimum TPC cluster count.  The slider label updates live
+on `PositionChanged(Int_t)`; the three pads redraw only on `Released()`.
+
+The cluster-cut filter uses a `TArrayI` mutable threshold box so the jit-fn is
+compiled only once and the threshold is updated at runtime without recompilation.
+
+Key pattern for range-filtered TH3 projection:
 ```scheme
 (.SetRange (.GetZaxis h3raw) (+ minCls 1) 162)   ; bins, not values
-(def {hp} (.Project3D h3raw "yx"))                ; returns TH2D
+(= {hp} (.Project3D h3raw "yx"))                  ; returns TH2D
 (.SetRange (.GetZaxis h3raw) 0 162)               ; reset
 ```
 
