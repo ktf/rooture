@@ -601,6 +601,12 @@ lval* builtin_member(lenv *e, lval *a) {
           cached.mc->Execute(obj_ptr, arg_ptrs, nargs, &ret);
           return lval_floating(ret);
         }
+        case TMethodCall::kString: {
+          set_params();
+          char* sret = nullptr;
+          cached.mc->Execute(obj_ptr, &sret);
+          return lval_str(sret ? sret : "");
+        }
         default:  // kNone / kOther+void
           set_params();
           cached.mc->Execute(obj_ptr);
@@ -674,16 +680,20 @@ lval* builtin_member(lenv *e, lval *a) {
         std::string bare = retname.substr(0, retname.size() - 1);
         while (!bare.empty() && bare.back() == ' ') bare.pop_back();
         ptr_ret_cls = TClass::GetClass(bare.c_str());
-        if (!ptr_ret_cls && ret != 0) {
-          // Name lookup failed — recover dynamic type via Cling typeid.
+        // When the declared return type is TObject (the ROOT base class), it is
+        // almost always a polymorphic container return (TList::At, TDirectory::Get,
+        // etc.) whose concrete type is more specific.  Always recover the real
+        // dynamic class so callers can invoke subclass methods (e.g. TKey::GetClassName).
+        // Also recover when name lookup failed entirely.
+        // Use TObject::IsA() (a virtual ROOT method) rather than C++ typeid, because
+        // Cling's Calc context may not honour RTTI dynamic dispatch for typeid.
+        bool need_dynamic = ret != 0 &&
+          (!ptr_ret_cls || strcmp(ptr_ret_cls->GetName(), "TObject") == 0);
+        if (need_dynamic) {
           // The result is pointer-instance-specific; don't cache.
           cache_this = false;
-          static std::atomic<int> rut_ptr_n{0};
-          std::string pvar = "__rut_p" + std::to_string(rut_ptr_n++);
-          gInterpreter->ProcessLine(
-            ("auto* " + pvar + " = (" + bare + "*)(Long_t)" + std::to_string((Long_t)ret) + ";").c_str());
-          ptr_ret_cls = (TClass*)gInterpreter->Calc(
-            ("(Long_t)TClass::GetClass(typeid(*" + pvar + "))").c_str());
+          TClass* dyn = reinterpret_cast<TObject*>(ret)->IsA();
+          if (dyn) ptr_ret_cls = dyn;
         }
         is_ptr_return = true;
         result = lval_tobj((void*)ret, ptr_ret_cls);
