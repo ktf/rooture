@@ -1,0 +1,78 @@
+;;; tests/promise.rut — tests for promise / deliver primitives
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/promise.rut")
+
+(load stdlib.rut)
+
+;;; Helper
+(def {assert-eq} (\ {label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Basic promise creation ────────────────────────────────────────────────
+
+(def {p1} (promise))
+(assert-eq "promise not realized initially" (realized? p1) 0)
+
+;;; ── deliver realises the promise ─────────────────────────────────────────
+
+(deliver p1 42)
+(assert-eq "promise realized after deliver"  (realized? p1) 1)
+(assert-eq "deref returns delivered value"   (deref p1)     42)
+
+;;; ── second deliver is a no-op ────────────────────────────────────────────
+
+(def {first-deliver}  (deliver p1 99))
+(assert-eq "second deliver returns 0"     first-deliver 0)
+(assert-eq "value unchanged after re-deliver" (deref p1) 42)
+
+;;; ── deliver from a future thread ─────────────────────────────────────────
+
+(def {p2} (promise))
+(def {f}  (future {do
+  (deliver p2 "hello from future")
+  nil
+}))
+;;; deref the future to ensure it completed, then check the promise
+(deref f)
+(assert-eq "promise realized by future"       (realized? p2) 1)
+(assert-eq "deref promise set by future"      (deref p2) "hello from future")
+
+;;; ── deref blocks until deliver ───────────────────────────────────────────
+
+(def {p3} (promise))
+;;; spawn a future that delivers after a short delay
+(def {fdeliver} (future {do
+  (deliver p3 "delayed")
+  nil
+}))
+(assert-eq "deref waits for delivery" (deref p3) "delayed")
+
+;;; ── timeout-deref on undelivered promise ─────────────────────────────────
+
+(def {p4} (promise))
+(def {timed-out} (deref p4 50))        ;;; 50 ms timeout, default = {}
+(assert-eq "timeout returns nil on undelivered" timed-out {})
+
+(def {p5} (promise))
+(def {timed-default} (deref p5 50 -1)) ;;; user-supplied default
+(assert-eq "timeout returns default"   timed-default -1)
+
+;;; ── deliver any lval type ─────────────────────────────────────────────────
+
+(def {p6} (promise))
+(deliver p6 {1 2 3})
+(assert-eq "deliver a list" (deref p6) {1 2 3})
+
+(def {p7} (promise))
+(deliver p7 3.14)
+(assert-eq "deliver a float" (deref p7) 3.14)
+
+(print "All promise tests passed.")
+(exit 0)

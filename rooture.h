@@ -59,7 +59,7 @@ const TSLanguage* tree_sitter_rooture();
 // ---------------------------------------------------------------------------
 enum { LVAL_ERR, LVAL_NUM, LVAL_FLOAT, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR,
-       LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE };
+       LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE, LVAL_PROMISE };
 
 // ---------------------------------------------------------------------------
 // Core structs — forward declared so lbuiltin can reference lval/lenv

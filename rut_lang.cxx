@@ -41,11 +41,17 @@ lval* lval_atom(lval* init) {
 struct RutFuture {
   std::mutex              mu;
   std::condition_variable cv;
-  bool                    realized = false;
-  lval*                   result   = nullptr;
+  bool                    realized   = false;
+  bool                    is_promise = false; // true → manually fulfilled via deliver
+  lval*                   result     = nullptr;
 
   ~RutFuture() {
-    // If discarded before deref: drain queue and wait so the thread can finish.
+    if (is_promise) {
+      // Promises have no background thread; just free any delivered result.
+      if (result) lval_del(result);
+      return;
+    }
+    // Future: drain the Cling queue and wait for the worker thread to finish.
     while (true) {
       rut_drain_cling_queue();
       std::unique_lock<std::mutex> lock(mu);
@@ -60,6 +66,15 @@ using RutFuturePtr = std::shared_ptr<RutFuture>;
 static lval* lval_future_new(RutFuturePtr rf) {
   lval* v = (lval*)malloc(sizeof(lval));
   v->type = LVAL_FUTURE;
+  v->obj  = new RutFuturePtr(std::move(rf));
+  return v;
+}
+
+static lval* lval_promise_new() {
+  auto rf = std::make_shared<RutFuture>();
+  rf->is_promise = true;
+  lval* v = (lval*)malloc(sizeof(lval));
+  v->type = LVAL_PROMISE;
   v->obj  = new RutFuturePtr(std::move(rf));
   return v;
 }
@@ -281,8 +296,9 @@ const char* ltype_name(int t) {
     case LVAL_SEXPR: return "S-Expression";
     case LVAL_QEXPR: return "Q-Expression";
     case LVAL_JITFN: return "JitFn";
-    case LVAL_ATOM:   return "Atom";
-    case LVAL_FUTURE: return "Future";
+    case LVAL_ATOM:    return "Atom";
+    case LVAL_FUTURE:  return "Future";
+    case LVAL_PROMISE: return "Promise";
     default: return "Unknown";
   }
 }
@@ -361,8 +377,9 @@ void lval_del(lval* v) {
     case LVAL_SYM: free(v->sym); break;
     case LVAL_STR: free(v->str); break;
     case LVAL_JITFN: free(v->sym); break;
-    case LVAL_ATOM:   delete (RutAtomPtr*)v->obj; break;
-    case LVAL_FUTURE: delete (RutFuturePtr*)v->obj; break;
+    case LVAL_ATOM:    delete (RutAtomPtr*)v->obj;   break;
+    case LVAL_FUTURE:
+    case LVAL_PROMISE: delete (RutFuturePtr*)v->obj; break;
     /* If Sexpr or Qexpr then delete all elements inside */
     case LVAL_QEXPR:
     case LVAL_SEXPR:
@@ -455,6 +472,17 @@ void lval_print(lval* v) {
       RutFuturePtr& fp = *(RutFuturePtr*)v->obj;
       std::lock_guard<std::mutex> lock(fp->mu);
       rut_print(fp->realized ? "<future: realized>" : "<future: pending>");
+    } break;
+    case LVAL_PROMISE: {
+      RutFuturePtr& fp = *(RutFuturePtr*)v->obj;
+      std::lock_guard<std::mutex> lock(fp->mu);
+      if (fp->realized) {
+        rut_print("<promise: ");
+        lval_print(fp->result);
+        rut_print(">");
+      } else {
+        rut_print("<promise: pending>");
+      }
     } break;
   }
 }
@@ -592,7 +620,8 @@ lval* lval_copy(lval* v) {
       /* Atoms are reference types: copy shares the same RutAtom. */
       x->obj = new RutAtomPtr(*(RutAtomPtr*)v->obj); break;
     case LVAL_FUTURE:
-      /* Futures are reference types: copy shares the same RutFuture. */
+    case LVAL_PROMISE:
+      /* Futures and promises are reference types: copy shares the same RutFuture. */
       x->obj = new RutFuturePtr(*(RutFuturePtr*)v->obj); break;
 
     /* Copy Lists by copying each sub-expression */
@@ -1248,6 +1277,7 @@ int lval_eq(lval* x, lval* y) {
     case LVAL_ATOM:
       return (*(RutAtomPtr*)x->obj).get() == (*(RutAtomPtr*)y->obj).get();
     case LVAL_FUTURE:
+    case LVAL_PROMISE:
       return (*(RutFuturePtr*)x->obj).get() == (*(RutFuturePtr*)y->obj).get();
   }
   return 0;
@@ -1675,12 +1705,42 @@ lval* builtin_future(lenv* e, lval* a) {
 
 lval* builtin_realized(lenv* e, lval* a) {
   LASSERT_NUM("realized?", a, 1);
-  LASSERT_TYPE("realized?", a, 0, LVAL_FUTURE);
+  LASSERT(a, a->cell[0]->type == LVAL_FUTURE ||
+             a->cell[0]->type == LVAL_PROMISE,
+          "'realized?' expects a Future or Promise, got %s",
+          ltype_name(a->cell[0]->type));
   RutFuturePtr& fp = *(RutFuturePtr*)a->cell[0]->obj;
   std::lock_guard<std::mutex> lock(fp->mu);
   int r = fp->realized ? 1 : 0;
   lval_del(a);
   return lval_num(r);
+}
+
+lval* builtin_promise(lenv* e, lval* a) {
+  LASSERT_NUM("promise", a, 0);
+  lval_del(a);
+  return lval_promise_new();
+}
+
+lval* builtin_deliver(lenv* e, lval* a) {
+  LASSERT_NUM("deliver", a, 2);
+  LASSERT(a, a->cell[0]->type == LVAL_PROMISE,
+          "'deliver' expects a Promise as first argument, got %s",
+          ltype_name(a->cell[0]->type));
+  RutFuturePtr& fp = *(RutFuturePtr*)a->cell[0]->obj;
+  lval* val = lval_copy(a->cell[1]);
+  bool delivered = false;
+  {
+    std::lock_guard<std::mutex> lock(fp->mu);
+    if (!fp->realized) {
+      fp->result   = val;
+      fp->realized = true;
+      delivered    = true;
+    }
+  }
+  fp->cv.notify_all();
+  lval_del(a);
+  return lval_num(delivered ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1700,11 +1760,14 @@ lval* builtin_deref(lenv* e, lval* a) {
    *   (deref future ms default)    — block up to ms milliseconds; return default on timeout */
   LASSERT(a, a->count >= 1 && a->count <= 3,
           "'deref' expects 1–3 arguments, got %i", a->count);
-  LASSERT(a, a->cell[0]->type == LVAL_ATOM || a->cell[0]->type == LVAL_FUTURE,
-          "'deref' expects an Atom or Future, got %s",
+  LASSERT(a, a->cell[0]->type == LVAL_ATOM   ||
+             a->cell[0]->type == LVAL_FUTURE  ||
+             a->cell[0]->type == LVAL_PROMISE,
+          "'deref' expects an Atom, Future, or Promise, got %s",
           ltype_name(a->cell[0]->type));
-  LASSERT(a, a->count == 1 || a->cell[0]->type == LVAL_FUTURE,
-          "'deref' timeout is only meaningful for Futures, not Atoms");
+  LASSERT(a, a->count == 1 || a->cell[0]->type == LVAL_FUTURE ||
+                               a->cell[0]->type == LVAL_PROMISE,
+          "'deref' timeout is only meaningful for Futures and Promises, not Atoms");
   LASSERT(a, a->count < 2 || a->cell[1]->type == LVAL_NUM,
           "'deref' timeout-ms must be a number, got %s",
           a->count >= 2 ? ltype_name(a->cell[1]->type) : "");
@@ -1837,8 +1900,10 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "reset!", builtin_reset);
   lenv_add_builtin(e, "swap!",  builtin_swap);
   /* Future + thread pool */
-  lenv_add_builtin(e, "future",          builtin_future);
-  lenv_add_builtin(e, "realized?",       builtin_realized);
-  lenv_add_builtin(e, "parallelism",     builtin_parallelism);
+  lenv_add_builtin(e, "future",           builtin_future);
+  lenv_add_builtin(e, "realized?",        builtin_realized);
+  lenv_add_builtin(e, "promise",          builtin_promise);
+  lenv_add_builtin(e, "deliver",          builtin_deliver);
+  lenv_add_builtin(e, "parallelism",      builtin_parallelism);
   lenv_add_builtin(e, "set-parallelism!", builtin_set_parallelism);
 }
