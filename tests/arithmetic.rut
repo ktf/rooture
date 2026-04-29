@@ -1,0 +1,90 @@
+;;; tests/arithmetic.rut — tests for built-in arithmetic operators
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/arithmetic.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; Helper
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Addition ──────────────────────────────────────────────────────────────────
+
+(assert-eq "+ basic"        (+ 1 2)       3)
+(assert-eq "+ multi"        (+ 1 2 3 4)  10)
+(assert-eq "+ zero"         (+ 5 0)       5)
+(assert-eq "+ negative"     (+ 3 -1)      2)
+(assert-eq "+ float"        (+ 1.5 2.5)   4.0)
+(assert-eq "+ int+float"    (+ 1 0.5)     1.5)
+
+;;; ── Subtraction ───────────────────────────────────────────────────────────────
+
+(assert-eq "- basic"        (- 5 3)       2)
+(assert-eq "- multi"        (- 10 2 3)    5)
+(assert-eq "- unary negate" (- 7)        -7)
+(assert-eq "- negative"     (- 3 5)      -2)
+(assert-eq "- float"        (- 3.0 1.5)   1.5)
+
+;;; ── Multiplication ────────────────────────────────────────────────────────────
+
+(assert-eq "* basic"        (* 3 4)       12)
+(assert-eq "* multi"        (* 2 3 4)     24)
+(assert-eq "* by zero"      (* 99 0)       0)
+(assert-eq "* negative"     (* -3 4)     -12)
+(assert-eq "* float"        (* 2.0 3.5)   7.0)
+(assert-eq "* int*float"    (* 3 2.0)     6.0)
+
+;;; ── Division ──────────────────────────────────────────────────────────────────
+
+(assert-eq "/ basic"        (/ 12 4)      3)
+(assert-eq "/ multi"        (/ 24 2 3)    4)
+(assert-eq "/ float"        (/ 7.0 2.0)   3.5)
+(assert-eq "/ int→float"    (/ 1 2.0)     0.5)
+
+;;; ── Modulo ────────────────────────────────────────────────────────────────────
+
+(assert-eq "% basic"        (% 10 3)      1)
+(assert-eq "% exact"        (% 9 3)       0)
+(assert-eq "% larger"       (% 2 5)       2)
+(assert-eq "% negative num" (% -7 3)     -1)
+(assert-eq "% one"          (% 7 1)       0)
+
+;;; ── Mixed int / float promotion ───────────────────────────────────────────────
+
+(assert-eq "int+float→float" (+ 1 1.0)   2.0)
+(assert-eq "int*float→float" (* 3 0.5)   1.5)
+(assert-eq "int/float→float" (/ 5 2.0)   2.5)
+
+;;; ── Comparison operators ──────────────────────────────────────────────────────
+
+(assert-eq "< true"         (< 1 2)       1)
+(assert-eq "< false"        (< 2 1)       0)
+(assert-eq "> true"         (> 3 2)       1)
+(assert-eq "> false"        (> 1 3)       0)
+(assert-eq "<= equal"       (<= 2 2)      1)
+(assert-eq "<= less"        (<= 1 2)      1)
+(assert-eq "<= greater"     (<= 3 2)      0)
+(assert-eq ">= equal"       (>= 2 2)      1)
+(assert-eq ">= greater"     (>= 3 2)      1)
+(assert-eq ">= less"        (>= 1 2)      0)
+(assert-eq "== equal"       (== 4 4)      1)
+(assert-eq "== unequal"     (== 4 5)      0)
+(assert-eq "!= unequal"     (!= 4 5)      1)
+(assert-eq "!= equal"       (!= 4 4)      0)
+
+;;; ── foldl with arithmetic ─────────────────────────────────────────────────────
+
+(assert-eq "sum via foldl"     (foldl + 0 {1 2 3 4 5})   15)
+(assert-eq "product via foldl" (foldl * 1 {1 2 3 4 5})  120)
+
+(print "All arithmetic tests passed.")
+(exit 0)

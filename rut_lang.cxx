@@ -1,4 +1,5 @@
 #include "rooture.h"
+#include <cmath>
 
 /* Parsers */
 mpc_parser_t* Number;
@@ -961,6 +962,13 @@ lval* builtin_op(lenv *e, lval* a, const char* op) {
           }
           x->num /= y->num;
         }
+        if (strcmp(op, "%") == 0) {
+          if (y->num == 0) {
+            lval_del(x); lval_del(y);
+            x = lval_err("Modulo By Zero!"); break;
+          }
+          x->num %= y->num;
+        }
       break;
       case LVAL_FLOAT:
         if (strcmp(op, "+") == 0) { x->floating += y->floating; }
@@ -972,6 +980,13 @@ lval* builtin_op(lenv *e, lval* a, const char* op) {
             x = lval_err("Division By Zero!"); break;
           }
           x->floating /= y->floating;
+        }
+        if (strcmp(op, "%") == 0) {
+          if (y->floating == 0) {
+            lval_del(x); lval_del(y);
+            x = lval_err("Modulo By Zero!"); break;
+          }
+          x->floating = fmod(x->floating, y->floating);
         }
       break;
     }
@@ -1149,6 +1164,10 @@ lval* builtin_mul(lenv* e, lval* a) {
 
 lval* builtin_div(lenv* e, lval* a) {
   return builtin_op(e, a, "/");
+}
+
+lval* builtin_mod(lenv* e, lval* a) {
+  return builtin_op(e, a, "%");
 }
 
 lval* builtin_var(lenv* e, lval* a, const char* func) {
@@ -1790,6 +1809,7 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "-", builtin_sub);
   lenv_add_builtin(e, "*", builtin_mul);
   lenv_add_builtin(e, "/", builtin_div);
+  lenv_add_builtin(e, "%", builtin_mod);
   /* Conditionals */
   lenv_add_builtin(e, "if", builtin_if);
   lenv_add_builtin(e, "==", builtin_eq);
