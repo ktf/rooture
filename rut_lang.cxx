@@ -1113,6 +1113,40 @@ lval* builtin_ne(lenv* e, lval* a) {
   return builtin_cmp(e, a, "!=");
 }
 
+lval* builtin_cond(lenv* e, lval* a) {
+  LASSERT(a, a->count % 2 == 0,
+          "'cond' requires an even number of arguments (condition/result pairs), got %i",
+          a->count);
+  for (int i = 0; i < a->count; i += 2) {
+    LASSERT(a, a->cell[i]->type == LVAL_QEXPR,
+            "'cond' condition %i must be a Q-expression { }, got %s",
+            i/2, ltype_name(a->cell[i]->type));
+    LASSERT(a, a->cell[i+1]->type == LVAL_QEXPR,
+            "'cond' result %i must be a Q-expression { }, got %s",
+            i/2, ltype_name(a->cell[i+1]->type));
+
+    /* Evaluate the condition by flipping a copy to SEXPR. */
+    lval* cond_expr = lval_copy(a->cell[i]);
+    cond_expr->type = LVAL_SEXPR;
+    lval* cond_result = lval_eval(e, cond_expr);
+
+    if (cond_result->type == LVAL_ERR) { lval_del(a); return cond_result; }
+
+    int truthy = (cond_result->type == LVAL_NUM && cond_result->num != 0);
+    lval_del(cond_result);
+
+    if (truthy) {
+      lval* result = lval_copy(a->cell[i+1]);
+      result->type = LVAL_SEXPR;
+      lval_del(a);
+      return lval_eval(e, result);
+    }
+  }
+  /* No branch matched — return nil. */
+  lval_del(a);
+  return lval_qexpr();
+}
+
 lval* builtin_if(lenv* e, lval* a) {
   LASSERT_NUM("if", a, 3);
   LASSERT_TYPE("if", a, 0, LVAL_NUM);
@@ -1874,7 +1908,8 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "/", builtin_div);
   lenv_add_builtin(e, "%", builtin_mod);
   /* Conditionals */
-  lenv_add_builtin(e, "if", builtin_if);
+  lenv_add_builtin(e, "cond", builtin_cond);
+  lenv_add_builtin(e, "if",   builtin_if);
   lenv_add_builtin(e, "==", builtin_eq);
   lenv_add_builtin(e, "!=", builtin_ne);
   lenv_add_builtin(e, ">",  builtin_gt);
