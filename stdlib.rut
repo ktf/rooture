@@ -249,6 +249,14 @@
   map deref (map (\ {x} {future {fn x}}) l)
 })
 
+; Parallel filter — evaluates predicate (fn x) for each x in l concurrently,
+; returns elements for which the predicate is truthy, in the original order.
+(fun {pfilter fn l} {
+  do
+    (= {results} (map deref (map (\ {x} {future {fn x}}) l)))
+    (map fst (filter snd (zip l results)))
+})
+
 ;;; Threading
 ; -> is a C++ builtin (builtin_arrow). Supported step forms:
 ;   {. Method extra-args...}         classic
