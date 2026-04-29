@@ -168,9 +168,26 @@ point where `future` is called:
 (assert-eq "product" (deref b) 120)
 ```
 
+**Timeout** — `deref` accepts an optional timeout in milliseconds and a default value:
+
+```scheme
+(deref f 500)          ; return {} (nil) if not ready within 500 ms
+(deref f 500 -1)       ; return -1 if not ready within 500 ms
+```
+
 **Thread-safety** — all Cling/ROOT calls made inside a future body are
 automatically dispatched to the main thread, so ROOT objects are safe to use
 from futures without any extra locking.
+
+**Thread pool** — futures run on a fixed-size worker pool sized to the number
+of logical CPUs.  Use `(parallelism)` to query the pool size and
+`(set-parallelism! n)` to resize it (waits for in-flight futures to finish):
+
+```scheme
+(parallelism)           ; → 10  (example)
+(set-parallelism! 4)    ; shrink pool — useful when ROOT's IMT already uses cores
+(set-parallelism! 1)    ; serialize all futures (handy for debugging)
+```
 
 Future equality (`==`) is identity: two future values are equal only if they
 are literally the same future, not merely futures that computed the same result.
@@ -236,7 +253,11 @@ connected AI assistant, letting it understand the meaningful knobs in your analy
 | `(swap! a f args...)` | Update atom `a` to `(f current args...)` |
 | `(future {body})` | Evaluate `body` on a background thread; returns a future |
 | `(deref f)` | Block until future `f` completes; return its result (also works on atoms) |
+| `(deref f ms)` | Block up to `ms` milliseconds; return `{}` on timeout |
+| `(deref f ms default)` | Block up to `ms` milliseconds; return `default` on timeout |
 | `(realized? f)` | Return `1` if future `f` has completed, `0` otherwise |
+| `(parallelism)` | Return the number of worker threads in the thread pool |
+| `(set-parallelism! n)` | Resize the thread pool to `n` workers |
 | `(symbols)` | List all user-defined symbol names |
 | `(canvases)` | List open canvas names |
 | `(annotations)` | List all annotated symbols |

@@ -1675,10 +1675,20 @@ lval* builtin_atom(lenv* e, lval* a) {
 }
 
 lval* builtin_deref(lenv* e, lval* a) {
-  LASSERT_NUM("deref", a, 1);
+  /* Accepted arities:
+   *   (deref ref)                  — block forever (atoms and futures)
+   *   (deref future ms)            — block up to ms milliseconds; return {} on timeout
+   *   (deref future ms default)    — block up to ms milliseconds; return default on timeout */
+  LASSERT(a, a->count >= 1 && a->count <= 3,
+          "'deref' expects 1–3 arguments, got %i", a->count);
   LASSERT(a, a->cell[0]->type == LVAL_ATOM || a->cell[0]->type == LVAL_FUTURE,
           "'deref' expects an Atom or Future, got %s",
           ltype_name(a->cell[0]->type));
+  LASSERT(a, a->count == 1 || a->cell[0]->type == LVAL_FUTURE,
+          "'deref' timeout is only meaningful for Futures, not Atoms");
+  LASSERT(a, a->count < 2 || a->cell[1]->type == LVAL_NUM,
+          "'deref' timeout-ms must be a number, got %s",
+          a->count >= 2 ? ltype_name(a->cell[1]->type) : "");
 
   if (a->cell[0]->type == LVAL_ATOM) {
     RutAtomPtr& ap = *(RutAtomPtr*)a->cell[0]->obj;
@@ -1688,18 +1698,33 @@ lval* builtin_deref(lenv* e, lval* a) {
     return result;
   }
 
-  /* LVAL_FUTURE — pump the Cling queue while waiting for the thread to finish. */
+  /* LVAL_FUTURE — optional timeout. */
+  bool     has_timeout = (a->count >= 2);
+  long     timeout_ms  = has_timeout ? a->cell[1]->num : 0;
+  lval*    timeout_val = (a->count >= 3) ? lval_copy(a->cell[2]) : lval_qexpr(); /* {} = nil */
+
+  using clock    = std::chrono::steady_clock;
+  auto  deadline = clock::now() + std::chrono::milliseconds(timeout_ms);
+
   RutFuturePtr& fp = *(RutFuturePtr*)a->cell[0]->obj;
   while (true) {
     rut_drain_cling_queue();
-    std::unique_lock<std::mutex> lock(fp->mu);
-    if (fp->realized) break;
-    lock.unlock();
+    {
+      std::unique_lock<std::mutex> lock(fp->mu);
+      if (fp->realized) {
+        lval* result = lval_copy(fp->result);
+        lock.unlock();
+        lval_del(timeout_val);
+        lval_del(a);
+        return result;
+      }
+    }
+    if (has_timeout && clock::now() >= deadline) {
+      lval_del(a);
+      return timeout_val;   /* return the caller-supplied default (or {}) */
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  lval* result = lval_copy(fp->result);
-  lval_del(a);
-  return result;
 }
 
 lval* builtin_reset(lenv* e, lval* a) {
