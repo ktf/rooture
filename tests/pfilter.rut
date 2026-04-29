@@ -1,0 +1,78 @@
+;;; tests/pfilter.rut — tests for (pfilter f l)
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/pfilter.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; Helper
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Basic filter ─────────────────────────────────────────────────────────────
+
+(def {big} (pfilter (\ {x} {> x 3}) {1 2 3 4 5 6}))
+(assert-eq "big length"    (len big)     3)
+(assert-eq "big element 0" (nth 0 big)   4)
+(assert-eq "big element 1" (nth 1 big)   5)
+(assert-eq "big element 2" (nth 2 big)   6)
+
+;;; ── Order is preserved ───────────────────────────────────────────────────────
+
+(def {small} (pfilter (\ {x} {< x 4}) {1 2 3 4 5 6}))
+(assert-eq "small length"    (len small)   3)
+(assert-eq "small element 0" (nth 0 small) 1)
+(assert-eq "small element 2" (nth 2 small) 3)
+
+;;; ── All elements pass ────────────────────────────────────────────────────────
+
+(def {all} (pfilter (\ {x} {> x 0}) {1 2 3 4 5}))
+(assert-eq "all pass length" (len all) 5)
+
+;;; ── No elements pass ─────────────────────────────────────────────────────────
+
+(def {none} (pfilter (\ {x} {> x 100}) {1 2 3 4 5}))
+(assert-eq "none pass" none {})
+
+;;; ── Empty list ───────────────────────────────────────────────────────────────
+
+(def {empty} (pfilter (\ {x} {> x 0}) {}))
+(assert-eq "empty list" empty {})
+
+;;; ── Works with a named predicate ─────────────────────────────────────────────
+
+(def {large?} (\ {x} {>= x 5}))
+(def {large} (pfilter large? {1 2 3 4 5 6 7}))
+(assert-eq "large? length"    (len large)     3)
+(assert-eq "large? element 0" (nth 0 large)   5)
+(assert-eq "large? element 2" (nth 2 large)   7)
+
+;;; ── Single element — passes ──────────────────────────────────────────────────
+
+(def {single-pass} (pfilter (\ {x} {== x 42}) {42}))
+(assert-eq "single pass length"  (len single-pass)    1)
+(assert-eq "single pass element" (nth 0 single-pass) 42)
+
+;;; ── Single element — fails ───────────────────────────────────────────────────
+
+(def {single-fail} (pfilter (\ {x} {== x 0}) {42}))
+(assert-eq "single fail" single-fail {})
+
+;;; ── Larger list ──────────────────────────────────────────────────────────────
+
+(def {nums} {1 2 3 4 5 6 7 8 9 10})
+(def {above5} (pfilter (\ {x} {> x 5}) nums))
+(assert-eq "above5 length"    (len above5)     5)
+(assert-eq "above5 element 0" (nth 0 above5)   6)
+(assert-eq "above5 element 4" (nth 4 above5)  10)
+
+(print "All pfilter tests passed.")
+(exit 0)
