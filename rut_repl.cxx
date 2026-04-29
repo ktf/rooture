@@ -580,7 +580,7 @@ int main(int argc, char** argv) {
                | /-?[.][0-9]+/                                  \
                | /-?[0-9]+[eE][+-]?[0-9]+/ ;                  \
       number   : /-?[0-9]+/ ;                                 \
-      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@~]+/ ;          \
+      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@~?]+/ ;          \
       string   : /\"(\\\\.|[^\"])*\"/ ;                       \
       comment    : /;[^\\r\\n]*/ ;                            \
       inlinestr  : /[^}\\n]*/ ;                               \
@@ -617,6 +617,13 @@ int main(int argc, char** argv) {
   if (pipe(g_cb_pipe) == 0) {
     fcntl(g_cb_pipe[0], F_SETFL, O_NONBLOCK);
     gSystem->AddFileHandler(rut_make_callback_handler(g_cb_pipe[0], e));
+  }
+
+  /* Cling dispatch pipe: future threads write here to wake the event loop when
+     they have Cling work that must run on the main thread. */
+  if (pipe(g_cling_pipe) == 0) {
+    fcntl(g_cling_pipe[0], F_SETFL, O_NONBLOCK);
+    gSystem->AddFileHandler(rut_make_cling_handler(g_cling_pipe[0]));
   }
 
   /* Script mode: load a file and exit without starting the event loop */

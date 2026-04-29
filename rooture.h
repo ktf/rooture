@@ -36,6 +36,10 @@
 #include <unordered_map>
 #include <memory>
 #include <atomic>
+#include <mutex>
+#include <functional>
+#include <future>
+#include <queue>
 #include <regex>
 #include <climits>
 #include <algorithm>
@@ -55,7 +59,7 @@ const TSLanguage* tree_sitter_rooture();
 // ---------------------------------------------------------------------------
 enum { LVAL_ERR, LVAL_NUM, LVAL_FLOAT, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR,
-       LVAL_JITFN };
+       LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE };
 
 // ---------------------------------------------------------------------------
 // Core structs — forward declared so lbuiltin can reference lval/lenv
@@ -109,7 +113,19 @@ extern mpc_parser_t* Lispy;
 // Global variables (defined in their respective .cxx files)
 // ---------------------------------------------------------------------------
 extern bool g_debug;       // rut_repl.cxx
-extern int  g_cb_pipe[2];  // rut_root.cxx
+extern int  g_cb_pipe[2];    // rut_root.cxx — callback pipe (int ids)
+extern int  g_cling_pipe[2]; // rut_root.cxx — wakes event loop when future posts Cling work
+
+// Cling main-thread dispatch: future threads post work here and block until done.
+struct ClingWork {
+  std::function<void()>  fn;
+  std::promise<void>     done;
+};
+extern std::mutex                              g_cling_mu;
+extern std::queue<std::unique_ptr<ClingWork>> g_cling_queue;
+
+// Set to true on threads spawned by (future ...); false on the main thread.
+extern thread_local bool g_in_future;
 
 // ---------------------------------------------------------------------------
 // Inline utilities used across translation units
@@ -168,12 +184,23 @@ lval* lval_add(lval* v, lval* x);
 lval* lval_pop(lval* v, int i);
 lval* lval_read(mpc_ast_t* t);
 lval* lval_jitfn(const char* name, long nparams);
+lval* lval_atom(lval* init);
 void  lval_print(lval* v);
 void  lval_println(lval* v);
 
 std::string executable_dir();
 extern std::vector<std::string> load_path;
 TFileHandler* rut_make_callback_handler(int fd, lenv* env);
+TFileHandler* rut_make_cling_handler(int fd);
+
+// Dispatch work to the main thread if called from a future thread; run inline otherwise.
+void   rut_dispatch_work(std::function<void()> fn);
+// Drain all pending Cling work items (must be called from main thread).
+void   rut_drain_cling_queue();
+// Cling primitives — always execute on the main thread (dispatch if needed).
+Long_t rut_calc(const char* expr, TInterpreter::EErrorCode* ec = nullptr);
+Long_t rut_process_line(const char* code, TInterpreter::EErrorCode* ec = nullptr);
+bool   rut_declare(const char* code);
 
 lenv* lenv_new(void);
 void  lenv_del(lenv* e);

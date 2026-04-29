@@ -88,6 +88,95 @@ Typing `@` at the REPL prompt triggers tab-completion over all live named object
 
 ---
 
+## Atoms — mutable references
+
+An atom is a thread-safe mutable container.  It holds a single value that can
+be read and updated through four operations:
+
+```scheme
+(def {counter} (atom 0))    ; create an atom with initial value 0
+
+(deref counter)             ; read the current value  → 0
+
+(reset! counter 42)         ; replace the value unconditionally  → 42
+
+(swap! counter + 1)         ; apply a function: (+ current 1)  → 43
+(swap! counter (\ {x} {* x 2}))  ; any callable works  → 86
+```
+
+`swap!` accepts extra arguments that are appended after the current value:
+```scheme
+(swap! counter - 6)         ; (- current 6)
+```
+
+**Reference semantics** — assigning an atom to a second variable does not copy
+it; both names refer to the same atom:
+
+```scheme
+(def {a} (atom 10))
+(def {b} a)
+(reset! b 99)
+(deref a)   ; → 99
+```
+
+Atom equality (`==`) is identity: two atom values are equal only if they are the
+same atom, not merely atoms holding equal values.
+
+---
+
+## Futures — asynchronous computation
+
+A future runs a body expression on a background thread and returns immediately.
+The result is retrieved with `deref`, which blocks until the computation finishes.
+
+```scheme
+(def {f} (future {(foldl + 0 {1 2 3 4 5})}))   ; starts immediately on a thread
+;;; … do other work …
+(deref f)   ; → 15  (blocks if not yet done)
+```
+
+`realized?` checks non-blocking whether the future has completed:
+
+```scheme
+(realized? f)   ; → 1 (true) or 0 (false)
+```
+
+**Environment capture** — the future sees a snapshot of the environment at the
+point where `future` is called:
+
+```scheme
+(def {base} 100)
+(def {f} (future {(+ base 7)}))
+(deref f)   ; → 107
+```
+
+**Shared atoms** — futures can read and write atoms created on the main thread:
+
+```scheme
+(def {counter} (atom 0))
+(def {f} (future {(swap! counter + 1)}))
+(deref f)
+(deref counter)   ; → 1
+```
+
+**Concurrency** — multiple futures run in parallel:
+
+```scheme
+(def {a} (future {(foldl + 0 {1 2 3 4 5})}))   ; sum = 15
+(def {b} (future {(foldl * 1 {1 2 3 4 5})}))   ; product = 120
+(assert-eq "sum"     (deref a) 15)
+(assert-eq "product" (deref b) 120)
+```
+
+**Thread-safety** — all Cling/ROOT calls made inside a future body are
+automatically dispatched to the main thread, so ROOT objects are safe to use
+from futures without any extra locking.
+
+Future equality (`==`) is identity: two future values are equal only if they
+are literally the same future, not merely futures that computed the same result.
+
+---
+
 ## Lambdas
 
 ```scheme
@@ -141,6 +230,13 @@ connected AI assistant, letting it understand the meaningful knobs in your analy
 | `(:: Method Class args...)` | Call static method |
 | `(-> val {step} ...)` | Thread value through steps |
 | `(doto obj {step} ...)` | Apply multiple steps to one object |
+| `(atom val)` | Create a mutable atom holding `val` |
+| `(deref a)` | Read the current value of atom `a` |
+| `(reset! a val)` | Replace the value of atom `a` with `val` |
+| `(swap! a f args...)` | Update atom `a` to `(f current args...)` |
+| `(future {body})` | Evaluate `body` on a background thread; returns a future |
+| `(deref f)` | Block until future `f` completes; return its result (also works on atoms) |
+| `(realized? f)` | Return `1` if future `f` has completed, `0` otherwise |
 | `(symbols)` | List all user-defined symbol names |
 | `(canvases)` | List open canvas names |
 | `(annotations)` | List all annotated symbols |

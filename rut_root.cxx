@@ -270,6 +270,11 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset,
 // - Rest of the arguments should be passed to the method call, if
 //   we are referring to one.
 lval* builtin_member(lenv *e, lval *a) {
+  if (g_in_future) {
+    lval* ac = lval_copy(a); lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_member(e, ac); });
+    lval_del(a); return res;
+  }
   LASSERT(a, a->count >= 2,
     "Function '.' needs at least 2 argument: <method name> and <object>.");
   LASSERT_TYPE(".", a, 0, LVAL_STR);
@@ -769,6 +774,11 @@ lval* builtin_member(lenv *e, lval *a) {
 //   float   → LVAL_FLOAT (bits smuggled through Long_t)
 //   other   → LVAL_NUM (integral / enum)
 lval* builtin_static(lenv* e, lval* a) {
+  if (g_in_future) {
+    lval* ac = lval_copy(a); lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_static(e, ac); });
+    lval_del(a); return res;
+  }
   LASSERT(a, a->count >= 2,
     "Function '::' needs at least 2 arguments: <method> and <class>.");
   LASSERT_TYPE("::", a, 0, LVAL_STR);
@@ -839,6 +849,77 @@ lval* builtin_static(lenv* e, lval* a) {
   // Integral / enum / other scalar
   Long_t ival = gInterpreter->Calc(("(Long_t)(" + base + ")").c_str());
   return lval_num((long)ival);
+}
+
+// ---------------------------------------------------------------------------
+// Main-thread Cling dispatch — future threads post work here
+// ---------------------------------------------------------------------------
+
+std::mutex                              g_cling_mu;
+std::queue<std::unique_ptr<ClingWork>> g_cling_queue;
+int g_cling_pipe[2] = {-1, -1};
+
+void rut_drain_cling_queue() {
+  while (true) {
+    std::unique_ptr<ClingWork> work;
+    {
+      std::lock_guard<std::mutex> lock(g_cling_mu);
+      if (g_cling_queue.empty()) break;
+      work = std::move(g_cling_queue.front());
+      g_cling_queue.pop();
+    }
+    work->fn();
+    work->done.set_value();
+  }
+}
+
+void rut_dispatch_work(std::function<void()> fn) {
+  if (!g_in_future) { fn(); return; }
+  auto work    = std::make_unique<ClingWork>();
+  work->fn     = std::move(fn);
+  auto fut     = work->done.get_future();
+  {
+    std::lock_guard<std::mutex> lock(g_cling_mu);
+    g_cling_queue.push(std::move(work));
+  }
+  char c = 'C';
+  ::write(g_cling_pipe[1], &c, 1);  // wake the event loop
+  fut.get();                         // block until main thread executes the work
+}
+
+Long_t rut_calc(const char* expr, TInterpreter::EErrorCode* ec) {
+  Long_t r = 0;
+  rut_dispatch_work([&]{ r = gInterpreter->Calc(expr, ec); });
+  return r;
+}
+
+Long_t rut_process_line(const char* code, TInterpreter::EErrorCode* ec) {
+  Long_t r = 0;
+  rut_dispatch_work([&]{ r = gInterpreter->ProcessLine(code, ec); });
+  return r;
+}
+
+bool rut_declare(const char* code) {
+  bool r = false;
+  rut_dispatch_work([&]{ r = gInterpreter->Declare(code); });
+  return r;
+}
+
+// TFileHandler that drains the Cling dispatch queue when woken by a future thread.
+class ClingPipeHandler : public TFileHandler {
+public:
+  explicit ClingPipeHandler(int fd) : TFileHandler(fd, 1) {}
+  Bool_t ReadNotify() override {
+    char buf[64];
+    while (::read(GetFd(), buf, sizeof(buf)) > 0) {}  // drain notification bytes
+    rut_drain_cling_queue();
+    return kTRUE;
+  }
+  Bool_t Notify() override { return ReadNotify(); }
+};
+
+TFileHandler* rut_make_cling_handler(int fd) {
+  return new ClingPipeHandler(fd);
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +996,11 @@ TFileHandler* rut_make_callback_handler(int fd, lenv* env) {
 
 // Creates a new C++ object
 lval *builtin_new(lenv *e, lval* a) {
+  if (g_in_future) {
+    lval* ac = lval_copy(a); lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_new(e, ac); });
+    lval_del(a); return res;
+  }
   LASSERT(a, a->count >= 1,
     "Function 'new' needs at least 1 argument: <class name>.");
   LASSERT_TYPE("new", a, 0, LVAL_STR);
@@ -994,6 +1080,11 @@ lval *builtin_new(lenv *e, lval* a) {
 
 // Invokes a method
 lval *builtin_invoke(lenv *e, lval *a) {
+  if (g_in_future) {
+    lval* ac = lval_copy(a); lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_invoke(e, ac); });
+    lval_del(a); return res;
+  }
   LASSERT_NUM("invoke", a, 2);
   LASSERT_TYPE("invoke", a, 0, LVAL_TMETHOD);
   LASSERT_TYPE("invoke", a, 1, LVAL_TOBJ);
@@ -1038,6 +1129,11 @@ lval* builtin_canvases(lenv* e, lval* a) {
 // (save-window <frame-obj> "/path/to/out.png") — captures a TGFrame window to PNG
 // using TASImage::FromWindow (libASImage loaded on demand).
 lval* builtin_save_window(lenv* e, lval* a) {
+  if (g_in_future) {
+    lval* ac = lval_copy(a); lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_save_window(e, ac); });
+    lval_del(a); return res;
+  }
   LASSERT(a, a->count == 2, "'save-window' requires 2 arguments: <frame> <path>.");
   LASSERT(a, a->cell[0]->type == LVAL_TOBJ,
           "'save-window' argument 1 must be a ROOT TGFrame object.");
@@ -1084,6 +1180,11 @@ lval* builtin_save_png(lenv* e, lval* a) {
 // rooture object and bind it in the current environment.
 // The global must be TObject-derived so its dynamic type can be found via IsA().
 lval* builtin_global(lenv* e, lval* a) {
+  if (g_in_future) {
+    lval* ac = lval_copy(a); lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_global(e, ac); });
+    lval_del(a); return res;
+  }
   LASSERT_NUM("global", a, 1);
   LASSERT_TYPE("global", a, 0, LVAL_STR);
 
@@ -1108,6 +1209,11 @@ lval* builtin_global(lenv* e, lval* a) {
 // (connect widget "Signal()" lambda) — wire a ROOT signal to a rooture lambda.
 // Each call mints a unique Cling shim __rooture_cb_N() that fires the lambda.
 lval* builtin_connect(lenv* e, lval* a) {
+  if (g_in_future) {
+    lval* ac = lval_copy(a); lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_connect(e, ac); });
+    lval_del(a); return res;
+  }
   LASSERT_NUM("connect", a, 3);
   LASSERT_TYPE("connect", a, 0, LVAL_TOBJ);
   LASSERT_TYPE("connect", a, 1, LVAL_STR);

@@ -206,7 +206,7 @@ static const TSStateId ts_primary_state_ids[STATE_COUNT] = {
 };
 
 static const TSCharacterRange sym_symbol_character_set_1[] = {
-  {'!', '!'}, {'$', '$'}, {'&', '&'}, {'*', '+'}, {'-', ':'}, {'<', '>'}, {'A', 'Z'}, {'\\', '\\'},
+  {'!', '!'}, {'$', '$'}, {'&', '&'}, {'*', '+'}, {'-', ':'}, {'<', '?'}, {'A', 'Z'}, {'\\', '\\'},
   {'_', '_'}, {'a', 'z'}, {'~', '~'},
 };
 

@@ -164,14 +164,14 @@
 
 ; Take N items
 (fun {take n l} {
-  if (== n 0)
+  if (or (== n 0) (== l nil))
     {nil}
     {join (head l) (take (- n 1) (tail l))}
 })
 
 ; Drop N items
 (fun {drop n l} {
-  if (== n 0)
+  if (or (== n 0) (== l nil))
     {l}
     {drop (- n 1) (tail l)}
 })
@@ -237,6 +237,16 @@
     { (== n 0) 0 }
     { (== n 1) 1 }
     { otherwise (+ (fib (- n 1)) (fib (- n 2))) }
+})
+
+;;; Parallelism
+
+; Parallel map — evaluates (fn x) for each x in l concurrently, returns
+; results in the same order as l.
+; NOTE: the parameter is named `fn` (not `f`) to avoid shadowing by map's
+; internal `f` parameter when building the future's environment snapshot.
+(fun {pmap fn l} {
+  map deref (map (\ {x} {future {fn x}}) l)
 })
 
 ;;; Threading

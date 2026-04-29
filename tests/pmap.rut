@@ -1,0 +1,61 @@
+;;; tests/pmap.rut — tests for (pmap f l)
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/pmap.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; Helper
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Basic scalar map ──────────────────────────────────────────────────────────
+
+(def {squares} (pmap (\ {x} {* x x}) {1 2 3 4 5}))
+(assert-eq "squares length"    (len squares)     5)
+(assert-eq "squares element 0" (nth 0 squares)   1)
+(assert-eq "squares element 2" (nth 2 squares)   9)
+(assert-eq "squares element 4" (nth 4 squares)  25)
+
+;;; ── Order is preserved ───────────────────────────────────────────────────────
+
+(def {doubled} (pmap (\ {x} {* x 2}) {10 20 30}))
+(assert-eq "order preserved 0" (nth 0 doubled) 20)
+(assert-eq "order preserved 1" (nth 1 doubled) 40)
+(assert-eq "order preserved 2" (nth 2 doubled) 60)
+
+;;; ── Works with a named function ──────────────────────────────────────────────
+
+(def {inc} (\ {x} {+ x 1}))
+(def {incremented} (pmap inc {0 1 2 3}))
+(assert-eq "named fn length"    (len incremented)     4)
+(assert-eq "named fn element 3" (nth 3 incremented)   4)
+
+;;; ── Single-element list ──────────────────────────────────────────────────────
+
+(def {single} (pmap (\ {x} {+ x 100}) {7}))
+(assert-eq "single element" (nth 0 single) 107)
+
+;;; ── Empty list ───────────────────────────────────────────────────────────────
+
+(def {empty} (pmap (\ {x} {x}) {}))
+(assert-eq "empty list" empty {})
+
+;;; ── Result is correct even with many futures ─────────────────────────────────
+
+(def {nums} {1 2 3 4 5 6 7 8 9 10})
+(def {cubed} (pmap (\ {x} {* x (* x x)}) nums))
+(assert-eq "cubed length"    (len cubed)     10)
+(assert-eq "cubed element 0" (nth 0 cubed)    1)
+(assert-eq "cubed element 9" (nth 9 cubed) 1000)
+
+(print "All pmap tests passed.")
+(exit 0)

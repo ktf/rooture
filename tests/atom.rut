@@ -1,0 +1,61 @@
+;;; tests/atom.rut — tests for atom / deref / reset! / swap!
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/atom.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; Helper
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Creation and deref ───────────────────────────────────────────────────────
+
+(def {a} (atom 42))
+(assert-eq "initial value" (deref a) 42)
+
+;;; ── reset! ───────────────────────────────────────────────────────────────────
+
+(reset! a 100)
+(assert-eq "after reset!" (deref a) 100)
+
+;;; ── swap! with a lambda ──────────────────────────────────────────────────────
+
+(swap! a (\ {x} {* x 2}))
+(assert-eq "swap! doubles value" (deref a) 200)
+
+;;; ── swap! with a builtin and extra args ──────────────────────────────────────
+
+(swap! a + 5)
+(assert-eq "swap! with extra args" (deref a) 205)
+
+;;; ── reference semantics ──────────────────────────────────────────────────────
+
+; Two bindings to the same atom — mutation through one is visible via the other.
+(def {b} a)
+(reset! b 7)
+(assert-eq "reference: visible through original binding" (deref a) 7)
+(assert-eq "reference: visible through alias"            (deref b) 7)
+
+;;; ── atom equality is identity ────────────────────────────────────────────────
+
+(assert-eq "same atom is equal to itself"  (== a b) 1)
+(def {c} (atom 7))
+(assert-eq "distinct atoms are not equal"  (== a c) 0)
+
+;;; ── atoms holding lists ──────────────────────────────────────────────────────
+
+(def {lst} (atom {1 2 3}))
+(swap! lst (\ {l} {join l {4}}))
+(assert-eq "swap! appends to list" (len (deref lst)) 4)
+
+(print "All atom tests passed.")
+(exit 0)

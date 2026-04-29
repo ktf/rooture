@@ -1,0 +1,91 @@
+;;; tests/future.rut — tests for (future {body}), (deref f), (realized? f)
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/future.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; Helper
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Basic deref ──────────────────────────────────────────────────────────────
+
+(def {f1} (future {42}))
+(assert-eq "scalar result" (deref f1) 42)
+
+;;; ── realized? is true after deref ───────────────────────────────────────────
+
+(assert-eq "realized? after deref" (realized? f1) 1)
+
+;;; ── Computation result ───────────────────────────────────────────────────────
+
+(def {f2} (future {(+ 1 2 3 4 5)}))
+(assert-eq "arithmetic in future" (deref f2) 15)
+
+;;; ── deref is idempotent (second call returns the same value) ─────────────────
+
+(assert-eq "deref idempotent" (deref f2) 15)
+
+;;; ── String result ────────────────────────────────────────────────────────────
+
+(def {f3} (future {(concat "hel" "lo")}))
+(assert-eq "string result" (deref f3) "hello")
+
+;;; ── List result ──────────────────────────────────────────────────────────────
+
+(def {f4} (future {(map (\ {x} {* x x}) {1 2 3 4})}))
+(def {squares} (deref f4))
+(assert-eq "list length"    (len squares)      4)
+(assert-eq "list element 0" (nth 0 squares)    1)
+(assert-eq "list element 3" (nth 3 squares)   16)
+
+;;; ── Captures surrounding bindings ───────────────────────────────────────────
+
+(def {base} 100)
+(def {f5} (future {(+ base 7)}))
+(assert-eq "captures env" (deref f5) 107)
+
+;;; ── Shared atom: future writes, main thread reads ────────────────────────────
+
+(def {shared} (atom 0))
+(def {fw} (future {(swap! shared + 99)}))
+(deref fw)   ; wait for completion
+(assert-eq "atom written by future" (deref shared) 99)
+
+;;; ── Multiple futures run concurrently ────────────────────────────────────────
+
+(def {a1} (future {(foldl + 0 {1 2 3 4 5})}))         ; sum = 15
+(def {a2} (future {(foldl * 1 {1 2 3 4 5})}))         ; product = 120
+(def {a3} (future {(len {a b c d e f g})}))            ; length = 7
+
+(assert-eq "concurrent future 1" (deref a1) 15)
+(assert-eq "concurrent future 2" (deref a2) 120)
+(assert-eq "concurrent future 3" (deref a3) 7)
+
+;;; ── realized? before deref may be 0 or 1; after deref must be 1 ─────────────
+
+(def {fr} (future {(foldl + 0 (map (\ {x} {* x x}) {1 2 3 4 5 6 7 8 9 10}))}))
+(deref fr)
+(assert-eq "realized? is 1 after deref" (realized? fr) 1)
+
+;;; ── Future equality is identity ──────────────────────────────────────────────
+
+(def {fx} (future {1}))
+(def {fy} fx)
+(deref fx)
+(assert-eq "same future is equal to itself"  (== fx fy) 1)
+(def {fz} (future {1}))
+(deref fz)
+(assert-eq "distinct futures are not equal"  (== fx fz) 0)
+
+(print "All future tests passed.")
+(exit 0)

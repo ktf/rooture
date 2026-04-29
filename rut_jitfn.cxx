@@ -415,7 +415,7 @@ lval* builtin_jit_fn(lenv* e, lval* a) {
 
   if (g_debug) rut_print("[jit-fn] declaring:\n%s\n", code.c_str());
 
-  if (!gInterpreter->Declare(code.c_str())) {
+  if (!rut_declare(code.c_str())) {
     lval_del(a);
     return lval_err("jit-fn: Declare failed for %s", name.c_str());
   }

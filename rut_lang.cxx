@@ -13,6 +13,56 @@ mpc_parser_t* Qexpr;
 mpc_parser_t* Expr;
 mpc_parser_t* Lispy;
 
+// Thread identity: true on threads spawned by (future ...).
+thread_local bool g_in_future = false;
+
+// ---------------------------------------------------------------------------
+// Atom — thread-safe mutable reference (Clojure-style)
+// ---------------------------------------------------------------------------
+struct RutAtom {
+  std::mutex mu;
+  lval*      val;
+  explicit RutAtom(lval* v) : val(v) {}
+  ~RutAtom() { lval_del(val); }
+};
+using RutAtomPtr = std::shared_ptr<RutAtom>;
+
+lval* lval_atom(lval* init) {
+  lval* v = (lval*)malloc(sizeof(lval));
+  v->type = LVAL_ATOM;
+  v->obj  = new RutAtomPtr(std::make_shared<RutAtom>(init));
+  return v;
+}
+
+// ---------------------------------------------------------------------------
+// Future — deferred value evaluated on a background thread
+// ---------------------------------------------------------------------------
+struct RutFuture {
+  std::mutex              mu;
+  std::condition_variable cv;
+  bool                    realized = false;
+  lval*                   result   = nullptr;
+
+  ~RutFuture() {
+    // If discarded before deref: drain queue and wait so the thread can finish.
+    while (true) {
+      rut_drain_cling_queue();
+      std::unique_lock<std::mutex> lock(mu);
+      if (realized) { if (result) lval_del(result); return; }
+      lock.unlock();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+};
+using RutFuturePtr = std::shared_ptr<RutFuture>;
+
+static lval* lval_future_new(RutFuturePtr rf) {
+  lval* v = (lval*)malloc(sizeof(lval));
+  v->type = LVAL_FUTURE;
+  v->obj  = new RutFuturePtr(std::move(rf));
+  return v;
+}
+
 lenv* lenv_new(void) {
   lenv* e = (lenv *) malloc(sizeof(lenv));
   e->par = NULL;
@@ -87,6 +137,30 @@ lenv* lenv_copy(lenv* e) {
     n->vals[i] = lval_copy(e->vals[i]);
   }
   return n;
+}
+
+/* Flatten the entire env chain into one self-contained env with no parent.
+ * Innermost bindings win (they are inserted last and overwrite outer ones).
+ * Used by builtin_future so the background thread holds no raw parent pointers
+ * into lambda envs that will be freed before the thread finishes. */
+static lenv* lenv_snapshot(lenv* e) {
+  /* Collect chain from innermost to outermost. */
+  std::vector<lenv*> chain;
+  for (lenv* cur = e; cur; cur = cur->par) chain.push_back(cur);
+
+  lenv* snap = lenv_new();  /* flat, no parent */
+  lval key;
+  key.type = LVAL_SYM;
+
+  /* Process outermost first so inner bindings overwrite outer ones. */
+  for (int i = (int)chain.size() - 1; i >= 0; i--) {
+    lenv* level = chain[i];
+    for (int j = 0; j < level->count; j++) {
+      key.sym = level->syms[j];
+      lenv_put(snap, &key, level->vals[j]);
+    }
+  }
+  return snap;
 }
 
 void lenv_def(lenv* e, lval* k, lval* v) {
@@ -206,6 +280,8 @@ const char* ltype_name(int t) {
     case LVAL_SEXPR: return "S-Expression";
     case LVAL_QEXPR: return "Q-Expression";
     case LVAL_JITFN: return "JitFn";
+    case LVAL_ATOM:   return "Atom";
+    case LVAL_FUTURE: return "Future";
     default: return "Unknown";
   }
 }
@@ -284,6 +360,8 @@ void lval_del(lval* v) {
     case LVAL_SYM: free(v->sym); break;
     case LVAL_STR: free(v->str); break;
     case LVAL_JITFN: free(v->sym); break;
+    case LVAL_ATOM:   delete (RutAtomPtr*)v->obj; break;
+    case LVAL_FUTURE: delete (RutFuturePtr*)v->obj; break;
     /* If Sexpr or Qexpr then delete all elements inside */
     case LVAL_QEXPR:
     case LVAL_SEXPR:
@@ -365,6 +443,18 @@ void lval_print(lval* v) {
     case LVAL_SEXPR: lval_expr_print(v, '(', ')'); break;
     case LVAL_QEXPR: lval_expr_print(v, '{', '}'); break;
     case LVAL_JITFN: rut_print("<jit-fn %s/%ld>", v->sym, v->num); break;
+    case LVAL_ATOM: {
+      RutAtomPtr& ap = *(RutAtomPtr*)v->obj;
+      std::lock_guard<std::mutex> lock(ap->mu);
+      rut_print("<atom ");
+      lval_print(ap->val);
+      rut_print(">");
+    } break;
+    case LVAL_FUTURE: {
+      RutFuturePtr& fp = *(RutFuturePtr*)v->obj;
+      std::lock_guard<std::mutex> lock(fp->mu);
+      rut_print(fp->realized ? "<future: realized>" : "<future: pending>");
+    } break;
   }
 }
 
@@ -497,6 +587,12 @@ lval* lval_copy(lval* v) {
       x->str = strdup(v->str); break;
     case LVAL_JITFN:
       x->sym = strdup(v->sym); x->num = v->num; break;
+    case LVAL_ATOM:
+      /* Atoms are reference types: copy shares the same RutAtom. */
+      x->obj = new RutAtomPtr(*(RutAtomPtr*)v->obj); break;
+    case LVAL_FUTURE:
+      /* Futures are reference types: copy shares the same RutFuture. */
+      x->obj = new RutFuturePtr(*(RutFuturePtr*)v->obj); break;
 
     /* Copy Lists by copying each sub-expression */
     case LVAL_SEXPR:
@@ -540,7 +636,7 @@ lval* lval_call(lenv* e, lval* f, lval* a) {
       }
     }
     call += ")";
-    gInterpreter->ProcessLine(call.c_str());
+    rut_process_line(call.c_str());
     lval_del(a);
     return lval_sexpr();
   }
@@ -1130,6 +1226,10 @@ int lval_eq(lval* x, lval* y) {
       /* Otherwise lists must be equal */
       return 1;
     break;
+    case LVAL_ATOM:
+      return (*(RutAtomPtr*)x->obj).get() == (*(RutAtomPtr*)y->obj).get();
+    case LVAL_FUTURE:
+      return (*(RutFuturePtr*)x->obj).get() == (*(RutFuturePtr*)y->obj).get();
   }
   return 0;
 }
@@ -1466,7 +1566,7 @@ lval* builtin_process_line(lenv* e, lval* a) {
   LASSERT_TYPE("process-line", a, 0, LVAL_STR);
   const char* code = a->cell[0]->str;
   TInterpreter::EErrorCode err = TInterpreter::kNoError;
-  Long_t ret = gInterpreter->ProcessLine(code, &err);
+  Long_t ret = rut_process_line(code, &err);
   lval_del(a);
   if (err != TInterpreter::kNoError)
     return lval_err("process-line: Cling error %d executing: %s", (int)err, code);
@@ -1511,6 +1611,129 @@ lval* builtin_annotations(lenv* e, lval* a) {
 // Returns true if v contains no side-effects (assignments, loops, method
 // calls, new) — used to decide whether an `if` can become a ternary.
 
+// ---------------------------------------------------------------------------
+// Future builtins — (future {body}), (realized? f)
+// ---------------------------------------------------------------------------
+lval* builtin_future(lenv* e, lval* a) {
+  LASSERT_NUM("future", a, 1);
+  LASSERT_TYPE("future", a, 0, LVAL_QEXPR);
+
+  lenv* env_copy  = lenv_snapshot(e);
+  lval* body_copy = lval_copy(a->cell[0]);
+  body_copy->type = LVAL_SEXPR;   // evaluate as S-expression on the thread
+  lval_del(a);
+
+  auto rf = std::make_shared<RutFuture>();
+
+  std::thread([rf, env_copy, body_copy]() mutable {
+    g_in_future  = true;
+    lval* result = lval_eval(env_copy, body_copy);
+    lenv_del(env_copy);
+    {
+      std::lock_guard<std::mutex> lock(rf->mu);
+      rf->result   = result;
+      rf->realized = true;
+    }
+    rf->cv.notify_all();
+  }).detach();
+
+  return lval_future_new(std::move(rf));
+}
+
+lval* builtin_realized(lenv* e, lval* a) {
+  LASSERT_NUM("realized?", a, 1);
+  LASSERT_TYPE("realized?", a, 0, LVAL_FUTURE);
+  RutFuturePtr& fp = *(RutFuturePtr*)a->cell[0]->obj;
+  std::lock_guard<std::mutex> lock(fp->mu);
+  int r = fp->realized ? 1 : 0;
+  lval_del(a);
+  return lval_num(r);
+}
+
+// ---------------------------------------------------------------------------
+// Atom builtins — (atom val), (deref a), (reset! a val), (swap! a f & args)
+// ---------------------------------------------------------------------------
+lval* builtin_atom(lenv* e, lval* a) {
+  LASSERT_NUM("atom", a, 1);
+  lval* init = lval_copy(a->cell[0]);
+  lval_del(a);
+  return lval_atom(init);
+}
+
+lval* builtin_deref(lenv* e, lval* a) {
+  LASSERT_NUM("deref", a, 1);
+  LASSERT(a, a->cell[0]->type == LVAL_ATOM || a->cell[0]->type == LVAL_FUTURE,
+          "'deref' expects an Atom or Future, got %s",
+          ltype_name(a->cell[0]->type));
+
+  if (a->cell[0]->type == LVAL_ATOM) {
+    RutAtomPtr& ap = *(RutAtomPtr*)a->cell[0]->obj;
+    std::lock_guard<std::mutex> lock(ap->mu);
+    lval* result = lval_copy(ap->val);
+    lval_del(a);
+    return result;
+  }
+
+  /* LVAL_FUTURE — pump the Cling queue while waiting for the thread to finish. */
+  RutFuturePtr& fp = *(RutFuturePtr*)a->cell[0]->obj;
+  while (true) {
+    rut_drain_cling_queue();
+    std::unique_lock<std::mutex> lock(fp->mu);
+    if (fp->realized) break;
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  lval* result = lval_copy(fp->result);
+  lval_del(a);
+  return result;
+}
+
+lval* builtin_reset(lenv* e, lval* a) {
+  LASSERT_NUM("reset!", a, 2);
+  LASSERT_TYPE("reset!", a, 0, LVAL_ATOM);
+  lval* newval = lval_copy(a->cell[1]);
+  RutAtomPtr& ap = *(RutAtomPtr*)a->cell[0]->obj;
+  {
+    std::lock_guard<std::mutex> lock(ap->mu);
+    lval_del(ap->val);
+    ap->val = lval_copy(newval);
+  }
+  lval_del(a);
+  return newval;
+}
+
+lval* builtin_swap(lenv* e, lval* a) {
+  LASSERT(a, a->count >= 2, "'swap!' requires at least 2 arguments.");
+  LASSERT_TYPE("swap!", a, 0, LVAL_ATOM);
+  RutAtomPtr& ap = *(RutAtomPtr*)a->cell[0]->obj;
+
+  /* Read current value under lock, then release before calling f. */
+  lval* cur;
+  {
+    std::lock_guard<std::mutex> lock(ap->mu);
+    cur = lval_copy(ap->val);
+  }
+
+  /* Build (f cur extra-args...) and evaluate. */
+  lval* call = lval_sexpr();
+  lval_add(call, lval_copy(a->cell[1]));  /* f */
+  lval_add(call, cur);
+  for (int i = 2; i < a->count; i++)
+    lval_add(call, lval_copy(a->cell[i]));
+
+  lval* newval = lval_eval(e, call);
+  if (newval->type == LVAL_ERR) { lval_del(a); return newval; }
+
+  lval* result = lval_copy(newval);
+  {
+    std::lock_guard<std::mutex> lock(ap->mu);
+    lval_del(ap->val);
+    ap->val = newval;
+  }
+  lval_del(a);
+  return result;
+}
+
 void lenv_add_builtins_lang(lenv* e) {
   /* List Functions */
   lenv_add_builtin(e, "list", builtin_list);
@@ -1549,4 +1772,12 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "annotate",    builtin_annotate);
   lenv_add_builtin(e, "annotations", builtin_annotations);
   lenv_add_builtin(e, "dotimes",     builtin_dotimes);
+  /* Atom */
+  lenv_add_builtin(e, "atom",   builtin_atom);
+  lenv_add_builtin(e, "deref",  builtin_deref);
+  lenv_add_builtin(e, "reset!", builtin_reset);
+  lenv_add_builtin(e, "swap!",  builtin_swap);
+  /* Future */
+  lenv_add_builtin(e, "future",    builtin_future);
+  lenv_add_builtin(e, "realized?", builtin_realized);
 }
