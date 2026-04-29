@@ -38,6 +38,7 @@ add_executable(rooture
   rut_lang.cxx
   rut_root.cxx
   rut_jitfn.cxx
+  rut_column.cxx
   rut_repl.cxx
   mpc.c
   ${PARSER_C}

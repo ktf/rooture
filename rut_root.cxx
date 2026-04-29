@@ -905,6 +905,13 @@ bool rut_declare(const char* code) {
   return r;
 }
 
+TFile* rut_open_file(const char* path) {
+  TFile* f = nullptr;
+  std::string p(path);
+  rut_dispatch_work([&]{ f = TFile::Open(p.c_str(), "READ"); });
+  return f;
+}
+
 // TFileHandler that drains the Cling dispatch queue when woken by a future thread.
 class ClingPipeHandler : public TFileHandler {
 public:

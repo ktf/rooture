@@ -1,0 +1,83 @@
+;;; fill_1overpt.rut
+;;;
+;;; Fill a 1/pT histogram from AO2D.root using the columnar branch API.
+;;;
+;;; Each timeframe is processed in a separate future:
+;;;   1. load-branch reads fPt for that timeframe (I/O + decompress in parallel)
+;;;   2. col-map computes 1/pT element-wise using a compiled jit-fn
+;;;   3. col-fill-h1 fills a per-future TH1F directly from the float buffer
+;;; Histograms are merged on the main thread after all futures complete.
+;;;
+;;; Usage:
+;;;   (load "examples/fill_1overpt.rut")
+
+(load stdlib.rut)
+
+(def {aod-path} "/Users/ktf/src/O2/AO2D.root")
+(def {tree-name} "O2track_iu")
+
+;;; ── Collect timeframe directory names ────────────────────────────────────
+(def {tf-keys} (.GetListOfKeys (new TFile aod-path "READ")))
+
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+
+(print "Timeframes found:" (len tf-names))
+
+;;; ── Compiled |1/pT| function — fSigned1Pt is already 1/pT signed by charge
+(def {abs-fn}
+  (jit-fn float (\{{float x}} {(::Abs TMath x)})))
+
+;;; ── Process timeframes in parallel ───────────────────────────────────────
+;;; Each future owns its own TH1F — no sharing, no locks needed on Fill.
+;;; TH1F construction is dispatched to the main thread automatically.
+(def {sw} (doto (new TStopwatch) {Start}))
+
+(def {per-tf-histos}
+  (pmap (\ {tf} {
+    do
+    (= {tree-path} (concat tf "/" tree-name))
+    (= {s1pt-col}  (load-branch aod-path tree-path "fSigned1Pt"))
+    (= {ipt-col}   (col-map abs-fn s1pt-col))
+    (= {h}         (new TH1F
+                      (concat "h_" tf)
+                      "1/p_{T}"
+                      200 0. 20.))
+    (col-fill-h1 h ipt-col)
+    h
+  }) tf-names))
+
+(.Stop sw)
+
+;;; ── Merge on main thread ─────────────────────────────────────────────────
+(def {h-total}
+  (new TH1F "h1overpt" "1/p_{T};1/p_{T} (GeV/c)^{-1};Tracks" 200 0. 20.))
+
+(map (\ {h} {.Add h-total h}) per-tf-histos)
+
+;;; ── Performance report ───────────────────────────────────────────────────
+;;; fSigned1Pt is Float_t (4 bytes); reported as decompressed throughput.
+(def {n-tracks}  (.GetEntries h-total))
+(def {wall-s}    (.RealTime sw))
+(def {cpu-s}     (.CpuTime  sw))
+(def {mb-decomp} (/ (* n-tracks 4.0) (* 1024.0 1024.0)))
+(def {mb-per-s}  (/ mb-decomp wall-s))
+
+(print "──────────────────────────────────")
+(print "Total tracks :" n-tracks)
+(print "Decompressed :" mb-decomp "MB")
+(print "Wall time    :" wall-s "s")
+(print "CPU time     :" cpu-s "s")
+(print "Throughput   :" mb-per-s "MB/s (decompressed)")
+
+;;; ── Draw ─────────────────────────────────────────────────────────────────
+(.SetLineWidth h-total 2)
+(.Draw h-total)

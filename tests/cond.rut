@@ -1,0 +1,76 @@
+;;; tests/cond.rut — tests for the cond builtin
+;;;
+;;; Run from the ROOTure REPL:
+;;;   (load "tests/cond.rut")
+
+(load stdlib.rut)
+
+(def {assert-eq} (\ {label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; ── Basic dispatch ────────────────────────────────────────────────────────
+
+(def {sign} (\ {x} {
+  cond
+    {(< x 0)} {-1}
+    {(> x 0)} {1}
+    {1}        {0}
+}))
+
+(assert-eq "sign negative"  (sign -5)  -1)
+(assert-eq "sign positive"  (sign  3)   1)
+(assert-eq "sign zero"      (sign  0)   0)
+
+;;; ── First matching branch wins ───────────────────────────────────────────
+
+(assert-eq "first branch taken"
+  (cond {1} {"first"} {1} {"second"})
+  "first")
+
+;;; ── No branch matched returns nil ────────────────────────────────────────
+
+(assert-eq "no branch → nil"
+  (cond {0} {"nope"} {0} {"also nope"})
+  {})
+
+;;; ── else / otherwise catch-all ───────────────────────────────────────────
+
+(assert-eq "else catch-all"
+  (cond {0} {"nope"} {else} {"default"})
+  "default")
+
+(assert-eq "otherwise catch-all"
+  (cond {0} {"nope"} {otherwise} {"fallback"})
+  "fallback")
+
+;;; ── Nested cond ──────────────────────────────────────────────────────────
+
+(def {grade} (\ {n} {
+  cond
+    {(>= n 90)} {"A"}
+    {(>= n 80)} {"B"}
+    {(>= n 70)} {"C"}
+    {(>= n 60)} {"D"}
+    {else}      {"F"}
+}))
+
+(assert-eq "grade A"  (grade 95) "A")
+(assert-eq "grade B"  (grade 85) "B")
+(assert-eq "grade C"  (grade 75) "C")
+(assert-eq "grade D"  (grade 65) "D")
+(assert-eq "grade F"  (grade 55) "F")
+
+;;; ── Condition error propagates ───────────────────────────────────────────
+
+(def {bad-cond-result}
+  (cond {0} {"skip"} {(> 1 2)} {"no"} {else} {"ok"}))
+(assert-eq "false then else" bad-cond-result "ok")
+
+(print "All cond tests passed.")
+(exit 0)

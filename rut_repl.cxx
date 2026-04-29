@@ -49,6 +49,7 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtins_lang(e);
   lenv_add_builtins_root(e);
   lenv_add_builtins_jitfn(e);
+  lenv_add_builtins_column(e);
 }
 
 //----- Pipe-based input handler -----------------------------------------------

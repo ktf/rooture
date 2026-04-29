@@ -59,7 +59,7 @@ const TSLanguage* tree_sitter_rooture();
 // ---------------------------------------------------------------------------
 enum { LVAL_ERR, LVAL_NUM, LVAL_FLOAT, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR,
-       LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE, LVAL_PROMISE };
+       LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE, LVAL_PROMISE, LVAL_COLUMN };
 
 // ---------------------------------------------------------------------------
 // Core structs — forward declared so lbuiltin can reference lval/lenv
@@ -201,6 +201,26 @@ void   rut_drain_cling_queue();
 Long_t rut_calc(const char* expr, TInterpreter::EErrorCode* ec = nullptr);
 Long_t rut_process_line(const char* code, TInterpreter::EErrorCode* ec = nullptr);
 bool   rut_declare(const char* code);
+TFile* rut_open_file(const char* path);
+
+// ---------------------------------------------------------------------------
+// RutColumn — owned typed flat buffer (used by LVAL_COLUMN)
+// ---------------------------------------------------------------------------
+enum ColDtype {
+  COL_FLOAT32, COL_FLOAT64,
+  COL_INT32,   COL_UINT32,
+  COL_INT16,   COL_UINT16,
+  COL_INT8,    COL_UINT8,
+  COL_BOOL,
+};
+
+struct RutColumn {
+  int    dtype = 0;
+  size_t n     = 0;
+  void*  data  = nullptr;   // owned, malloc'd
+  ~RutColumn() { free(data); }
+};
+using RutColumnPtr = std::shared_ptr<RutColumn>;
 
 // Thread pool — fixed-size worker pool used by (future ...) instead of raw threads.
 void rut_pool_create(int n_workers);    // call once from main() after TApplication init
@@ -231,4 +251,5 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset,
 void lenv_add_builtins_lang(lenv* e);
 void lenv_add_builtins_root(lenv* e);
 void lenv_add_builtins_jitfn(lenv* e);
+void lenv_add_builtins_column(lenv* e);
 void lenv_add_builtins(lenv* e);

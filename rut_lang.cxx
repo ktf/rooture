@@ -299,6 +299,7 @@ const char* ltype_name(int t) {
     case LVAL_ATOM:    return "Atom";
     case LVAL_FUTURE:  return "Future";
     case LVAL_PROMISE: return "Promise";
+    case LVAL_COLUMN:  return "Column";
     default: return "Unknown";
   }
 }
@@ -380,6 +381,9 @@ void lval_del(lval* v) {
     case LVAL_ATOM:    delete (RutAtomPtr*)v->obj;   break;
     case LVAL_FUTURE:
     case LVAL_PROMISE: delete (RutFuturePtr*)v->obj; break;
+    case LVAL_COLUMN:
+      delete (RutColumnPtr*)v->obj;
+      break;
     /* If Sexpr or Qexpr then delete all elements inside */
     case LVAL_QEXPR:
     case LVAL_SEXPR:
@@ -461,6 +465,14 @@ void lval_print(lval* v) {
     case LVAL_SEXPR: lval_expr_print(v, '(', ')'); break;
     case LVAL_QEXPR: lval_expr_print(v, '{', '}'); break;
     case LVAL_JITFN: rut_print("<jit-fn %s/%ld>", v->sym, v->num); break;
+    case LVAL_COLUMN: {
+      auto& cp = *(RutColumnPtr*)v->obj;
+      rut_print("<column: %zu entries [%s]>", cp->n,
+                cp->dtype == COL_FLOAT32 ? "f32" :
+                cp->dtype == COL_FLOAT64 ? "f64" :
+                cp->dtype == COL_INT32   ? "i32" :
+                cp->dtype == COL_UINT8   ? "u8"  : "?");
+    } break;
     case LVAL_ATOM: {
       RutAtomPtr& ap = *(RutAtomPtr*)v->obj;
       std::lock_guard<std::mutex> lock(ap->mu);
@@ -623,6 +635,10 @@ lval* lval_copy(lval* v) {
     case LVAL_PROMISE:
       /* Futures and promises are reference types: copy shares the same RutFuture. */
       x->obj = new RutFuturePtr(*(RutFuturePtr*)v->obj); break;
+    case LVAL_COLUMN:
+      /* Columns are reference types: copy shares the same RutColumn buffer. */
+      x->obj = new RutColumnPtr(*(RutColumnPtr*)v->obj);
+      break;
 
     /* Copy Lists by copying each sub-expression */
     case LVAL_SEXPR:
