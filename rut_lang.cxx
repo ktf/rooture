@@ -1614,6 +1614,21 @@ lval* builtin_annotations(lenv* e, lval* a) {
 // ---------------------------------------------------------------------------
 // Future builtins — (future {body}), (realized? f)
 // ---------------------------------------------------------------------------
+lval* builtin_parallelism(lenv* e, lval* a) {
+  LASSERT_NUM("parallelism", a, 0);
+  lval_del(a);
+  return lval_num(rut_pool_size());
+}
+
+lval* builtin_set_parallelism(lenv* e, lval* a) {
+  LASSERT_NUM("set-parallelism!", a, 1);
+  LASSERT_TYPE("set-parallelism!", a, 0, LVAL_NUM);
+  int n = (int)a->cell[0]->num;
+  lval_del(a);
+  rut_pool_set_size(n);
+  return lval_num(rut_pool_size());
+}
+
 lval* builtin_future(lenv* e, lval* a) {
   LASSERT_NUM("future", a, 1);
   LASSERT_TYPE("future", a, 0, LVAL_QEXPR);
@@ -1776,7 +1791,9 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "deref",  builtin_deref);
   lenv_add_builtin(e, "reset!", builtin_reset);
   lenv_add_builtin(e, "swap!",  builtin_swap);
-  /* Future */
-  lenv_add_builtin(e, "future",    builtin_future);
-  lenv_add_builtin(e, "realized?", builtin_realized);
+  /* Future + thread pool */
+  lenv_add_builtin(e, "future",          builtin_future);
+  lenv_add_builtin(e, "realized?",       builtin_realized);
+  lenv_add_builtin(e, "parallelism",     builtin_parallelism);
+  lenv_add_builtin(e, "set-parallelism!", builtin_set_parallelism);
 }

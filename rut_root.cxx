@@ -991,6 +991,12 @@ int rut_pool_size() {
   return g_thread_pool ? (int)g_thread_pool->workers.size() : 0;
 }
 
+void rut_pool_set_size(int n_workers) {
+  if (n_workers < 1) n_workers = 1;
+  delete g_thread_pool;                       // joins all workers (drains queue)
+  g_thread_pool = new RutThreadPool(n_workers);
+}
+
 // ---------------------------------------------------------------------------
 // Callback system
 // ---------------------------------------------------------------------------
