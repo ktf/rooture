@@ -36,24 +36,34 @@
 (def {abs-fn}
   (jit-fn float (\{{float x}} {(::Abs TMath x)})))
 
+;;; Pre-resolve to a raw function pointer on the main thread once.
+;;; Each future thread can then call col-map-ptr without a round-trip.
+(def {abs-ptr} (jitfn-ptr abs-fn))
+
+;;; ── Pre-create per-timeframe histograms on the main thread ───────────────
+;;; Cling JIT compilation (triggered by `new`) must not run while future
+;;; threads are executing JIT-managed code (e.g. TH1::Fill).  Creating the
+;;; histograms before pmap ensures no JIT work happens during the parallel
+;;; phase.
+(def {tf-histos}
+  (map (\ {tf} {new TH1F (concat "h_" tf) "1/p_{T}" 200 0. 20.})
+       tf-names))
+
 ;;; ── Process timeframes in parallel ───────────────────────────────────────
-;;; Each future owns its own TH1F — no sharing, no locks needed on Fill.
-;;; TH1F construction is dispatched to the main thread automatically.
+;;; Each future fills its own pre-created TH1F — no sharing, no locks needed.
 (def {sw} (doto (new TStopwatch) {Start}))
 
 (def {per-tf-histos}
-  (pmap (\ {tf} {
+  (pmap (\ {tf-h} {
     do
+    (= {tf}        (fst tf-h))
+    (= {h}         (snd tf-h))
     (= {tree-path} (concat tf "/" tree-name))
     (= {s1pt-col}  (load-branch aod-path tree-path "fSigned1Pt"))
-    (= {ipt-col}   (col-map abs-fn s1pt-col))
-    (= {h}         (new TH1F
-                      (concat "h_" tf)
-                      "1/p_{T}"
-                      200 0. 20.))
+    (= {ipt-col}   (col-map-ptr abs-ptr s1pt-col))
     (col-fill-h1 h ipt-col)
     h
-  }) tf-names))
+  }) (zip tf-names tf-histos)))
 
 (.Stop sw)
 

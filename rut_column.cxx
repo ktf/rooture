@@ -114,7 +114,7 @@ static RutColumnPtr load_branch_impl(const char* path,
   });
 
   if (!br || dtype < 0) {
-    if (f) { f->Close(); delete f; }
+    if (f) { rut_dispatch_work([f]{ f->Close(); delete f; }); }
     return nullptr;
   }
 
@@ -122,7 +122,7 @@ static RutColumnPtr load_branch_impl(const char* path,
 
   Long64_t total_local = total;
   void* buf = malloc((size_t)total_local * esz);
-  if (!buf) { f->Close(); delete f; return nullptr; }
+  if (!buf) { rut_dispatch_work([f]{ f->Close(); delete f; }); return nullptr; }
 
   auto& bulk = br->GetBulkRead();
   TBufferFile tbuf(TBuffer::kRead, 512 * 1024);
@@ -137,8 +137,10 @@ static RutColumnPtr load_branch_impl(const char* path,
     entry  += n;
   }
 
-  f->Close();
-  delete f;
+  // Close on the main thread — TFile::~TFile calls TProcessUUID::RemoveUUID
+  // which mutates a global THashList; concurrent calls from future threads
+  // cause a data race and SIGSEGV.
+  rut_dispatch_work([f]{ f->Close(); delete f; });
 
   auto col = std::make_shared<RutColumn>();
   col->dtype = dtype;
@@ -226,13 +228,167 @@ static lval* builtin_load_branches(lenv* e, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
-// Resolve a jit-fn to a raw function pointer (dispatches to main thread).
-// The jit-fn must have been compiled with fully explicit types so there is
-// a single concrete symbol with no template mangling.
+// Resolve a jit-fn symbol to a raw C function pointer via rut_calc.
+// Dispatches to the main thread if called from a future.
 // ---------------------------------------------------------------------------
 static void* jitfn_ptr(lval* fn) {
   std::string expr = "(Long_t)&" + std::string(fn->sym);
   return (void*)rut_calc(expr.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// (jitfn-ptr jitfn) → Number  — resolve once on the main thread, reuse in futures
+// ---------------------------------------------------------------------------
+static lval* builtin_jitfn_ptr(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("jitfn-ptr", a, 1);
+  LASSERT_TYPE("jitfn-ptr", a, 0, LVAL_JITFN);
+  void* fp = jitfn_ptr(a->cell[0]);
+  lval_del(a);
+  return lval_num((long)fp);
+}
+
+// ---------------------------------------------------------------------------
+// Shared column operation implementations — take a raw void* fp directly.
+// These are called by both the jitfn variants (which resolve fp first) and
+// the ptr variants (which receive fp as a pre-resolved LVAL_NUM).
+// ---------------------------------------------------------------------------
+static lval* col_map_impl(void* fp, RutColumnPtr& in_col) {
+  size_t n     = in_col->n;
+  int    dtype = in_col->dtype;
+  size_t esz   = col_dtype_size(dtype);
+  void*  out   = malloc(n * esz);
+  if (!out) return lval_err("col-map: out of memory");
+
+#define TYPED_MAP(Tin, Tout) do { \
+    auto f = (Tout(*)(Tin))fp; \
+    Tin*  in  = (Tin*)in_col->data; \
+    Tout* out2 = (Tout*)out; \
+    for (size_t i = 0; i < n; i++) out2[i] = f(in[i]); \
+  } while (0)
+  switch (dtype) {
+    case COL_FLOAT32: TYPED_MAP(float,    float);    break;
+    case COL_FLOAT64: TYPED_MAP(double,   double);   break;
+    case COL_INT32:   TYPED_MAP(int32_t,  int32_t);  break;
+    case COL_UINT32:  TYPED_MAP(uint32_t, uint32_t); break;
+    case COL_INT16:   TYPED_MAP(int16_t,  int16_t);  break;
+    case COL_UINT16:  TYPED_MAP(uint16_t, uint16_t); break;
+    case COL_INT8:    TYPED_MAP(int8_t,   int8_t);   break;
+    case COL_UINT8:   TYPED_MAP(uint8_t,  uint8_t);  break;
+    case COL_BOOL:    TYPED_MAP(char,     char);      break;
+    default: free(out); return lval_err("col-map: unsupported dtype");
+  }
+#undef TYPED_MAP
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = dtype; c->n = n; c->data = out;
+  return lval_column(std::move(c));
+}
+
+static lval* col_filter_impl(void* fp, RutColumnPtr& in_col) {
+  size_t n     = in_col->n;
+  int    dtype = in_col->dtype;
+  size_t esz   = col_dtype_size(dtype);
+  void*  out   = malloc(n * esz);
+  if (!out) return lval_err("col-filter: out of memory");
+  size_t out_n = 0;
+
+#define TYPED_FILTER(T) do { \
+    auto f = (bool(*)(T))fp; \
+    T* in  = (T*)in_col->data; \
+    T* o   = (T*)out; \
+    for (size_t i = 0; i < n; i++) if (f(in[i])) o[out_n++] = in[i]; \
+  } while (0)
+  switch (dtype) {
+    case COL_FLOAT32: TYPED_FILTER(float);    break;
+    case COL_FLOAT64: TYPED_FILTER(double);   break;
+    case COL_INT32:   TYPED_FILTER(int32_t);  break;
+    case COL_UINT32:  TYPED_FILTER(uint32_t); break;
+    case COL_INT16:   TYPED_FILTER(int16_t);  break;
+    case COL_UINT16:  TYPED_FILTER(uint16_t); break;
+    case COL_INT8:    TYPED_FILTER(int8_t);   break;
+    case COL_UINT8:   TYPED_FILTER(uint8_t);  break;
+    case COL_BOOL:    TYPED_FILTER(char);     break;
+    default: free(out); return lval_err("col-filter: unsupported dtype");
+  }
+#undef TYPED_FILTER
+  void* s = realloc(out, (out_n ? out_n : 1) * esz);
+  if (s) out = s;
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = dtype; c->n = out_n; c->data = out;
+  return lval_column(std::move(c));
+}
+
+static lval* col_reduce_impl(void* fp, lval* init, RutColumnPtr& col) {
+  size_t n     = col->n;
+  int    dtype = col->dtype;
+  lval*  result = nullptr;
+
+#define TYPED_REDUCE(T) do { \
+    auto f = (T(*)(T,T))fp; \
+    T acc = (T)(init->type == LVAL_FLOAT ? init->floating : (double)init->num); \
+    T* p  = (T*)col->data; \
+    for (size_t i = 0; i < n; i++) acc = f(acc, p[i]); \
+    result = (dtype == COL_FLOAT32 || dtype == COL_FLOAT64) \
+             ? lval_floating((double)acc) : lval_num((long)acc); \
+  } while (0)
+  switch (dtype) {
+    case COL_FLOAT32: TYPED_REDUCE(float);    break;
+    case COL_FLOAT64: TYPED_REDUCE(double);   break;
+    case COL_INT32:   TYPED_REDUCE(int32_t);  break;
+    case COL_UINT32:  TYPED_REDUCE(uint32_t); break;
+    case COL_INT16:   TYPED_REDUCE(int16_t);  break;
+    case COL_UINT16:  TYPED_REDUCE(uint16_t); break;
+    case COL_INT8:    TYPED_REDUCE(int8_t);   break;
+    case COL_UINT8:   TYPED_REDUCE(uint8_t);  break;
+    case COL_BOOL:    TYPED_REDUCE(char);     break;
+    default: return lval_err("col-reduce: unsupported dtype");
+  }
+#undef TYPED_REDUCE
+  return result;
+}
+
+static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx) {
+  auto& c0  = col_of(a->cell[first_col_idx]);
+  size_t n  = c0->n;
+  int dtype = c0->dtype;
+  size_t esz = col_dtype_size(dtype);
+  void* out  = malloc(n * esz);
+  if (!out) return lval_err("col-zip: out of memory");
+
+#define ZIP2(T) do { \
+    auto f=(T(*)(T,T))fp; T* pa=(T*)col_of(a->cell[first_col_idx])->data; \
+    T* pb=(T*)col_of(a->cell[first_col_idx+1])->data; T* po=(T*)out; \
+    for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i]); } while(0)
+#define ZIP3(T) do { \
+    auto f=(T(*)(T,T,T))fp; T* pa=(T*)col_of(a->cell[first_col_idx])->data; \
+    T* pb=(T*)col_of(a->cell[first_col_idx+1])->data; \
+    T* pc=(T*)col_of(a->cell[first_col_idx+2])->data; T* po=(T*)out; \
+    for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i],pc[i]); } while(0)
+#define ZIP4(T) do { \
+    auto f=(T(*)(T,T,T,T))fp; T* pa=(T*)col_of(a->cell[first_col_idx])->data; \
+    T* pb=(T*)col_of(a->cell[first_col_idx+1])->data; \
+    T* pc=(T*)col_of(a->cell[first_col_idx+2])->data; \
+    T* pd=(T*)col_of(a->cell[first_col_idx+3])->data; T* po=(T*)out; \
+    for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i],pc[i],pd[i]); } while(0)
+#define DISPATCH_ZIP(T) switch(ncols){case 2:ZIP2(T);break;case 3:ZIP3(T);break;case 4:ZIP4(T);break;}
+  switch (dtype) {
+    case COL_FLOAT32: DISPATCH_ZIP(float);    break;
+    case COL_FLOAT64: DISPATCH_ZIP(double);   break;
+    case COL_INT32:   DISPATCH_ZIP(int32_t);  break;
+    case COL_UINT32:  DISPATCH_ZIP(uint32_t); break;
+    case COL_INT16:   DISPATCH_ZIP(int16_t);  break;
+    case COL_UINT16:  DISPATCH_ZIP(uint16_t); break;
+    case COL_INT8:    DISPATCH_ZIP(int8_t);   break;
+    case COL_UINT8:   DISPATCH_ZIP(uint8_t);  break;
+    case COL_BOOL:    DISPATCH_ZIP(char);     break;
+    default: free(out); return lval_err("col-zip: unsupported dtype");
+  }
+#undef ZIP2
+#undef ZIP3
+#undef ZIP4
+#undef DISPATCH_ZIP
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = dtype; c->n = n; c->data = out;
+  return lval_column(std::move(c));
 }
 
 // ---------------------------------------------------------------------------
@@ -319,118 +475,59 @@ static lval* builtin_col_to_list(lenv* /*e*/, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
-// (col-map jitfn col) → Column (same dtype, same length)
-// The jit-fn must accept one argument of the column's element type and return
-// the same type.  Resolve the function pointer once, loop in C.
+// col-map / col-map-ptr
 // ---------------------------------------------------------------------------
 static lval* builtin_col_map(lenv* /*e*/, lval* a) {
   LASSERT_NUM("col-map", a, 2);
   LASSERT_TYPE("col-map", a, 0, LVAL_JITFN);
   LASSERT_TYPE("col-map", a, 1, LVAL_COLUMN);
   LASSERT(a, a->cell[0]->num == 1,
-          "'col-map' jit-fn must take exactly 1 parameter, got %ld",
-          a->cell[0]->num);
-
-  void* fp       = jitfn_ptr(a->cell[0]);
-  auto& in_col   = col_of(a->cell[1]);
-  size_t n       = in_col->n;
-  int    dtype   = in_col->dtype;
-  size_t esz     = col_dtype_size(dtype);
-
-  void* out_data = malloc(n * esz);
-  if (!out_data) { lval_del(a); return lval_err("col-map: out of memory"); }
-
-#define TYPED_MAP(Tin, Tout) do { \
-    auto f = (Tout(*)(Tin))fp; \
-    Tin*  in  = (Tin*)in_col->data; \
-    Tout* out = (Tout*)out_data; \
-    for (size_t i = 0; i < n; i++) out[i] = f(in[i]); \
-  } while (0)
-
-  switch (dtype) {
-    case COL_FLOAT32: TYPED_MAP(float,    float);          break;
-    case COL_FLOAT64: TYPED_MAP(double,   double);         break;
-    case COL_INT32:   TYPED_MAP(int32_t,  int32_t);        break;
-    case COL_UINT32:  TYPED_MAP(uint32_t, uint32_t);       break;
-    case COL_INT16:   TYPED_MAP(int16_t,  int16_t);        break;
-    case COL_UINT16:  TYPED_MAP(uint16_t, uint16_t);       break;
-    case COL_INT8:    TYPED_MAP(int8_t,   int8_t);         break;
-    case COL_UINT8:   TYPED_MAP(uint8_t,  uint8_t);        break;
-    case COL_BOOL:    TYPED_MAP(char,     char);           break;
-    default: free(out_data); lval_del(a); return lval_err("col-map: unsupported dtype"); break;
-  }
-#undef TYPED_MAP
-
-  auto out_col = std::make_shared<RutColumn>();
-  out_col->dtype = dtype;
-  out_col->n     = n;
-  out_col->data  = out_data;
+          "'col-map' jit-fn must take 1 parameter, got %ld", a->cell[0]->num);
+  void* fp = jitfn_ptr(a->cell[0]);
+  auto& col = col_of(a->cell[1]);
+  lval* r = col_map_impl(fp, col);
   lval_del(a);
-  return lval_column(std::move(out_col));
+  return r;
+}
+static lval* builtin_col_map_ptr(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-map-ptr", a, 2);
+  LASSERT_TYPE("col-map-ptr", a, 0, LVAL_NUM);
+  LASSERT_TYPE("col-map-ptr", a, 1, LVAL_COLUMN);
+  void* fp = (void*)a->cell[0]->num;
+  auto& col = col_of(a->cell[1]);
+  lval* r = col_map_impl(fp, col);
+  lval_del(a);
+  return r;
 }
 
 // ---------------------------------------------------------------------------
-// (col-filter jitfn col) → Column (same dtype, possibly shorter)
-// The jit-fn must accept one element and return bool/int (nonzero = keep).
+// col-filter / col-filter-ptr
 // ---------------------------------------------------------------------------
 static lval* builtin_col_filter(lenv* /*e*/, lval* a) {
   LASSERT_NUM("col-filter", a, 2);
   LASSERT_TYPE("col-filter", a, 0, LVAL_JITFN);
   LASSERT_TYPE("col-filter", a, 1, LVAL_COLUMN);
   LASSERT(a, a->cell[0]->num == 1,
-          "'col-filter' jit-fn must take exactly 1 parameter, got %ld",
-          a->cell[0]->num);
-
-  void* fp     = jitfn_ptr(a->cell[0]);
-  auto& in_col = col_of(a->cell[1]);
-  size_t n     = in_col->n;
-  int    dtype = in_col->dtype;
-  size_t esz   = col_dtype_size(dtype);
-
-  // Allocate worst-case (all pass), compact after.
-  void* out_data = malloc(n * esz);
-  if (!out_data) { lval_del(a); return lval_err("col-filter: out of memory"); }
-  size_t out_n = 0;
-
-#define TYPED_FILTER(T) do { \
-    auto f = (bool(*)(T))fp; \
-    T* in  = (T*)in_col->data; \
-    T* out = (T*)out_data; \
-    for (size_t i = 0; i < n; i++) if (f(in[i])) out[out_n++] = in[i]; \
-  } while (0)
-
-  switch (dtype) {
-    case COL_FLOAT32: TYPED_FILTER(float);    break;
-    case COL_FLOAT64: TYPED_FILTER(double);   break;
-    case COL_INT32:   TYPED_FILTER(int32_t);  break;
-    case COL_UINT32:  TYPED_FILTER(uint32_t); break;
-    case COL_INT16:   TYPED_FILTER(int16_t);  break;
-    case COL_UINT16:  TYPED_FILTER(uint16_t); break;
-    case COL_INT8:    TYPED_FILTER(int8_t);   break;
-    case COL_UINT8:   TYPED_FILTER(uint8_t);  break;
-    case COL_BOOL:    TYPED_FILTER(char);     break;
-    default:
-      free(out_data); lval_del(a);
-      return lval_err("col-filter: unsupported dtype");
-  }
-#undef TYPED_FILTER
-
-  // Shrink to actual size.
-  void* shrunk = realloc(out_data, (out_n ? out_n : 1) * esz);
-  if (shrunk) out_data = shrunk;
-
-  auto out_col = std::make_shared<RutColumn>();
-  out_col->dtype = dtype;
-  out_col->n     = out_n;
-  out_col->data  = out_data;
+          "'col-filter' jit-fn must take 1 parameter, got %ld", a->cell[0]->num);
+  void* fp = jitfn_ptr(a->cell[0]);
+  auto& col = col_of(a->cell[1]);
+  lval* r = col_filter_impl(fp, col);
   lval_del(a);
-  return lval_column(std::move(out_col));
+  return r;
+}
+static lval* builtin_col_filter_ptr(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-filter-ptr", a, 2);
+  LASSERT_TYPE("col-filter-ptr", a, 0, LVAL_NUM);
+  LASSERT_TYPE("col-filter-ptr", a, 1, LVAL_COLUMN);
+  void* fp = (void*)a->cell[0]->num;
+  auto& col = col_of(a->cell[1]);
+  lval* r = col_filter_impl(fp, col);
+  lval_del(a);
+  return r;
 }
 
 // ---------------------------------------------------------------------------
-// (col-reduce jitfn init col) → Number or Floating
-// The jit-fn must accept (acc, elem) both of the column's element type and
-// return the same type.  init must be a number/floating coercible to that type.
+// col-reduce / col-reduce-ptr
 // ---------------------------------------------------------------------------
 static lval* builtin_col_reduce(lenv* /*e*/, lval* a) {
   LASSERT_NUM("col-reduce", a, 3);
@@ -439,50 +536,28 @@ static lval* builtin_col_reduce(lenv* /*e*/, lval* a) {
           "'col-reduce' init must be a number");
   LASSERT_TYPE("col-reduce", a, 2, LVAL_COLUMN);
   LASSERT(a, a->cell[0]->num == 2,
-          "'col-reduce' jit-fn must take exactly 2 parameters, got %ld",
-          a->cell[0]->num);
-
-  void*  fp    = jitfn_ptr(a->cell[0]);
-  lval*  init  = a->cell[1];
-  auto&  col   = col_of(a->cell[2]);
-  size_t n     = col->n;
-  int    dtype = col->dtype;
-
-#define TYPED_REDUCE(T) do { \
-    auto f = (T(*)(T,T))fp; \
-    T acc = (T)(init->type == LVAL_FLOAT ? init->floating : (double)init->num); \
-    T* p  = (T*)col->data; \
-    for (size_t i = 0; i < n; i++) acc = f(acc, p[i]); \
-    result = (dtype == COL_FLOAT32 || dtype == COL_FLOAT64) \
-             ? lval_floating((double)acc) : lval_num((long)acc); \
-  } while (0)
-
-  lval* result = nullptr;
-  switch (dtype) {
-    case COL_FLOAT32: TYPED_REDUCE(float);    break;
-    case COL_FLOAT64: TYPED_REDUCE(double);   break;
-    case COL_INT32:   TYPED_REDUCE(int32_t);  break;
-    case COL_UINT32:  TYPED_REDUCE(uint32_t); break;
-    case COL_INT16:   TYPED_REDUCE(int16_t);  break;
-    case COL_UINT16:  TYPED_REDUCE(uint16_t); break;
-    case COL_INT8:    TYPED_REDUCE(int8_t);   break;
-    case COL_UINT8:   TYPED_REDUCE(uint8_t);  break;
-    case COL_BOOL:    TYPED_REDUCE(char);     break;
-    default:
-      lval_del(a);
-      return lval_err("col-reduce: unsupported dtype");
-  }
-#undef TYPED_REDUCE
-
+          "'col-reduce' jit-fn must take 2 parameters, got %ld", a->cell[0]->num);
+  void* fp = jitfn_ptr(a->cell[0]);
+  auto& col = col_of(a->cell[2]);
+  lval* r = col_reduce_impl(fp, a->cell[1], col);
   lval_del(a);
-  return result;
+  return r;
+}
+static lval* builtin_col_reduce_ptr(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-reduce-ptr", a, 3);
+  LASSERT_TYPE("col-reduce-ptr", a, 0, LVAL_NUM);
+  LASSERT(a, a->cell[1]->type == LVAL_NUM || a->cell[1]->type == LVAL_FLOAT,
+          "'col-reduce-ptr' init must be a number");
+  LASSERT_TYPE("col-reduce-ptr", a, 2, LVAL_COLUMN);
+  void* fp = (void*)a->cell[0]->num;
+  auto& col = col_of(a->cell[2]);
+  lval* r = col_reduce_impl(fp, a->cell[1], col);
+  lval_del(a);
+  return r;
 }
 
 // ---------------------------------------------------------------------------
-// (col-zip jitfn col-a col-b [col-c [col-d]]) → Column
-// Applies jit-fn element-wise across 2–4 columns, producing a new column.
-// All input columns must have the same length.
-// The output dtype matches the first input column's dtype (cast by the jit-fn).
+// col-zip / col-zip-ptr
 // ---------------------------------------------------------------------------
 static lval* builtin_col_zip(lenv* /*e*/, lval* a) {
   LASSERT(a, a->count >= 3 && a->count <= 5,
@@ -491,82 +566,33 @@ static lval* builtin_col_zip(lenv* /*e*/, lval* a) {
   int ncols = a->count - 1;
   for (int i = 1; i <= ncols; i++)
     LASSERT(a, a->cell[i]->type == LVAL_COLUMN,
-            "'col-zip' argument %d must be a Column, got %s",
-            i, ltype_name(a->cell[i]->type));
+            "'col-zip' argument %d must be a Column", i);
   LASSERT(a, a->cell[0]->num == ncols,
-          "'col-zip' jit-fn takes %ld parameters but %d columns given",
+          "'col-zip' jit-fn takes %ld params but %d columns given",
           a->cell[0]->num, ncols);
-
-  auto& c0 = col_of(a->cell[1]);
-  size_t n  = c0->n;
-  int dtype = c0->dtype;
-  for (int i = 2; i <= ncols; i++) {
-    LASSERT(a, col_of(a->cell[i])->n == n,
+  for (int i = 2; i <= ncols; i++)
+    LASSERT(a, col_of(a->cell[i])->n == col_of(a->cell[1])->n,
             "'col-zip' all columns must have the same length");
-  }
-
-  void*  fp      = jitfn_ptr(a->cell[0]);
-  size_t esz     = col_dtype_size(dtype);
-  void*  out_buf = malloc(n * esz);
-  if (!out_buf) { lval_del(a); return lval_err("col-zip: out of memory"); }
-
-#define ZIP2(T) do { \
-    auto f  = (T(*)(T,T))fp; \
-    T* pa = (T*)col_of(a->cell[1])->data; \
-    T* pb = (T*)col_of(a->cell[2])->data; \
-    T* po = (T*)out_buf; \
-    for (size_t i = 0; i < n; i++) po[i] = f(pa[i], pb[i]); \
-  } while (0)
-#define ZIP3(T) do { \
-    auto f  = (T(*)(T,T,T))fp; \
-    T* pa = (T*)col_of(a->cell[1])->data; \
-    T* pb = (T*)col_of(a->cell[2])->data; \
-    T* pc = (T*)col_of(a->cell[3])->data; \
-    T* po = (T*)out_buf; \
-    for (size_t i = 0; i < n; i++) po[i] = f(pa[i], pb[i], pc[i]); \
-  } while (0)
-#define ZIP4(T) do { \
-    auto f  = (T(*)(T,T,T,T))fp; \
-    T* pa = (T*)col_of(a->cell[1])->data; \
-    T* pb = (T*)col_of(a->cell[2])->data; \
-    T* pc = (T*)col_of(a->cell[3])->data; \
-    T* pd = (T*)col_of(a->cell[4])->data; \
-    T* po = (T*)out_buf; \
-    for (size_t i = 0; i < n; i++) po[i] = f(pa[i], pb[i], pc[i], pd[i]); \
-  } while (0)
-
-#define DISPATCH_ZIP(T) \
-  switch (ncols) { \
-    case 2: ZIP2(T); break; \
-    case 3: ZIP3(T); break; \
-    case 4: ZIP4(T); break; \
-  }
-
-  switch (dtype) {
-    case COL_FLOAT32: DISPATCH_ZIP(float);    break;
-    case COL_FLOAT64: DISPATCH_ZIP(double);   break;
-    case COL_INT32:   DISPATCH_ZIP(int32_t);  break;
-    case COL_UINT32:  DISPATCH_ZIP(uint32_t); break;
-    case COL_INT16:   DISPATCH_ZIP(int16_t);  break;
-    case COL_UINT16:  DISPATCH_ZIP(uint16_t); break;
-    case COL_INT8:    DISPATCH_ZIP(int8_t);   break;
-    case COL_UINT8:   DISPATCH_ZIP(uint8_t);  break;
-    case COL_BOOL:    DISPATCH_ZIP(char);     break;
-    default:
-      free(out_buf); lval_del(a);
-      return lval_err("col-zip: unsupported dtype");
-  }
-#undef ZIP2
-#undef ZIP3
-#undef ZIP4
-#undef DISPATCH_ZIP
-
-  auto out_col = std::make_shared<RutColumn>();
-  out_col->dtype = dtype;
-  out_col->n     = n;
-  out_col->data  = out_buf;
+  void* fp = jitfn_ptr(a->cell[0]);
+  lval* r = col_zip_impl(fp, ncols, a, 1);
   lval_del(a);
-  return lval_column(std::move(out_col));
+  return r;
+}
+static lval* builtin_col_zip_ptr(lenv* /*e*/, lval* a) {
+  LASSERT(a, a->count >= 3 && a->count <= 5,
+          "'col-zip-ptr' expects 3–5 arguments (ptr + 2–4 columns), got %i", a->count);
+  LASSERT_TYPE("col-zip-ptr", a, 0, LVAL_NUM);
+  int ncols = a->count - 1;
+  for (int i = 1; i <= ncols; i++)
+    LASSERT(a, a->cell[i]->type == LVAL_COLUMN,
+            "'col-zip-ptr' argument %d must be a Column", i);
+  for (int i = 2; i <= ncols; i++)
+    LASSERT(a, col_of(a->cell[i])->n == col_of(a->cell[1])->n,
+            "'col-zip-ptr' all columns must have the same length");
+  void* fp = (void*)a->cell[0]->num;
+  lval* r = col_zip_impl(fp, ncols, a, 1);
+  lval_del(a);
+  return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -613,15 +639,20 @@ static lval* builtin_col_fill_h1(lenv* /*e*/, lval* a) {
 // Registration
 // ---------------------------------------------------------------------------
 void lenv_add_builtins_column(lenv* e) {
-  lenv_add_builtin(e, "load-branch",   builtin_load_branch);
-  lenv_add_builtin(e, "load-branches", builtin_load_branches);
-  lenv_add_builtin(e, "col-length",    builtin_col_length);
-  lenv_add_builtin(e, "col-dtype",     builtin_col_dtype);
-  lenv_add_builtin(e, "col-ref",       builtin_col_ref);
-  lenv_add_builtin(e, "col->list",     builtin_col_to_list);
-  lenv_add_builtin(e, "col-map",       builtin_col_map);
-  lenv_add_builtin(e, "col-filter",    builtin_col_filter);
-  lenv_add_builtin(e, "col-reduce",    builtin_col_reduce);
-  lenv_add_builtin(e, "col-zip",       builtin_col_zip);
-  lenv_add_builtin(e, "col-fill-h1",   builtin_col_fill_h1);
+  lenv_add_builtin(e, "load-branch",    builtin_load_branch);
+  lenv_add_builtin(e, "load-branches",  builtin_load_branches);
+  lenv_add_builtin(e, "col-length",     builtin_col_length);
+  lenv_add_builtin(e, "col-dtype",      builtin_col_dtype);
+  lenv_add_builtin(e, "col-ref",        builtin_col_ref);
+  lenv_add_builtin(e, "col->list",      builtin_col_to_list);
+  lenv_add_builtin(e, "col-map",        builtin_col_map);
+  lenv_add_builtin(e, "col-map-ptr",    builtin_col_map_ptr);
+  lenv_add_builtin(e, "col-filter",     builtin_col_filter);
+  lenv_add_builtin(e, "col-filter-ptr", builtin_col_filter_ptr);
+  lenv_add_builtin(e, "col-reduce",     builtin_col_reduce);
+  lenv_add_builtin(e, "col-reduce-ptr", builtin_col_reduce_ptr);
+  lenv_add_builtin(e, "col-zip",        builtin_col_zip);
+  lenv_add_builtin(e, "col-zip-ptr",    builtin_col_zip_ptr);
+  lenv_add_builtin(e, "col-fill-h1",    builtin_col_fill_h1);
+  lenv_add_builtin(e, "jitfn-ptr",      builtin_jitfn_ptr);
 }

@@ -1107,9 +1107,8 @@ lval *builtin_new(lenv *e, lval* a) {
       void* obj = (void*)gInterpreter->Calc(expr.c_str(), &ec);
       if (!obj || ec != TInterpreter::kNoError)
         return lval_err("Constructor failed for '%s'", className.c_str());
-      TClass* real_cls = (TClass*)gInterpreter->Calc(
-          ("(Long_t)TClass::GetClass(typeid(*((" + className + "*)" +
-           ptr_to_hex(obj) + ")))").c_str());
+      TClass* real_cls = cls->InheritsFrom(TObject::Class())
+          ? ((TObject*)obj)->IsA() : cls;
       return lval_tobj(obj, real_cls ? real_cls : cls);
     }
   }
@@ -1153,10 +1152,11 @@ lval *builtin_new(lenv *e, lval* a) {
   }
   if (!obj)
     return lval_err("Constructor failed for '%s'", className.c_str());
-  // Use typeid-based TClass lookup so template instantiations resolve correctly
-  TClass* real_cls = (TClass*)gInterpreter->Calc(
-      ("(Long_t)TClass::GetClass(typeid(*((" + className + "*)" +
-       ptr_to_hex(obj) + ")))").c_str());
+  // Use IsA() for TObject-derived classes — no Cling call needed, works correctly
+  // for subclasses (e.g. new TBranch → TBranchElement::IsA()).
+  // For non-TObject types fall back to the declared class.
+  TClass* real_cls = cls->InheritsFrom(TObject::Class())
+      ? ((TObject*)obj)->IsA() : cls;
   return lval_tobj(obj, real_cls ? real_cls : cls);
 }
 

@@ -1,0 +1,78 @@
+;;; bench_threads.rut
+;;; Sweep thread counts and report fill throughput for fSigned1Pt.
+;;; Usage:
+;;;   rooture examples/bench_threads.rut
+
+(load stdlib.rut)
+
+(def {aod-path}  "/Users/ktf/src/O2/AO2D.root")
+(def {tree-name} "O2track_iu")
+
+;;; Collect timeframe directory names
+(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+
+(print "Timeframes:" (len tf-names))
+
+;;; Compiled |1/pT| — resolved to pointer once on main thread
+(def {abs-fn}  (jit-fn float (\{{float x}} {(::Abs TMath x)})))
+(def {abs-ptr} (jitfn-ptr abs-fn))
+
+;;; Warm-up: one pass to get track count and prime the OS page cache
+(def {hs-warm}
+  (map (\ {tf} {
+    do (= {h} (new TH1F (concat "w_" tf) "w" 200 0. 20.)) (.SetDirectory h 0) h
+  }) tf-names))
+(pmap (\ {tf-h} {
+  do
+  (= {tf}  (fst tf-h))
+  (= {h}   (snd tf-h))
+  (= {col} (load-branch aod-path (concat tf "/" tree-name) "fSigned1Pt"))
+  (col-fill-h1 h (col-map-ptr abs-ptr col))
+  h
+}) (zip tf-names hs-warm))
+(= {htot} (new TH1F "htot" "" 200 0. 20.))
+(.SetDirectory htot 0)
+(map (\ {h} {.Add htot h}) hs-warm)
+(def {n-tracks}    (.GetEntries htot))
+(def {mb-per-run}  (/ (* n-tracks 4.0) (* 1024.0 1024.0)))
+(print "Tracks:" n-tracks "  MB/run:" mb-per-run)
+
+;;; Single timed run at n workers
+(def {bench-at} (\ {n} {
+  do
+  (set-parallelism! n)
+  (= {hs} (map (\ {tf} {
+    do (= {h} (new TH1F (concat "bm_" tf) "b" 200 0. 20.)) (.SetDirectory h 0) h
+  }) tf-names))
+  (= {sw} (doto (new TStopwatch) {Start}))
+  (pmap (\ {tf-h} {
+    do
+    (= {tf}  (fst tf-h))
+    (= {h}   (snd tf-h))
+    (= {col} (load-branch aod-path (concat tf "/" tree-name) "fSigned1Pt"))
+    (col-fill-h1 h (col-map-ptr abs-ptr col))
+    h
+  }) (zip tf-names hs))
+  (.Stop sw)
+  (.RealTime sw)
+}))
+
+(def {thread-counts} {1 2 3 4 6 8 10 12})
+(def {wall-times}    (map bench-at thread-counts))
+(def {throughputs}   (map (\ {t} {/ mb-per-run t}) wall-times))
+
+(print "──────────────────────────────────────────")
+(print "N | Wall (s) | Throughput (MB/s)")
+(dotimes {i} (len thread-counts) {
+  print (nth i thread-counts) "|" (nth i wall-times) "|" (nth i throughputs)
+})

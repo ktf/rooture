@@ -35,6 +35,48 @@ The underlying rooture builtin `save-window` accepts a TGFrame object and a path
 - `libASImage` is loaded on demand by `save-window`; no manual `(.Load gSystem
   "libASImage")` is needed.
 
+## No Cling JIT inside concurrent pmap/future lambdas
+
+**`new`, `.Method` calls, and any operation routed through `gInterpreter->Calc`
+must NOT appear inside a `pmap` lambda (or any lambda run by multiple concurrent
+futures).**
+
+On macOS, LLVM ORC JIT calls `dispatchOutstandingMUs` → `MCContext::reset()`
+during Cling symbol materialization.  This modifies shared dyld stubs while
+other threads execute JIT-managed code (e.g. `TH1::Fill`), causing SIGSEGV or
+abort ("Pure virtual function called").
+
+**Rule:** perform all ROOT object construction (histograms, branches, trees)
+**before** launching futures.  Pass the pre-created objects into the parallel
+lambdas by including them in the element list (e.g. via `zip`).
+
+```scheme
+;;; correct — histograms pre-created on the main thread before pmap
+(def {tf-histos}
+  (map (\ {tf} {new TH1F (concat "h_" tf) "title" 200 0. 20.}) tf-names))
+
+(pmap (\ {tf-h} {
+  do
+  (= {tf} (fst tf-h))
+  (= {h}  (snd tf-h))
+  ...
+  (col-fill-h1 h data-col)
+  h
+}) (zip tf-names tf-histos))
+
+;;; wrong — new TH1F inside pmap triggers Cling JIT during concurrent Fill
+(pmap (\ {tf} {
+  do
+  ...
+  (= {h} (new TH1F ...))   ; UNSAFE: Cling JIT races with other futures
+  (col-fill-h1 h data-col)
+  h
+}) tf-names)
+```
+
+Operations safe inside futures: `load-branch`, `col-map-ptr`, `col-filter-ptr`,
+`col-reduce-ptr`, `col-zip-ptr`, `col-fill-h1`, arithmetic, string operations.
+
 ## Cling errors are never acceptable noise
 
 Any error printed by Cling (e.g. `error: no matching constructor`, `error: no member named '...'`) **must be eliminated**, even if it is technically "just" a failed probe that is immediately retried successfully.  These errors pollute the user's terminal, slow down execution (Cling error-recovery is expensive), and make it harder to spot real problems.
