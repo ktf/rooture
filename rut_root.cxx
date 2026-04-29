@@ -923,6 +923,75 @@ TFileHandler* rut_make_cling_handler(int fd) {
 }
 
 // ---------------------------------------------------------------------------
+// Thread pool
+// ---------------------------------------------------------------------------
+
+struct RutThreadPool {
+  std::vector<std::thread>          workers;
+  std::queue<std::function<void()>> tasks;
+  std::mutex                        mu;
+  std::condition_variable           cv;
+  bool                              stop = false;
+
+  explicit RutThreadPool(int n) {
+    for (int i = 0; i < n; i++) {
+      workers.emplace_back([this] {
+        g_in_future = true;   // all pool threads are future-context threads
+        while (true) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lock(mu);
+            cv.wait(lock, [this]{ return stop || !tasks.empty(); });
+            if (stop && tasks.empty()) return;
+            task = std::move(tasks.front());
+            tasks.pop();
+          }
+          task();
+        }
+      });
+    }
+  }
+
+  void submit(std::function<void()> task) {
+    { std::lock_guard<std::mutex> lock(mu); tasks.push(std::move(task)); }
+    cv.notify_one();
+  }
+
+  ~RutThreadPool() {
+    { std::lock_guard<std::mutex> lock(mu); stop = true; }
+    cv.notify_all();
+    for (auto& t : workers) t.join();
+  }
+};
+
+static RutThreadPool* g_thread_pool = nullptr;
+
+void rut_pool_create(int n_workers) {
+  g_thread_pool = new RutThreadPool(n_workers);
+}
+
+void rut_pool_submit(std::function<void()> task) {
+  if (g_thread_pool) {
+    g_thread_pool->submit(std::move(task));
+  } else {
+    // Fallback: spawn a raw thread (pool not yet initialised).
+    std::thread([t = std::move(task)]() mutable {
+      g_in_future = true;
+      t();
+    }).detach();
+  }
+}
+
+void rut_pool_destroy() {
+  delete g_thread_pool;
+  g_thread_pool = nullptr;
+}
+
+int rut_pool_size() {
+  return g_thread_pool ? (int)g_thread_pool->workers.size() : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Callback system
 // ---------------------------------------------------------------------------
 

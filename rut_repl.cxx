@@ -612,6 +612,9 @@ int main(int argc, char** argv) {
   /* Bootstrap TApplication so ROOT graphics/gSystem work */
   TApplication app("rooture", &argc, argv);
 
+  /* Thread pool for (future ...) — sized to logical CPU count */
+  rut_pool_create(std::max(1u, std::thread::hardware_concurrency()));
+
   /* Callback pipe: rooture lambdas connected to ROOT signals are deferred here
      so they run in the event loop, not inside Cling's slot-dispatch context. */
   if (pipe(g_cb_pipe) == 0) {
@@ -662,6 +665,8 @@ int main(int argc, char** argv) {
 
   ph->Remove();
   delete ph;
+
+  rut_pool_destroy();
 
   lenv_del(e);
 

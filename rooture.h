@@ -202,6 +202,12 @@ Long_t rut_calc(const char* expr, TInterpreter::EErrorCode* ec = nullptr);
 Long_t rut_process_line(const char* code, TInterpreter::EErrorCode* ec = nullptr);
 bool   rut_declare(const char* code);
 
+// Thread pool — fixed-size worker pool used by (future ...) instead of raw threads.
+void rut_pool_create(int n_workers);   // call once from main() after TApplication init
+void rut_pool_submit(std::function<void()> task);
+void rut_pool_destroy();               // call before process exit
+int  rut_pool_size();                  // returns number of worker threads
+
 lenv* lenv_new(void);
 void  lenv_del(lenv* e);
 lenv* lenv_copy(lenv* e);

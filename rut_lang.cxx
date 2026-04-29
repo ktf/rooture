@@ -1625,8 +1625,7 @@ lval* builtin_future(lenv* e, lval* a) {
 
   auto rf = std::make_shared<RutFuture>();
 
-  std::thread([rf, env_copy, body_copy]() mutable {
-    g_in_future  = true;
+  rut_pool_submit([rf, env_copy, body_copy]() mutable {
     lval* result = lval_eval(env_copy, body_copy);
     lenv_del(env_copy);
     {
@@ -1635,7 +1634,7 @@ lval* builtin_future(lenv* e, lval* a) {
       rf->realized = true;
     }
     rf->cv.notify_all();
-  }).detach();
+  });
 
   return lval_future_new(std::move(rf));
 }
