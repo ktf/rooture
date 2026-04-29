@@ -154,6 +154,48 @@ spectrum on the left (log scale), J/ψ window on the right:
 
 ---
 
+## Parallel columnar I/O
+
+For large AO2D files, rooture provides a columnar branch API that reads TTree
+branches directly into flat typed buffers and applies JIT-compiled operations
+with no interpreter overhead per element.  `pmap` parallelises across timeframes:
+
+```scheme
+(load stdlib.rut)
+
+;;; Compile abs(1/pT) once; resolve to a raw function pointer for use in futures.
+(def {abs-fn}  (jit-fn float (\{{float x}} {(::Abs TMath x)})))
+(def {abs-ptr} (jitfn-ptr abs-fn))
+
+;;; Pre-create per-timeframe histograms on the main thread (ROOT JIT constraint).
+(def {tf-histos}
+  (map (\ {tf} {new TH1F (concat "h_" tf) "1/p_{T}" 200 0. 20.}) tf-names))
+
+;;; Fill in parallel — each future reads, decompresses, maps, and fills.
+(def {per-tf-histos}
+  (pmap (\ {tf-h} {
+    do
+    (= {col} (load-branch aod-path (concat (fst tf-h) "/O2track_iu") "fSigned1Pt"))
+    (col-fill-h1 (snd tf-h) (col-map-ptr abs-ptr col))
+    (snd tf-h)
+  }) (zip tf-names tf-histos)))
+```
+
+Throughput scales near-linearly with worker count up to memory-bandwidth limits:
+
+![Throughput scaling](docs/col_throughput_scaling.png)
+
+The same API backs an interactive GUI (`examples/tracks_col_gui.rut`) that
+re-reads and re-filters all 31 timeframes on every slider move in ~200 ms,
+with peak memory proportional to the number of active workers — not the full
+dataset size:
+
+![Track GUI at 80-cluster cut](docs/col_gui_allcuts.png)
+
+Full design notes in [`docs/columnar-branch-api.md`](docs/columnar-branch-api.md).
+
+---
+
 ## Key features
 
 - **Interactive REPL** with syntax highlighting, history, and tab completion
@@ -164,6 +206,7 @@ spectrum on the left (log scale), J/ψ window on the right:
 - **Lambdas** — pass rooture functions as C++ callables (e.g. `RDataFrame::Define`)
 - **`|` tail strings** — write unquoted strings at the end of a Q-expression: `{.Filter | pt > 10}`
 - **`annotate`** — attach semantic notes to symbols; exposed to AI assistants via MCP
+- **Columnar branch API** — `load-branch`, `col-map-ptr`, `col-fill-h1/h2`, `col-mask`, `col-cat` for parallel flat-buffer I/O
 - **MCP server** — connect Claude or any MCP-capable AI assistant for AI-assisted analysis
 
 ---
@@ -258,6 +301,10 @@ A quick taste:
 | `examples/df101_h1Analysis.rut` | H1 D* analysis with fitting |
 | `examples/assembly.rut` | TGeo geometry assembly |
 | `examples/fit_gui.rut` | Interactive fit GUI with sliders and live chi² output |
+| `examples/fill_1overpt.rut` | Parallel 1/pT fill from AO2D using columnar API |
+| `examples/bench_threads.rut` | Throughput benchmark sweeping worker counts |
+| `examples/tracks_col_gui.rut` | Interactive 4-pad track GUI with incremental columnar reads |
+| `examples/tracks_3d_gui.rut` | 3D helix track explorer using RDataFrame |
 
 ---
 
