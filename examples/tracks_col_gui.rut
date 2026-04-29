@@ -1,0 +1,228 @@
+;;; tracks_col_gui.rut
+;;;
+;;; Track explorer GUI backed by the native columnar branch API — incremental.
+;;; Only one timeframe worth of data lives in memory per worker at a time.
+;;; Slider changes trigger a fresh parallel read pass; no upfront bulk load.
+;;;
+;;; Plots (2×2 canvas):
+;;;   top-left  — phi × eta density             (COLZ)
+;;;   top-right — X × Y transverse section      (COLZ)
+;;;   bot-left  — eta × sigma(pT)/pT density    (COLZ)
+;;;   bot-right — pT spectrum                   (linear)
+;;;
+;;; Slider: minimum N TPC clusters found.
+;;;
+;;; Usage:
+;;;   (load "examples/tracks_col_gui.rut")
+
+(load stdlib.rut)
+(.Load gSystem "libGui")
+(global "gClient")
+
+(def {aod-path}   "/Users/ktf/src/O2/AO2D.root")
+(def {trk-tree}   "O2track_iu")
+(def {extra-tree} "O2trackextra_002")
+(def {cov-tree}   "O2trackcov_iu")
+
+;;; ── Collect timeframe names ───────────────────────────────────────────────
+(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+(def {n-tf} (len tf-names))
+(print "Timeframes:" n-tf)
+
+;;; ── JIT functions — compiled once, pointer-resolved once ─────────────────
+(def {sub-fn}
+  (jit-fn float (\{{float a} {float b}} {(- a b)})))
+(def {phi-fn}
+  (jit-fn float (\{{float fAlpha} {float fSnp}}
+    {(+ fAlpha (::ASin TMath fSnp))})))
+(def {eta-fn}
+  (jit-fn float (\{{float fTgl}}
+    {(::ASinH TMath fTgl)})))
+(def {pt-fn}
+  (jit-fn float (\{{float s1pt}}
+    {(if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})})))
+(def {xg-fn}
+  (jit-fn float (\{{float fX} {float fAlpha} {float fY}}
+    {(- (* fX (::Cos TMath fAlpha)) (* fY (::Sin TMath fAlpha)))})))
+(def {yg-fn}
+  (jit-fn float (\{{float fX} {float fAlpha} {float fY}}
+    {(+ (* fX (::Sin TMath fAlpha)) (* fY (::Cos TMath fAlpha)))})))
+(def {sigpt-fn}
+  (jit-fn float (\{{float sig} {float s1pt}}
+    {(if (!= s1pt 0.) {(/ sig (::Abs TMath s1pt))} {-1.})})))
+
+(def {sub-ptr}   (jitfn-ptr sub-fn))
+(def {phi-ptr}   (jitfn-ptr phi-fn))
+(def {eta-ptr}   (jitfn-ptr eta-fn))
+(def {pt-ptr}    (jitfn-ptr pt-fn))
+(def {xg-ptr}    (jitfn-ptr xg-fn))
+(def {yg-ptr}    (jitfn-ptr yg-fn))
+(def {sigpt-ptr} (jitfn-ptr sigpt-fn))
+
+;;; ── Mutable threshold — mask-fn captures the TArrayI pointer at JIT time ─
+(def {min-cls-box} (new TArrayI 1))
+(.SetAt min-cls-box 0 0)
+
+(def {mask-fn}
+  (jit-fn float (\{{float ncls}}
+    {(if (>= ncls (.GetAt min-cls-box 0)) {1.} {0.})})))
+(def {mask-ptr} (jitfn-ptr mask-fn))
+
+;;; ── Pre-create per-TF histograms once (reset + refilled each redraw) ─────
+;;; Memory: 4 types × 31 TFs × ~50×50×8 B ≈ 6 MB total — negligible.
+(def {tf-hpe} (map (\ {tf} {doto (new TH2F (concat "pe_" tf) "" 50 -3.14159 3.14159 50 -2. 2.)  {SetDirectory 0}}) tf-names))
+(def {tf-hxy} (map (\ {tf} {doto (new TH2F (concat "xy_" tf) "" 65 -260. 260. 65 -260. 260.)    {SetDirectory 0}}) tf-names))
+(def {tf-hse} (map (\ {tf} {doto (new TH2F (concat "se_" tf) "" 50 -2. 2. 50 0. 0.5)            {SetDirectory 0}}) tf-names))
+(def {tf-hpt} (map (\ {tf} {doto (new TH1F (concat "pt_" tf) "" 50 0. 5.)                       {SetDirectory 0}}) tf-names))
+
+;;; Global merged histograms
+(def {h-phieta} (doto (new TH2F "hphieta" ";#varphi;#eta"             50 -3.14159 3.14159 50 -2. 2.) {SetDirectory 0}))
+(def {h-xy}     (doto (new TH2F "hxy"     ";X (cm);Y (cm)"            65 -260. 260. 65 -260. 260.)   {SetDirectory 0}))
+(def {h-sigeta} (doto (new TH2F "hsigeta" ";#eta;#sigma(p_{T})/p_{T}" 50 -2. 2. 50 0. 0.5)          {SetDirectory 0}))
+(def {h-pt}     (doto (new TH1F "hpt"     ";p_{T} (GeV/c);Tracks"     50 0. 5.)                      {SetDirectory 0}))
+
+;;; Index list for pmap — avoids zipping 5 separate lists
+(def {tf-idx} (do
+  (= {acc} {})
+  (dotimes {i} n-tf {= {acc} (join acc (list i))})
+  acc))
+
+;;; ── Canvas: 2×2 pads ─────────────────────────────────────────────────────
+(def {c} (new TCanvas "c_col" "ALICE track explorer (columnar)" 1200 900))
+
+(def {pad1} (doto (new TPad "cp1" "" 0.  0.5 0.5 1.)
+  {SetRightMargin 0.16} {SetLeftMargin 0.14} {Draw}))
+(def {pad2} (doto (new TPad "cp2" "" 0.5 0.5 1.  1.)
+  {SetRightMargin 0.16} {SetLeftMargin 0.14} {Draw}))
+(def {pad3} (doto (new TPad "cp3" "" 0.  0.  0.5 0.5)
+  {SetRightMargin 0.16} {SetLeftMargin 0.14} {Draw}))
+(def {pad4} (doto (new TPad "cp4" "" 0.5 0.  1.  0.5)
+  {SetRightMargin 0.05} {SetLeftMargin 0.14} {Draw}))
+
+;;; ── Slider window ────────────────────────────────────────────────────────
+(def {win}   (new TGMainFrame (.GetRoot gClient) 460 70))
+(def {hf}    (new TGHorizontalFrame win 0 0))
+(def {lbl}   (new TGLabel hf "Min TPC clusters:"))
+(def {sl}    (doto (new TGHSlider hf 300 3 -1) {SetRange 0 160} {SetPosition 0}))
+(def {lbl-v} (new TGLabel hf "  0"))
+(.AddFrame hf lbl   (new TGLayoutHints 16 5 5 5 5))
+(.AddFrame hf sl    (new TGLayoutHints 16 5 5 5 5))
+(.AddFrame hf lbl-v (new TGLayoutHints 16 8 5 5 5))
+(.AddFrame win hf   (new TGLayoutHints 65 5 5 8 8))
+
+(def {update-label} (\{} {
+  do
+  (.SetText lbl-v (new TGString (concat "  " (str (.GetPosition sl)))))
+  (.Layout win)
+}))
+
+;;; ── Redraw: incremental read → filter → fill → merge ────────────────────
+;;; Each future loads its own timeframe branches, computes derived columns,
+;;; applies the nCls mask, and fills its private per-TF histograms.
+;;; Branch buffers are freed when the future returns (ref-count → 0).
+(def {redraw} (\{} {
+  do
+  (= {minCls} (.GetPosition sl))
+  (.SetAt min-cls-box minCls 0)
+
+  ;;; Reset per-TF histograms before launching futures
+  (map (\ {h} {.Reset h}) tf-hpe)
+  (map (\ {h} {.Reset h}) tf-hxy)
+  (map (\ {h} {.Reset h}) tf-hse)
+  (map (\ {h} {.Reset h}) tf-hpt)
+
+  (= {sw-r} (doto (new TStopwatch) {Start}))
+
+  ;;; Parallel pass: one future per timeframe
+  (pmap (\ {i} {
+    do
+    (= {tf}  (nth i tf-names))
+    (= {hpe} (nth i tf-hpe))
+    (= {hxy} (nth i tf-hxy))
+    (= {hse} (nth i tf-hse))
+    (= {hpt} (nth i tf-hpt))
+
+    ;;; Load branches — TFile open/close dispatched to main thread (safe);
+    ;;; GetBulkEntries runs inline on this worker thread.
+    (= {falpha-c} (load-branch aod-path (concat tf "/" trk-tree)   "fAlpha"))
+    (= {fsnp-c}   (load-branch aod-path (concat tf "/" trk-tree)   "fSnp"))
+    (= {ftgl-c}   (load-branch aod-path (concat tf "/" trk-tree)   "fTgl"))
+    (= {fx-c}     (load-branch aod-path (concat tf "/" trk-tree)   "fX"))
+    (= {fy-c}     (load-branch aod-path (concat tf "/" trk-tree)   "fY"))
+    (= {fs1pt-c}  (load-branch aod-path (concat tf "/" trk-tree)   "fSigned1Pt"))
+    (= {fsig-c}   (load-branch aod-path (concat tf "/" cov-tree)   "fSigma1Pt"))
+    (= {find-c}   (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+    (= {fmin-c}   (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+
+    ;;; Derive columns (pure computation, no main-thread dispatch)
+    (= {ncls-c}  (col-zip-ptr sub-ptr    (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+    (= {phi-c}   (col-zip-ptr phi-ptr    falpha-c fsnp-c))
+    (= {eta-c}   (col-map-ptr eta-ptr    ftgl-c))
+    (= {pt-c}    (col-map-ptr pt-ptr     fs1pt-c))
+    (= {xg-c}    (col-zip-ptr xg-ptr     fx-c falpha-c fy-c))
+    (= {yg-c}    (col-zip-ptr yg-ptr     fx-c falpha-c fy-c))
+    (= {sig-c}   (col-zip-ptr sigpt-ptr  fsig-c fs1pt-c))
+
+    ;;; Apply nCls mask — col-mask reads min-cls-box[0] set before pmap
+    (= {mask}  (col-map-ptr mask-ptr ncls-c))
+    (= {phi-m} (col-mask mask phi-c))
+    (= {eta-m} (col-mask mask eta-c))
+    (= {xg-m}  (col-mask mask xg-c))
+    (= {yg-m}  (col-mask mask yg-c))
+    (= {sig-m} (col-mask mask sig-c))
+    (= {pt-m}  (col-mask mask pt-c))
+
+    ;;; Fill private per-TF histograms — no sharing, no locks needed
+    (col-fill-h2 hpe phi-m eta-m)
+    (col-fill-h2 hxy xg-m  yg-m)
+    (col-fill-h2 hse eta-m sig-m)
+    (col-fill-h1 hpt pt-m)
+
+    ;;; Branch buffers freed here as local lvals go out of scope
+  }) tf-idx)
+
+  (.Stop sw-r)
+
+  ;;; Merge per-TF histograms into global ones on the main thread
+  (.Reset h-phieta) (.Reset h-xy) (.Reset h-sigeta) (.Reset h-pt)
+  (map (\ {h} {.Add h-phieta h}) tf-hpe)
+  (map (\ {h} {.Add h-xy h})     tf-hxy)
+  (map (\ {h} {.Add h-sigeta h}) tf-hse)
+  (map (\ {h} {.Add h-pt h})     tf-hpt)
+
+  (= {n-sel} (.GetEntries h-phieta))
+  (print "redraw:" (.RealTime sw-r) "s  selected:" n-sel "tracks")
+
+  ;;; Update titles and draw
+  (= {ttl} (concat "N_{{TPC}} #geq " (str minCls) "  [" (str n-sel) " tracks]"))
+  (.SetTitle h-phieta (concat ttl ";#varphi;#eta"))
+  (.SetTitle h-xy     (concat ttl ";X (cm);Y (cm)"))
+  (.SetTitle h-sigeta (concat ttl ";#eta;#sigma(p_{{T}})/p_{{T}}"))
+  (.SetTitle h-pt     (concat ttl ";p_{{T}} (GeV/c);Tracks"))
+  (.cd pad1) (.Draw h-phieta "COLZ")
+  (.cd pad2) (.Draw h-xy "COLZ")
+  (.cd pad3) (.Draw h-sigeta "COLZ")
+  (.cd pad4) (.Draw h-pt)
+  (.Update c) (.RaiseWindow c)
+}))
+
+(connect sl "PositionChanged(Int_t)" update-label)
+(connect sl "Released()" redraw)
+
+;;; ── Initial draw ─────────────────────────────────────────────────────────
+(redraw)
+
+(.SetWindowName win "TPC Cluster Cut (columnar)")
+(.MapSubwindows win)
+(.Resize win (.GetDefaultWidth win) (.GetDefaultHeight win))
+(.MapRaised win)

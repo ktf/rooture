@@ -20,6 +20,7 @@
 #include "TString.h"
 #include "TBufferFile.h"
 #include "TH1.h"
+#include "TH2.h"
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -636,6 +637,125 @@ static lval* builtin_col_fill_h1(lenv* /*e*/, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
+// (col-fill-h2 hist col-x col-y) → nil
+// Fills a TH2 from two float32 columns element-wise.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_fill_h2(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-fill-h2", a, 3);
+  LASSERT_TYPE("col-fill-h2", a, 0, LVAL_TOBJ);
+  LASSERT_TYPE("col-fill-h2", a, 1, LVAL_COLUMN);
+  LASSERT_TYPE("col-fill-h2", a, 2, LVAL_COLUMN);
+  TH2*  h  = (TH2*)a->cell[0]->obj;
+  auto& cx = col_of(a->cell[1]);
+  auto& cy = col_of(a->cell[2]);
+  LASSERT(a, cx->n == cy->n,
+          "col-fill-h2: columns have different lengths (%zu vs %zu)", cx->n, cy->n);
+  LASSERT(a, cx->dtype == COL_FLOAT32, "col-fill-h2: x column must be float32");
+  LASSERT(a, cy->dtype == COL_FLOAT32, "col-fill-h2: y column must be float32");
+  float* px = (float*)cx->data;
+  float* py = (float*)cy->data;
+  size_t n  = cx->n;
+  for (size_t i = 0; i < n; i++) h->Fill((double)px[i], (double)py[i]);
+  lval_del(a);
+  return lval_qexpr();
+}
+
+// ---------------------------------------------------------------------------
+// (col-cast-f32 col) → float32 column
+// Widens any numeric column to float32.  No-op copy if already float32.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_cast_f32(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-cast-f32", a, 1);
+  LASSERT_TYPE("col-cast-f32", a, 0, LVAL_COLUMN);
+  auto& col = col_of(a->cell[0]);
+  size_t n   = col->n;
+  float* out = (float*)malloc(n ? n * sizeof(float) : 1);
+  if (!out) { lval_del(a); return lval_err("col-cast-f32: out of memory"); }
+#define CAST32(T) do { T* p=(T*)col->data; for(size_t i=0;i<n;i++) out[i]=(float)p[i]; } while(0)
+  switch (col->dtype) {
+    case COL_FLOAT32: CAST32(float);    break;
+    case COL_FLOAT64: CAST32(double);   break;
+    case COL_INT32:   CAST32(int32_t);  break;
+    case COL_UINT32:  CAST32(uint32_t); break;
+    case COL_INT16:   CAST32(int16_t);  break;
+    case COL_UINT16:  CAST32(uint16_t); break;
+    case COL_INT8:    CAST32(int8_t);   break;
+    case COL_UINT8:   CAST32(uint8_t);  break;
+    case COL_BOOL:    CAST32(char);     break;
+    default: free(out); lval_del(a); return lval_err("col-cast-f32: unsupported dtype");
+  }
+#undef CAST32
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = COL_FLOAT32; c->n = n; c->data = out;
+  return lval_column(std::move(c));
+}
+
+// ---------------------------------------------------------------------------
+// (col-mask mask-col data-col) → filtered data-col
+// mask-col: float32 — non-zero entries are kept.
+// data-col: float32 — must be same length as mask-col.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_mask(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-mask", a, 2);
+  LASSERT_TYPE("col-mask", a, 0, LVAL_COLUMN);
+  LASSERT_TYPE("col-mask", a, 1, LVAL_COLUMN);
+  auto& mask = col_of(a->cell[0]);
+  auto& data = col_of(a->cell[1]);
+  LASSERT(a, mask->n == data->n,
+          "col-mask: columns have different lengths (%zu vs %zu)", mask->n, data->n);
+  LASSERT(a, mask->dtype == COL_FLOAT32, "col-mask: mask column must be float32");
+  LASSERT(a, data->dtype == COL_FLOAT32, "col-mask: data column must be float32");
+  size_t n   = mask->n;
+  float* m   = (float*)mask->data;
+  float* d   = (float*)data->data;
+  float* out = (float*)malloc(n ? n * sizeof(float) : 1);
+  if (!out) { lval_del(a); return lval_err("col-mask: out of memory"); }
+  size_t out_n = 0;
+  for (size_t i = 0; i < n; i++) if (m[i] != 0.f) out[out_n++] = d[i];
+  float* s = (float*)realloc(out, (out_n ? out_n : 1) * sizeof(float));
+  if (s) out = s;
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = COL_FLOAT32; c->n = out_n; c->data = out;
+  return lval_column(std::move(c));
+}
+
+// ---------------------------------------------------------------------------
+// (col-cat {col1 col2 ...}) → concatenated column
+// All columns must have the same dtype.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_cat(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-cat", a, 1);
+  LASSERT_TYPE("col-cat", a, 0, LVAL_QEXPR);
+  lval* list = a->cell[0];
+  LASSERT(a, list->count > 0, "col-cat: empty list");
+  LASSERT(a, list->cell[0]->type == LVAL_COLUMN, "col-cat: element 0 is not a column");
+  int    dtype = col_of(list->cell[0])->dtype;
+  size_t esz   = col_dtype_size(dtype);
+  size_t total = 0;
+  for (int i = 0; i < list->count; i++) {
+    LASSERT(a, list->cell[i]->type == LVAL_COLUMN,
+            "col-cat: element %d is not a column", i);
+    LASSERT(a, col_of(list->cell[i])->dtype == dtype,
+            "col-cat: dtype mismatch at element %d", i);
+    total += col_of(list->cell[i])->n;
+  }
+  void* out = malloc(total ? total * esz : 1);
+  if (!out) { lval_del(a); return lval_err("col-cat: out of memory"); }
+  size_t off = 0;
+  for (int i = 0; i < list->count; i++) {
+    auto& ci = col_of(list->cell[i]);
+    memcpy((char*)out + off * esz, ci->data, ci->n * esz);
+    off += ci->n;
+  }
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = dtype; c->n = total; c->data = out;
+  return lval_column(std::move(c));
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 void lenv_add_builtins_column(lenv* e) {
@@ -654,5 +774,9 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "col-zip",        builtin_col_zip);
   lenv_add_builtin(e, "col-zip-ptr",    builtin_col_zip_ptr);
   lenv_add_builtin(e, "col-fill-h1",    builtin_col_fill_h1);
+  lenv_add_builtin(e, "col-fill-h2",    builtin_col_fill_h2);
+  lenv_add_builtin(e, "col-cast-f32",   builtin_col_cast_f32);
+  lenv_add_builtin(e, "col-mask",       builtin_col_mask);
+  lenv_add_builtin(e, "col-cat",        builtin_col_cat);
   lenv_add_builtin(e, "jitfn-ptr",      builtin_jitfn_ptr);
 }
