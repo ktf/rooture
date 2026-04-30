@@ -1,5 +1,6 @@
 #include "rooture.h"
 
+
 // ---------------------------------------------------------------------------
 // jit-fn transpiler
 // ---------------------------------------------------------------------------
@@ -558,7 +559,8 @@ lval* builtin_col_jit_fn(lenv* e, lval* a) {
 
   std::string dispatch_code = disp_sig + " {\n" + disp_call + "}\n";
 
-  std::string full_code = kernel_code + dispatch_code;
+  // #pragma cling optimize(2) scopes to this transaction only — no need to restore.
+  std::string full_code = "#pragma cling optimize(2)\n" + kernel_code + dispatch_code;
   if (g_debug) rut_print("[col-jit-fn] declaring:\n%s\n", full_code.c_str());
 
   if (!rut_declare(full_code.c_str())) {
