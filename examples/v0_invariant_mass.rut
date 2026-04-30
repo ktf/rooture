@@ -49,6 +49,104 @@
 ;;; V0 momentum = sum of daughters
 (def {add-fn} (jit-fn float (\{{float a} {float b}} {(+ a b)})))
 
+;;; V0 geometry: helix propagation in uniform Bz.
+;;; Replaces col-dca-v0 builtin with a single fused col-jit-fn kernel (O2).
+;;; Inputs: 14 float32 track-parameter columns + scalar bz (constant-folded).
+;;; Outputs: {vtx-x vtx-y vtx-z dca-daughters}
+(def {dca-v0-jit-fn}
+  (col-jit-fn {float float float float}
+    (\{{col sp} {col ap} {col np} {col tp} {col xp} {col yp} {col zp}
+       {col sn} {col an} {col nn} {col tn} {col xn} {col yn} {col zn}}
+      {do
+        ;;; curvature [1/cm]; clamp near-zero to avoid division singularity
+        (= {crp0} (* sp bz 0.003))
+        (= {crp}  (if (< (::Abs TMath crp0) 1e-9) {(if (>= crp0 0.) {1e-9} {-1e-9})} {crp0}))
+        (= {crn0} (* sn bz 0.003))
+        (= {crn}  (if (< (::Abs TMath crn0) 1e-9) {(if (>= crn0 0.) {1e-9} {-1e-9})} {crn0}))
+        (= {Rp}   (/ 1. (::Abs TMath crp)))
+        (= {Rn}   (/ 1. (::Abs TMath crn)))
+        ;;; local → global XY
+        (= {cap} (::Cos TMath ap))  (= {sap} (::Sin TMath ap))
+        (= {can} (::Cos TMath an))  (= {san} (::Sin TMath an))
+        (= {xgp} (- (* xp cap) (* yp sap)))  (= {ygp} (+ (* xp sap) (* yp cap)))
+        (= {xgn} (- (* xn can) (* yn san)))  (= {ygn} (+ (* xn san) (* yn can)))
+        ;;; global track direction (cos/sin of azimuthal angle φ = alpha + asin(snp))
+        (= {snp2p} (* np np))
+        (= {c1p}  (::Sqrt TMath (if (> (- 1. snp2p) 0.) {(- 1. snp2p)} {0.})))
+        (= {snp2n} (* nn nn))
+        (= {c1n}  (::Sqrt TMath (if (> (- 1. snp2n) 0.) {(- 1. snp2n)} {0.})))
+        (= {cphp} (- (* cap c1p) (* sap np)))  (= {sphp} (+ (* sap c1p) (* cap np)))
+        (= {cphn} (- (* can c1n) (* san nn)))  (= {sphn} (+ (* san c1n) (* can nn)))
+        ;;; helix centers: cx = xg + sinφ/crv,  cy = yg - cosφ/crv
+        (= {cxp} (+ xgp (/ sphp crp)))  (= {cyp} (- ygp (/ cphp crp)))
+        (= {cxn} (+ xgn (/ sphn crn)))  (= {cyn} (- ygn (/ cphn crn)))
+        ;;; circle-circle separation
+        (= {dcx} (- cxn cxp))  (= {dcy} (- cyn cyp))
+        (= {d}   (::Sqrt TMath (+ (* dcx dcx) (* dcy dcy))))
+        ;;; precompute all vertex candidates, select with ternaries
+        (= {invd} (if (> d 1e-6) {(/ 1. d)} {0.}))
+        (= {t}    (* 0.5 (+ d (* (- (* Rp Rp) (* Rn Rn)) invd))))
+        (= {h2}   (- (* Rp Rp) (* t t)))
+        (= {mx}   (+ cxp (* t dcx invd)))
+        (= {my}   (+ cyp (* t dcy invd)))
+        (= {h}    (::Sqrt TMath (if (> h2 0.) {h2} {0.})))
+        (= {px1}  (+ mx (* (* -1. dcy) (* h invd))))
+        (= {py1}  (+ my (* dcx (* h invd))))
+        (= {px2}  (- mx (* (* -1. dcy) (* h invd))))
+        (= {py2}  (- my (* dcx (* h invd))))
+        (= {dot1} (+ (* (- px1 xgp) cphp) (* (- py1 ygp) sphp)))
+        (= {dot2} (+ (* (- px2 xgp) cphp) (* (- py2 ygp) sphp)))
+        (= {vx_i} (if (>= dot1 dot2) {px1} {px2}))
+        (= {vy_i} (if (>= dot1 dot2) {py1} {py2}))
+        (= {vx_ni} (* 0.5 (+ (+ cxp (* Rp dcx invd)) (- cxn (* Rn dcx invd)))))
+        (= {vy_ni} (* 0.5 (+ (+ cyp (* Rp dcy invd)) (- cyn (* Rn dcy invd)))))
+        (= {vx} (if (< d 1e-6) {(* 0.5 (+ xgp xgn))} {(if (<= h2 0.) {vx_ni} {vx_i})}))
+        (= {vy} (if (< d 1e-6) {(* 0.5 (+ ygp ygn))} {(if (<= h2 0.) {vy_ni} {vy_i})}))
+        ;;; z via arc-length propagation — while loops replaced by single corrections
+        ;;; (valid: V0 arc always < one full revolution for ALICE V0s)
+        (= {dthp0} (- (::ATan2 TMath (- vy cyp) (- vx cxp))
+                      (::ATan2 TMath (- ygp cyp) (- xgp cxp))))
+        (= {dthp1} (if (< crp 0.)
+          {(if (< dthp0 0.) {(+ dthp0 6.2831853)} {dthp0})}
+          {(if (> dthp0 0.) {(- dthp0 6.2831853)} {dthp0})}))
+        (= {dthp}  (if (< crp 0.)
+          {(if (> dthp1 3.14159265) {(- dthp1 6.2831853)} {dthp1})}
+          {(if (< dthp1 -3.14159265) {(+ dthp1 6.2831853)} {dthp1})}))
+        (= {vzp}   (+ zp (* Rp (::Abs TMath dthp) tp)))
+        (= {dthn0} (- (::ATan2 TMath (- vy cyn) (- vx cxn))
+                      (::ATan2 TMath (- ygn cyn) (- xgn cxn))))
+        (= {dthn1} (if (< crn 0.)
+          {(if (< dthn0 0.) {(+ dthn0 6.2831853)} {dthn0})}
+          {(if (> dthn0 0.) {(- dthn0 6.2831853)} {dthn0})}))
+        (= {dthn}  (if (< crn 0.)
+          {(if (> dthn1 3.14159265) {(- dthn1 6.2831853)} {dthn1})}
+          {(if (< dthn1 -3.14159265) {(+ dthn1 6.2831853)} {dthn1})}))
+        (= {vzn}   (+ zn (* Rn (::Abs TMath dthn) tn)))
+        (= {vz}    (* 0.5 (+ vzp vzn)))
+        ;;; 3D DCA: nearest points on each helix to the vertex
+        (= {dxp}  (- vx cxp))  (= {dyp}  (- vy cyp))
+        (= {ddp}  (::Sqrt TMath (+ (* dxp dxp) (* dyp dyp))))
+        (= {cpxp} (if (< ddp 1e-8) {(+ cxp Rp)} {(+ cxp (* Rp (/ dxp ddp)))}))
+        (= {cpyp} (if (< ddp 1e-8) {cyp}         {(+ cyp (* Rp (/ dyp ddp)))}))
+        (= {dxn}  (- vx cxn))  (= {dyn}  (- vy cyn))
+        (= {ddn}  (::Sqrt TMath (+ (* dxn dxn) (* dyn dyn))))
+        (= {cpxn} (if (< ddn 1e-8) {(+ cxn Rn)} {(+ cxn (* Rn (/ dxn ddn)))}))
+        (= {cpyn} (if (< ddn 1e-8) {cyn}         {(+ cyn (* Rn (/ dyn ddn)))}))
+        (= {dxy2} (+ (* (- cpxp cpxn) (- cpxp cpxn)) (* (- cpyp cpyn) (- cpyp cpyn))))
+        (= {dca}  (::Sqrt TMath (+ dxy2 (* (- vzp vzn) (- vzp vzn)))))
+        {vx vy vz dca}})))
+
+;;; Cosine of opening angle between daughters — single fused pass
+(def {cos-oa-fn}
+  (col-jit-fn float
+    (\{{col ppx} {col ppy} {col ppz}
+       {col npx} {col npy} {col npz}}
+      {do
+        (= {p2p} (+ (* ppx ppx) (+ (* ppy ppy) (* ppz ppz))))
+        (= {p2n} (+ (* npx npx) (+ (* npy npy) (* npz npz))))
+        (= {den} (::Sqrt TMath (* p2p p2n)))
+        (if (== den 0.) {0.} {(/ (+ (* ppx npx) (+ (* ppy npy) (* ppz npz))) den)})})))
+
 ;;; V0 transverse radius = sqrt(x² + y²)
 (def {radius-fn} (jit-fn float (\{{float x} {float y}}
   {(::Sqrt TMath (+ (* x x) (* y y)))})))
@@ -64,6 +162,23 @@
 (def {lam-type-fn} (jit-fn float (\{{float v}}
   {(if (== v 7.) {1.} {0.})})))
 
+;;; Armenteros-Podolanski (α, q_T) — single-pass fused kernel via col-jit-fn.
+;;; Inputs: 9 float32 momentum columns (pos px/py/pz, neg px/py/pz, V0 px/py/pz).
+(def {arm-jit-fn}
+  (col-jit-fn {float float}
+    (\{{col ppx} {col ppy} {col ppz}
+       {col npx} {col npy} {col npz}
+       {col vpx} {col vpy} {col vpz}}
+      {do
+        (= {vp}  (::Sqrt TMath (+ (* vpx vpx) (+ (* vpy vpy) (* vpz vpz)))))
+        (= {pLp} (if (== vp 0.) {0.} {(/ (+ (* ppx vpx) (+ (* ppy vpy) (* ppz vpz))) vp)}))
+        (= {pLn} (if (== vp 0.) {0.} {(/ (+ (* npx vpx) (+ (* npy vpy) (* npz vpz))) vp)}))
+        (= {den} (+ pLp pLn))
+        (= {p2}  (+ (* ppx ppx) (+ (* ppy ppy) (* ppz ppz))))
+        (= {qt2} (- p2 (* pLp pLp)))
+        {(if (< (::Abs TMath den) 0.00000001) {0.} {(/ (- pLp pLn) den)})
+         (::Sqrt TMath (if (> qt2 0.) {qt2} {0.}))}})))
+
 ;;; Armenteros-Podolanski selection
 ;;; Λ:  α > 0.4 (proton carries most momentum), q_T < 0.12 GeV/c
 ;;; Λ̄:  α < -0.4 (anti-proton carries most momentum), q_T < 0.12 GeV/c
@@ -75,6 +190,7 @@
 (def {k0s-arm-fn}  (jit-fn float (\{{float a} {float q}}
   {(if (> q 0.07) {(if (< (::Abs TMath a) 0.7) {1.} {0.})} {0.})})))
 
+(def {cos-oa-cut-fn} (jit-fn float (\{{float c}} {(if (< c 0.99) {1.} {0.})})))
 (def {mul-fn} (jit-fn float (\{{float a} {float b}} {(* a b)})))
 
 (def {px-ptr}          (jitfn-ptr px-fn))
@@ -90,6 +206,7 @@
 (def {lam-arm-ptr}     (jitfn-ptr lam-arm-fn))
 (def {alam-arm-ptr}    (jitfn-ptr alam-arm-fn))
 (def {k0s-arm-ptr}     (jitfn-ptr k0s-arm-fn))
+(def {cos-oa-cut-ptr}  (jitfn-ptr cos-oa-cut-fn))
 (def {mul-ptr}         (jitfn-ptr mul-fn))
 
 ;;; ── Mass hypotheses (GeV/c²) ─────────────────────────────────────────────
@@ -157,11 +274,10 @@
   (= {pv-y} (col-gather pv-y-c v0-colidx))
   (= {pv-z} (col-gather pv-z-c v0-colidx))
 
-  ;;; Compute V0 geometry: decay vertex + DCA between daughters
-  (= {v0geo}   (col-dca-v0
+  ;;; Compute V0 geometry: decay vertex + DCA between daughters (fused col-jit-fn)
+  (= {v0geo}   (dca-v0-jit-fn
     pos-s1pt pos-alpha pos-snp pos-tgl pos-x pos-y pos-z
-    neg-s1pt neg-alpha neg-snp neg-tgl neg-x neg-y neg-z
-    bz))
+    neg-s1pt neg-alpha neg-snp neg-tgl neg-x neg-y neg-z))
   (= {vtx-x}   (nth 0 v0geo))
   (= {vtx-y}   (nth 1 v0geo))
   (= {vtx-z}   (nth 2 v0geo))
@@ -182,7 +298,7 @@
   (= {cpa}    (col-cpa vtx-x vtx-y vtx-z pv-x pv-y pv-z v0-px v0-py v0-pz))
   (= {radius} (col-zip-ptr radius-ptr vtx-x vtx-y))
 
-  ;;; Topological selection mask
+    ;;; Topological selection mask
   (= {topo-mask}
     (col-zip-ptr mul-ptr
       (col-zip-ptr mul-ptr
@@ -190,8 +306,8 @@
         (col-map-ptr radius-cut-ptr radius))
       (col-map-ptr cpa-cut-ptr cpa)))
 
-  ;;; Armenteros-Podolanski variables
-  (= {arm}       (col-armenteros pos-px pos-py pos-pz neg-px neg-py neg-pz v0-px v0-py v0-pz))
+  ;;; Armenteros-Podolanski variables (fused col-jit-fn kernel, O2)
+  (= {arm}       (arm-jit-fn pos-px pos-py pos-pz neg-px neg-py neg-pz v0-px v0-py v0-pz))
   (= {arm-alpha} (nth 0 arm))
   (= {arm-qt}    (nth 1 arm))
 

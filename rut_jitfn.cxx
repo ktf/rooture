@@ -52,6 +52,25 @@ static bool rut_is_pure(lval* v) {
 static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
                                    bool tail, const JitCtx& ctx);
 
+// Pre-scan an AST node and collect every name bound by (= {name} ...) into
+// ctx.params, so the expression transpiler treats them as C++ identifiers
+// rather than trying to constant-fold them from the closure environment.
+static void collect_locals(lval* v, JitCtx& ctx) {
+  if (!v) return;
+  if (v->type == LVAL_QEXPR || v->type == LVAL_SEXPR) {
+    // (= {name} rhs) — the lhs is a QEXPR with one SYM child
+    if (v->type == LVAL_SEXPR && v->count == 3 &&
+        v->cell[0]->type == LVAL_SYM &&
+        strcmp(v->cell[0]->sym, "=") == 0) {
+      lval* lhs = v->cell[1];
+      if (lhs->type == LVAL_QEXPR && lhs->count == 1 &&
+          lhs->cell[0]->type == LVAL_SYM)
+        ctx.params.insert(to_cpp_id(lhs->cell[0]->sym));
+    }
+    for (int i = 0; i < v->count; i++) collect_locals(v->cell[i], ctx);
+  }
+}
+
 // Transpile a single expression to a C++ expression string (no semicolon).
 static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   if (!v) return "/*null*/";
@@ -540,6 +559,8 @@ lval* builtin_col_jit_fn(lenv* e, lval* a) {
 
   // Build loop body from the lambda body.
   lval* body_node = (fn->body->count == 1) ? fn->body->cell[0] : fn->body;
+  // Pre-scan for (= {name} ...) bindings so they're not constant-folded from env.
+  collect_locals(body_node, ctx);
   std::string loop_body = rut_to_cpp_stmt(body_node, "    ", /*tail=*/true, ctx);
 
   std::string kernel_code = sig + " {\n"
