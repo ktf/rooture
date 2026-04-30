@@ -16,6 +16,7 @@ static char**      g_argv = nullptr;
 
 // MCP mode
 static bool        g_mcp_mode = false;
+static bool        g_mcp_reload = false;  // true when restarted via execv reload
 static int         g_mcp_reply_fds[2];
 static FILE*       g_mcp_out = stdout;  // real JSON-RPC output stream (saved before fd-1 redirect)
 static bool        g_capturing = false;
@@ -411,9 +412,20 @@ static void mcp_thread_fn() {
      {"description", "List all symbol annotations set via (annotate sym \"text\"). Returns {name annotation} pairs describing user-defined customisation points."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
     {{"name", "reload"},
-     {"description", "Quit the rooture MCP server so the host can restart it with a freshly built binary. Call this after rebuilding rooture, then reconnect with /mcp."},
+     {"description", "Restart the rooture process with a freshly built binary. The new process automatically signals the client to refresh its tool list — no manual /mcp reconnect needed."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
   });
+
+  // Hot-reload: the previous process signalled us via env var.  Send a log
+  // notification so the user knows the session was reset, then notify the
+  // client to refresh its tool list — no manual /mcp reconnect needed.
+  if (g_mcp_reload) {
+    send_resp({{"jsonrpc","2.0"},{"method","notifications/message"},{"params",{
+      {"level","warning"},
+      {"data","rooture session reset: all state (loaded scripts, defined symbols, open canvases) has been lost."}
+    }}});
+    send_resp({{"jsonrpc","2.0"},{"method","notifications/tools/list_changed"}});
+  }
 
   std::string line;
   while (std::getline(std::cin, line)) {
@@ -519,6 +531,9 @@ static void mcp_thread_fn() {
         { int maxfd = (int)sysconf(_SC_OPEN_MAX);
           if (maxfd < 0 || maxfd > 4096) maxfd = 4096;
           for (int fd = 3; fd < maxfd; fd++) close(fd); }
+        // Signal the new process that it is a hot-reload so it sends
+        // notifications/tools/list_changed without waiting for initialize.
+        setenv("ROOTURE_MCP_RELOAD", "1", 1);
         execv(g_argv[0], g_argv);
         perror("execv");
         std::exit(1);
@@ -547,6 +562,11 @@ int main(int argc, char** argv) {
       g_mcp_mode = true;
     else if (argv[i][0] != '-' && !g_script_file)
       g_script_file = argv[i];
+  }
+  // Detect execv-based hot-reload: the previous process set this env var.
+  if (getenv("ROOTURE_MCP_RELOAD")) {
+    g_mcp_reload = true;
+    unsetenv("ROOTURE_MCP_RELOAD");  // clear so a further reload doesn't re-trigger
   }
 
   /* In MCP mode save the real stdout fd for JSON-RPC, then redirect fd 1 to
