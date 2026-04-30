@@ -206,7 +206,7 @@ Full design notes in [`docs/columnar-branch-api.md`](docs/columnar-branch-api.md
 - **Lambdas** — pass rooture functions as C++ callables (e.g. `RDataFrame::Define`)
 - **`|` tail strings** — write unquoted strings at the end of a Q-expression: `{.Filter | pt > 10}`
 - **`annotate`** — attach semantic notes to symbols; exposed to AI assistants via MCP
-- **Columnar branch API** — `load-branch`, `col-map-ptr`, `col-fill-h1/h2`, `col-mask`, `col-cat` for parallel flat-buffer I/O
+- **Columnar branch API** — `load-branch`, `col-map-ptr`, `col-fill-h1/h2`, `col-gather`, `col-fill-minv2/3-h1`, `col-mask`, `col-cat` for parallel flat-buffer I/O
 - **MCP server** — connect Claude or any MCP-capable AI assistant for AI-assisted analysis
 
 ---
@@ -305,6 +305,8 @@ A quick taste:
 | `examples/bench_threads.rut` | Throughput benchmark sweeping worker counts |
 | `examples/tracks_col_gui.rut` | Interactive 4-pad track GUI with incremental columnar reads |
 | `examples/tracks_3d_gui.rut` | 3D helix track explorer using RDataFrame |
+| `examples/mean_pt_per_collision.rut` | Mean pT per collision using `col-fill-mean-h1` |
+| `examples/v0_invariant_mass.rut` | K0s and Λ invariant mass spectra from O2v0_002 using `col-gather` + `col-fill-minv2-h1` |
 
 ---
 

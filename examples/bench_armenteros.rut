@@ -1,0 +1,142 @@
+;;; bench_armenteros.rut
+;;;
+;;; Benchmark: col-jit-fn (single fused pass) vs col-zip-ptr chain (multi-pass)
+;;; for Armenteros-Podolanski (α, q_T) computation.
+;;;
+;;; The col-zip-ptr chain allocates 9+ intermediate buffers and makes 9+ passes.
+;;; col-jit-fn compiles a single loop kernel and requires no intermediates.
+;;;
+;;; Run:
+;;;   (load "examples/bench_armenteros.rut")
+
+(load stdlib.rut)
+
+(def {aod-path} "/Users/ktf/src/O2/AO2D.root")
+(def {trk-tree} "O2track_iu")
+(def {v0-tree}  "O2v0_002")
+
+;;; ── Collect first TF name ─────────────────────────────────────────────────
+(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+(def {tf} (nth 0 tf-names))
+(print "Using timeframe:" tf)
+
+;;; ── Load branches for one TF ──────────────────────────────────────────────
+(def {pos-idx}  (load-branch aod-path (concat tf "/" v0-tree)  "fIndexTracks_Pos"))
+(def {neg-idx}  (load-branch aod-path (concat tf "/" v0-tree)  "fIndexTracks_Neg"))
+(def {s1pt-c}   (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+(def {alpha-c}  (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
+(def {snp-c}    (load-branch aod-path (concat tf "/" trk-tree) "fSnp"))
+(def {tgl-c}    (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+
+;;; Gather daughter track params
+(def {pos-s1pt}  (col-gather s1pt-c  pos-idx))
+(def {pos-alpha} (col-gather alpha-c pos-idx))
+(def {pos-snp}   (col-gather snp-c   pos-idx))
+(def {pos-tgl}   (col-gather tgl-c   pos-idx))
+(def {neg-s1pt}  (col-gather s1pt-c  neg-idx))
+(def {neg-alpha} (col-gather alpha-c neg-idx))
+(def {neg-snp}   (col-gather snp-c   neg-idx))
+(def {neg-tgl}   (col-gather tgl-c   neg-idx))
+
+;;; ── JIT functions for Method A ────────────────────────────────────────────
+(def {px-fn}  (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})
+     (::Cos TMath (+ alpha (::ASin TMath snp))))})))
+(def {py-fn}  (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})
+     (::Sin TMath (+ alpha (::ASin TMath snp))))})))
+(def {pz-fn}  (jit-fn float (\{{float s1pt} {float tgl}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))}) tgl)})))
+(def {add-fn} (jit-fn float (\{{float a} {float b}} {(+ a b)})))
+
+(def {px-ptr}  (jitfn-ptr px-fn))
+(def {py-ptr}  (jitfn-ptr py-fn))
+(def {pz-ptr}  (jitfn-ptr pz-fn))
+(def {add-ptr} (jitfn-ptr add-fn))
+
+;;; ── col-jit-fn fused kernel (Method B) ───────────────────────────────────
+;;;
+;;; Single pass over 8 input columns → outputs {alpha, qt} directly.
+;;; Local vars are loop-local scalars (CSE): no intermediate buffers.
+;;;
+(def {arm-jit-fn}
+  (col-jit-fn {float float}
+    (\{{col ps} {col pa} {col pn} {col pt}
+       {col ns} {col na} {col nn} {col nt}}
+      {do
+        ;;; Positive daughter: |1/s1pt| → pt; phi = alpha + asin(snp)
+        (= {ppt}  (if (== ps 0.) {0.} {(/ 1. (::Abs TMath ps))}))
+        (= {pphi} (+ pa (::ASin TMath pn)))
+        (= {ppx}  (* ppt (::Cos TMath pphi)))
+        (= {ppy}  (* ppt (::Sin TMath pphi)))
+        (= {ppz}  (* ppt pt))
+        ;;; Negative daughter
+        (= {npt}  (if (== ns 0.) {0.} {(/ 1. (::Abs TMath ns))}))
+        (= {nphi} (+ na (::ASin TMath nn)))
+        (= {npx}  (* npt (::Cos TMath nphi)))
+        (= {npy}  (* npt (::Sin TMath nphi)))
+        (= {npz}  (* npt nt))
+        ;;; V0 momentum magnitude
+        (= {vpx}  (+ ppx npx))
+        (= {vpy}  (+ ppy npy))
+        (= {vpz}  (+ ppz npz))
+        (= {vp}   (::Sqrt TMath (+ (* vpx vpx) (+ (* vpy vpy) (* vpz vpz)))))
+        ;;; Longitudinal projections
+        (= {pLp}  (if (== vp 0.) {0.} {(/ (+ (* ppx vpx) (+ (* ppy vpy) (* ppz vpz))) vp)}))
+        (= {pLn}  (if (== vp 0.) {0.} {(/ (+ (* npx vpx) (+ (* npy vpy) (* npz vpz))) vp)}))
+        (= {den}  (+ pLp pLn))
+        ;;; α and q_T — two-output tail Q-expr
+        (= {p2}   (+ (* ppx ppx) (+ (* ppy ppy) (* ppz ppz))))
+        (= {qt2}  (- p2 (* pLp pLp)))
+        {(if (< (::Abs TMath den) 0.00000001) {0.} {(/ (- pLp pLn) den)})
+         (::Sqrt TMath (if (> qt2 0.) {qt2} {0.}))}
+      }
+    )))
+
+;;; ── Benchmark ─────────────────────────────────────────────────────────────
+(def {n-reps} 200)
+
+;;; Method A: 9 × col-zip-ptr + col-armenteros builtin
+(def {sw-a} (doto (new TStopwatch) {Start}))
+(dotimes {_} n-reps {
+  do
+  (= {ppx} (col-zip-ptr px-ptr pos-s1pt pos-alpha pos-snp))
+  (= {ppy} (col-zip-ptr py-ptr pos-s1pt pos-alpha pos-snp))
+  (= {ppz} (col-zip-ptr pz-ptr pos-s1pt pos-tgl))
+  (= {npx} (col-zip-ptr px-ptr neg-s1pt neg-alpha neg-snp))
+  (= {npy} (col-zip-ptr py-ptr neg-s1pt neg-alpha neg-snp))
+  (= {npz} (col-zip-ptr pz-ptr neg-s1pt neg-tgl))
+  (= {vpx} (col-zip-ptr add-ptr ppx npx))
+  (= {vpy} (col-zip-ptr add-ptr ppy npy))
+  (= {vpz} (col-zip-ptr add-ptr ppz npz))
+  (col-armenteros ppx ppy ppz npx npy npz vpx vpy vpz)
+})
+(.Stop sw-a)
+(def {t-a} (/ (.RealTime sw-a) n-reps))
+
+;;; Method B: col-jit-fn fused single-pass kernel
+(def {sw-b} (doto (new TStopwatch) {Start}))
+(dotimes {_} n-reps {
+  arm-jit-fn pos-s1pt pos-alpha pos-snp pos-tgl
+             neg-s1pt neg-alpha neg-snp neg-tgl
+})
+(.Stop sw-b)
+(def {t-b} (/ (.RealTime sw-b) n-reps))
+
+;;; ── Results ───────────────────────────────────────────────────────────────
+(print "=== Armenteros benchmark (" n-reps " reps) ===")
+(print "Method A: 9 × col-zip-ptr + col-armenteros (multi-pass)")
+(print "  per-rep:" (* t-a 1000.) "ms")
+(print "Method B: col-jit-fn fused kernel (single pass, no intermediates)")
+(print "  per-rep:" (* t-b 1000.) "ms")
+(print "Speedup (A/B):" (/ t-a t-b) "x")

@@ -15,8 +15,10 @@ static std::string to_cpp_id(const char* s) {
 // Transpilation context: formal parameter names (emitted as-is) and
 // the closure environment for constant-folding free variables.
 struct JitCtx {
-  std::set<std::string> params;  // formal param names — never folded
-  lenv* env;                      // closure env — LVAL_NUM/FLOAT literals folded
+  std::set<std::string> params;      // scalar formal params — emitted as-is
+  std::set<std::string> col_params;  // column formal params — emitted as name[i]
+  lenv* env;                          // closure env — LVAL_NUM/FLOAT literals folded
+  int n_outputs = 0;                  // 0 = scalar jit-fn; N = col-jit-fn loop outputs
 };
 
 // Returns true if v contains no side-effects (assignments, loops, method
@@ -61,7 +63,9 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
     return "\"" + escape_for_cling_str(v->str) + "\"";
   if (v->type == LVAL_SYM) {
     std::string cid = to_cpp_id(v->sym);
-    // If it's a formal parameter, emit as a C++ identifier.
+    // Column parameter — emit as name[i] inside the vectorised loop.
+    if (ctx.col_params.count(cid)) return cid + "[i]";
+    // If it's a scalar formal parameter, emit as a C++ identifier.
     if (ctx.params.count(cid)) return cid;
     // Try constant-folding from the closure environment.
     if (ctx.env) {
@@ -205,6 +209,20 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
   if (v->type == LVAL_QEXPR) {
     if (v->count == 0) return "";
     if (v->count == 1) return rut_to_cpp_stmt(v->cell[0], ind, tail, ctx);
+
+    // Multi-output tail for col-jit-fn: {e0 e1 ...} with exactly n_outputs children.
+    if (tail && ctx.n_outputs > 1 && v->count == ctx.n_outputs) {
+      // First child must not be the symbol "do" (to distinguish from a do-block).
+      bool is_do = v->cell[0]->type == LVAL_SYM && strcmp(v->cell[0]->sym, "do") == 0;
+      if (!is_do) {
+        std::string out;
+        for (int j = 0; j < v->count; j++)
+          out += ind + "__out" + std::to_string(j) + "[i] = "
+               + rut_to_cpp_expr(v->cell[j], ctx) + ";\n";
+        return out;
+      }
+    }
+
     // {do e1 e2 ...} sugar: first element is the symbol "do"
     int start = 0;
     if (v->cell[0]->type == LVAL_SYM && strcmp(v->cell[0]->sym, "do") == 0)
@@ -215,16 +233,19 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
     return out;
   }
 
-  if (v->type != LVAL_SEXPR || v->count == 0) {
-    if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
-    return ind + rut_to_cpp_expr(v, ctx) + ";\n";
-  }
+  // Helper: emit the tail (return or output-assignment depending on context).
+  auto emit_tail = [&](const std::string& expr_str) -> std::string {
+    if (!tail) return ind + expr_str + ";\n";
+    if (ctx.n_outputs > 0) return ind + "__out0[i] = " + expr_str + ";\n";
+    return ind + "return " + expr_str + ";\n";
+  };
+
+  if (v->type != LVAL_SEXPR || v->count == 0)
+    return emit_tail(rut_to_cpp_expr(v, ctx));
 
   lval* head = v->cell[0];
-  if (head->type != LVAL_SYM) {
-    if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
-    return ind + rut_to_cpp_expr(v, ctx) + ";\n";
-  }
+  if (head->type != LVAL_SYM)
+    return emit_tail(rut_to_cpp_expr(v, ctx));
   const char* s = head->sym;
 
   // (do e1 e2 ...) — last child inherits tail
@@ -277,10 +298,8 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
              + ind + "}\n";
     }
     // Both branches non-empty — check if pure (ternary as statement)
-    if (rut_is_pure(tb) && rut_is_pure(fb)) {
-      if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
-      return ind + rut_to_cpp_expr(v, ctx) + ";\n";
-    }
+    if (rut_is_pure(tb) && rut_is_pure(fb))
+      return emit_tail(rut_to_cpp_expr(v, ctx));
     // Full if/else
     return ind + "if(" + rut_to_cpp_expr(v->cell[1], ctx) + ") {\n"
            + rut_to_cpp_stmt(tb, ind + "  ", tail, ctx)
@@ -290,14 +309,11 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
   }
 
   // (.Method obj args...) — instance method call as statement
-  if (s[0] == '.' && s[1] != '\0' && v->count >= 2) {
-    if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
-    return ind + rut_to_cpp_expr(v, ctx) + ";\n";
-  }
+  if (s[0] == '.' && s[1] != '\0' && v->count >= 2)
+    return emit_tail(rut_to_cpp_expr(v, ctx));
 
   // Anything else: try as expression statement
-  if (tail) return ind + "return " + rut_to_cpp_expr(v, ctx) + ";\n";
-  return ind + rut_to_cpp_expr(v, ctx) + ";\n";
+  return emit_tail(rut_to_cpp_expr(v, ctx));
 }
 
 static std::atomic<int> g_jit_counter{0};
@@ -424,6 +440,144 @@ lval* builtin_jit_fn(lenv* e, lval* a) {
   return lval_jitfn(name.c_str(), nparams);
 }
 
+// ---------------------------------------------------------------------------
+// (col-jit-fn ret-type-or-{types} lambda)
+//
+// ret-type:  "float"            — single output column
+//            {float float ...}  — multiple output columns
+//
+// Formals: {col name}  — column argument (emitted as name[i] inside the loop)
+//          {type name} — scalar argument (constant across the loop, folded if bound)
+//
+// Generates a kernel:
+//   void __rut_cjit_N(size_t __n, float* __out0, ..., float* a, float* b, ...)
+//   { for (size_t i = 0; i < __n; i++) { ... } }
+//
+// And a fixed-signature dispatch shim (so call sites always use one pointer type):
+//   void __rut_cjit_N_dispatch(size_t __n, float** __args)
+//   { __rut_cjit_N(__n, __args[0], __args[1], ...); }
+// ---------------------------------------------------------------------------
+lval* builtin_col_jit_fn(lenv* e, lval* a) {
+  if (a->count < 2) {
+    lval_del(a);
+    return lval_err("col-jit-fn: expected (col-jit-fn ret-type lambda)");
+  }
+
+  // Parse return types (first argument).
+  std::vector<std::string> ret_types;
+  lval* ret_arg = a->cell[0];
+  if (ret_arg->type == LVAL_STR) {
+    ret_types.push_back(ret_arg->str);
+  } else if (ret_arg->type == LVAL_QEXPR) {
+    for (int i = 0; i < ret_arg->count; i++) {
+      lval* t = ret_arg->cell[i];
+      ret_types.push_back((t->type == LVAL_SYM) ? std::string(t->sym) : std::string(t->str));
+    }
+  } else {
+    lval_del(a);
+    return lval_err("col-jit-fn: first argument must be a return type or {type ...} list");
+  }
+  if (ret_types.empty()) { lval_del(a); return lval_err("col-jit-fn: no return types"); }
+  int n_outputs = (int)ret_types.size();
+
+  lval* fn = a->cell[1];
+  if (fn->type != LVAL_FUN || fn->builtin) {
+    lval_del(a);
+    return lval_err("col-jit-fn: second argument must be a lambda");
+  }
+
+  // Build transpilation context — identify col vs scalar formals.
+  JitCtx ctx;
+  ctx.env       = e;
+  ctx.n_outputs = n_outputs;
+
+  // Collect formal types: {col name} → col_params; {type name} or sym → params.
+  std::vector<std::pair<std::string,std::string>> formals_info; // (type, cpp_name)
+  for (int i = 0; i < fn->formals->count; i++) {
+    lval* formal = fn->formals->cell[i];
+    if (formal->type == LVAL_SYM && strcmp(formal->sym, "&") == 0) continue;
+    if (formal->type == LVAL_QEXPR && formal->count == 2 &&
+        formal->cell[1]->type == LVAL_SYM) {
+      std::string type_str = (formal->cell[0]->type == LVAL_SYM)
+                             ? std::string(formal->cell[0]->sym)
+                             : std::string(formal->cell[0]->str);
+      std::string cname = to_cpp_id(formal->cell[1]->sym);
+      if (type_str == "col") {
+        ctx.col_params.insert(cname);
+        formals_info.push_back({"float*", cname});
+      } else {
+        ctx.params.insert(cname);
+        formals_info.push_back({type_str, cname});
+      }
+    } else if (formal->type == LVAL_SYM) {
+      std::string cname = to_cpp_id(formal->sym);
+      ctx.params.insert(cname);
+      formals_info.push_back({"auto", cname});
+    } else {
+      lval_del(a);
+      return lval_err("col-jit-fn: invalid formal — expected {col name} or {type name}");
+    }
+  }
+  int n_inputs = (int)formals_info.size();
+
+  std::string name = "__rut_cjit_" + std::to_string(g_jit_counter++);
+  std::string dispatch_name = name + "_dispatch";
+
+  // Build kernel signature: void name(size_t __n, float* __restrict__ __out0, ..., inputs...)
+  // __restrict__ lets the compiler assume no aliasing between output and input buffers,
+  // enabling vectorisation without alias-check overhead.
+  std::string sig = "void " + name + "(size_t __n";
+  for (int j = 0; j < n_outputs; j++)
+    sig += ", " + ret_types[j] + "* __restrict__ __out" + std::to_string(j);
+  for (auto& [type, cname] : formals_info) {
+    // Pointer inputs (column buffers) also get __restrict__.
+    bool is_ptr = !type.empty() && type.back() == '*';
+    sig += is_ptr ? ", " + type + " __restrict__ " + cname
+                  : ", " + type + " " + cname;
+  }
+  sig += ")";
+
+  // Build loop body from the lambda body.
+  lval* body_node = (fn->body->count == 1) ? fn->body->cell[0] : fn->body;
+  std::string loop_body = rut_to_cpp_stmt(body_node, "    ", /*tail=*/true, ctx);
+
+  std::string kernel_code = sig + " {\n"
+    "  for (size_t i = 0; i < __n; i++) {\n"
+    + loop_body +
+    "  }\n}\n";
+
+  // Build dispatch shim: void name_dispatch(size_t __n, float** __args)
+  // args layout: [out0, out1, ..., in0, in1, ...]
+  std::string disp_sig = "void " + dispatch_name + "(size_t __n, float** __args)";
+  std::string disp_call = "  " + name + "(__n";
+  for (int j = 0; j < n_outputs; j++)
+    disp_call += ", (" + ret_types[j] + "*)__args[" + std::to_string(j) + "]";
+  for (int j = 0; j < n_inputs; j++)
+    disp_call += ", (float*)__args[" + std::to_string(n_outputs + j) + "]";
+  disp_call += ");\n";
+
+  std::string dispatch_code = disp_sig + " {\n" + disp_call + "}\n";
+
+  std::string full_code = kernel_code + dispatch_code;
+  if (g_debug) rut_print("[col-jit-fn] declaring:\n%s\n", full_code.c_str());
+
+  if (!rut_declare(full_code.c_str())) {
+    lval_del(a);
+    return lval_err("col-jit-fn: Declare failed for %s", name.c_str());
+  }
+
+  // Resolve dispatch pointer immediately (we're on the main thread post-Declare).
+  void* dp = (void*)rut_calc(("(Long_t)&" + dispatch_name).c_str());
+  if (!dp) {
+    lval_del(a);
+    return lval_err("col-jit-fn: failed to resolve dispatch pointer for %s", dispatch_name.c_str());
+  }
+
+  lval_del(a);
+  return lval_coljitfn(name.c_str(), n_inputs, n_outputs, dp);
+}
+
 void lenv_add_builtins_jitfn(lenv* e) {
-  lenv_add_builtin(e, "jit-fn", builtin_jit_fn);
+  lenv_add_builtin(e, "jit-fn",     builtin_jit_fn);
+  lenv_add_builtin(e, "col-jit-fn", builtin_col_jit_fn);
 }

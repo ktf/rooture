@@ -230,6 +230,96 @@ With the cluster cut applied:
 
 ---
 
+## V0 invariant mass: col-gather + col-fill-minv2-h1
+
+`examples/v0_invariant_mass.rut` plots K0s → π+π- and Λ → pπ- invariant mass
+spectra from the `O2v0_002` table in AO2D.
+
+### Data model
+
+The V0 table stores two int32 index columns per candidate:
+
+```
+O2v0_002 / fIndexTracks_Pos  /I   → index into per-TF O2track_iu
+O2v0_002 / fIndexTracks_Neg  /I   → index into per-TF O2track_iu
+```
+
+Track momenta must be reconstructed from track parameters:
+
+```
+pt  = 1 / |fSigned1Pt|
+phi = fAlpha + asin(fSnp)
+px  = pt · cos(phi)
+py  = pt · sin(phi)
+pz  = pt · fTgl
+```
+
+### Per-timeframe pipeline
+
+```
+load-branch × 6   (fIndexTracks_Pos/Neg, fSigned1Pt, fAlpha, fSnp, fTgl)
+col-gather × 8    (gather s1pt/alpha/snp/tgl for pos and neg daughters)
+col-zip-ptr × 6   (compute px/py/pz for each daughter)
+col-fill-minv2-h1 × 2  (K0s hypothesis: m_pi+m_pi; Λ hypothesis: m_p+m_pi)
+```
+
+### `col-gather` signature
+
+```scheme
+(col-gather data-col idx-col) → Column
+```
+
+`data-col` may be any dtype; the output has the same dtype and the same length
+as `idx-col`.  Out-of-range or negative indices produce zero (useful for O2
+sentinel values, though V0 indices are always valid).
+
+### `col-armenteros` signature
+
+```scheme
+(col-armenteros pos-px pos-py pos-pz neg-px neg-py neg-pz v0-px v0-py v0-pz)
+  → {alpha qt}   (Q-expr of two float32 columns)
+```
+
+Computes Armenteros-Podolanski variables for each V0 candidate:
+
+```
+pL_pos = (pos · v0̂),  pL_neg = (neg · v0̂)   [longitudinal projections]
+α      = (pL_pos − pL_neg) / (pL_pos + pL_neg)
+qT     = sqrt(|pos|² − pL_pos²)              [transverse momentum of pos daughter]
+```
+
+Typical selection windows:
+- K0s:  qT > 0.07 GeV/c AND |α| < 0.7
+- Λ:    α > 0.4 AND qT < 0.12 GeV/c
+- Λ̄:    α < −0.4 AND qT < 0.12 GeV/c
+
+### `col-fill-minv2-h1` signature
+
+```scheme
+(col-fill-minv2-h1 h px1 py1 pz1 px2 py2 pz2 m1 m2) → nil
+```
+
+All six momentum columns must be float32 and the same length.  `m1`/`m2` are
+mass hypotheses in GeV/c².  Fills `h` with:
+
+```
+m_inv = sqrt((E1 + E2)² - (px1+px2)² - (py1+py2)² - (pz1+pz2)²)
+```
+
+Entries with negative invariant mass squared (numerical artefacts near zero pT)
+are silently skipped.
+
+### `col-fill-minv3-h1` signature
+
+```scheme
+(col-fill-minv3-h1 h px1 py1 pz1 px2 py2 pz2 px3 py3 pz3 m1 m2 m3) → nil
+```
+
+Same as the 2-daughter variant but for 3-body decays (e.g. hypertriton from
+`O2decay3body`).
+
+---
+
 ## New builtins summary
 
 | Builtin | File | Purpose |
@@ -238,6 +328,10 @@ With the cluster cut applied:
 | `col-cast-f32` | `rut_column.cxx` | Widen any numeric column to float32 |
 | `col-mask` | `rut_column.cxx` | Filter float32 column by non-zero float32 mask |
 | `col-cat` | `rut_column.cxx` | Concatenate columns of the same dtype |
+| `col-gather` | `rut_column.cxx` | Scatter-gather: `result[i] = data[idx[i]]` (idx must be int32) |
+| `col-fill-minv2-h1` | `rut_column.cxx` | Fill TH1 with 2-daughter invariant mass (6 momentum cols + 2 mass hypotheses) |
+| `col-fill-minv3-h1` | `rut_column.cxx` | Fill TH1 with 3-daughter invariant mass (9 momentum cols + 3 mass hypotheses) |
+| `col-armenteros` | `rut_column.cxx` | Compute Armenteros-Podolanski (α, qT) from 9 momentum columns → Q-expr of 2 float32 cols |
 | `jitfn-ptr` | `rut_column.cxx` | Resolve jit-fn to raw C function pointer |
 | `col-map-ptr` | `rut_column.cxx` | Element-wise map using pre-resolved pointer |
 | `col-zip-ptr` | `rut_column.cxx` | N-ary element-wise combine (2–4 columns) |

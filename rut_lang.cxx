@@ -283,6 +283,19 @@ lval* lval_jitfn(const char* name, long nparams) {
   return v;
 }
 
+// sym=kernel_name  num=n_inputs  count=n_outputs  obj=dispatch_ptr
+lval* lval_coljitfn(const char* name, int n_inputs, int n_outputs, void* dispatch_ptr) {
+  lval* v    = (lval*)calloc(1, sizeof(lval));
+  v->type    = LVAL_COLJITFN;
+  v->sym     = strdup(name);
+  v->num     = n_inputs;
+  v->count   = n_outputs;
+  v->obj     = dispatch_ptr;
+  return v;
+}
+
+ColJitFnDispatch g_coljitfn_dispatch = nullptr;
+
 const char* ltype_name(int t) {
   switch(t) {
     case LVAL_FUN: return "Function";
@@ -295,7 +308,8 @@ const char* ltype_name(int t) {
     case LVAL_TMETHOD: return "Method";
     case LVAL_SEXPR: return "S-Expression";
     case LVAL_QEXPR: return "Q-Expression";
-    case LVAL_JITFN: return "JitFn";
+    case LVAL_JITFN:    return "JitFn";
+    case LVAL_COLJITFN: return "ColJitFn";
     case LVAL_ATOM:    return "Atom";
     case LVAL_FUTURE:  return "Future";
     case LVAL_PROMISE: return "Promise";
@@ -377,7 +391,8 @@ void lval_del(lval* v) {
     case LVAL_ERR: free(v->err); break;
     case LVAL_SYM: free(v->sym); break;
     case LVAL_STR: free(v->str); break;
-    case LVAL_JITFN: free(v->sym); break;
+    case LVAL_JITFN:    free(v->sym); break;
+    case LVAL_COLJITFN: free(v->sym); break;  // obj is a function ptr, not owned heap
     case LVAL_ATOM:    delete (RutAtomPtr*)v->obj;   break;
     case LVAL_FUTURE:
     case LVAL_PROMISE: delete (RutFuturePtr*)v->obj; break;
@@ -464,7 +479,8 @@ void lval_print(lval* v) {
     case LVAL_STR:   lval_print_str(v); break;
     case LVAL_SEXPR: lval_expr_print(v, '(', ')'); break;
     case LVAL_QEXPR: lval_expr_print(v, '{', '}'); break;
-    case LVAL_JITFN: rut_print("<jit-fn %s/%ld>", v->sym, v->num); break;
+    case LVAL_JITFN:    rut_print("<jit-fn %s/%ld>", v->sym, v->num); break;
+    case LVAL_COLJITFN: rut_print("<col-jit-fn %s/%ld→%d>", v->sym, v->num, v->count); break;
     case LVAL_COLUMN: {
       auto& cp = *(RutColumnPtr*)v->obj;
       rut_print("<column: %zu entries [%s]>", cp->n,
@@ -628,6 +644,8 @@ lval* lval_copy(lval* v) {
       x->str = strdup(v->str); break;
     case LVAL_JITFN:
       x->sym = strdup(v->sym); x->num = v->num; break;
+    case LVAL_COLJITFN:
+      x->sym = strdup(v->sym); x->num = v->num; x->count = v->count; x->obj = v->obj; break;
     case LVAL_ATOM:
       /* Atoms are reference types: copy shares the same RutAtom. */
       x->obj = new RutAtomPtr(*(RutAtomPtr*)v->obj); break;
@@ -658,6 +676,13 @@ lval* lval_call(lenv* e, lval* f, lval* a) {
 
   /* If Builtin then simply apply that */
   if (f->builtin) { return f->builtin(e, a); }
+
+  /* LVAL_COLJITFN — dispatch to rut_column.cxx handler */
+  if (f->type == LVAL_COLJITFN) {
+    if (g_coljitfn_dispatch) return g_coljitfn_dispatch(f, a);
+    lval_del(a);
+    return lval_err("col-jit-fn: dispatch not registered");
+  }
 
   /* LVAL_JITFN — generate a ProcessLine call with serialised arguments */
   if (f->type == LVAL_JITFN) {
@@ -829,7 +854,7 @@ lval* lval_eval_sexpr(lenv* e, lval* v) {
   if (v->count == 1) {
     lval* x = lval_take(v, 0);
     /* If the single element is a callable, invoke it with zero arguments. */
-    if (x->type == LVAL_FUN || x->type == LVAL_JITFN) {
+    if (x->type == LVAL_FUN || x->type == LVAL_JITFN || x->type == LVAL_COLJITFN) {
       lval* result = lval_call(e, x, lval_sexpr());
       lval_del(x);
       return result;
@@ -839,7 +864,7 @@ lval* lval_eval_sexpr(lenv* e, lval* v) {
 
   /* Ensure first element is a callable after evaluation */
   lval* f = lval_pop(v, 0);
-  if (f->type != LVAL_FUN && f->type != LVAL_JITFN) {
+  if (f->type != LVAL_FUN && f->type != LVAL_JITFN && f->type != LVAL_COLJITFN) {
     lval* err = lval_err(
       "S-Expression starts with incorrect type. "
       "Got %s, Expected %s.",

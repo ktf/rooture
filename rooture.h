@@ -59,7 +59,8 @@ const TSLanguage* tree_sitter_rooture();
 // ---------------------------------------------------------------------------
 enum { LVAL_ERR, LVAL_NUM, LVAL_FLOAT, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR,
-       LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE, LVAL_PROMISE, LVAL_COLUMN };
+       LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE, LVAL_PROMISE, LVAL_COLUMN,
+       LVAL_COLJITFN };
 
 // ---------------------------------------------------------------------------
 // Core structs — forward declared so lbuiltin can reference lval/lenv
@@ -184,6 +185,12 @@ lval* lval_add(lval* v, lval* x);
 lval* lval_pop(lval* v, int i);
 lval* lval_read(mpc_ast_t* t);
 lval* lval_jitfn(const char* name, long nparams);
+// col-jit-fn: sym=kernel_name, num=n_inputs, count=n_outputs, obj=dispatch_ptr
+lval* lval_coljitfn(const char* name, int n_inputs, int n_outputs, void* dispatch_ptr);
+
+// Dispatch callback — set by rut_column.cxx so rut_lang.cxx stays column-free.
+typedef lval* (*ColJitFnDispatch)(lval* fn, lval* args);
+extern ColJitFnDispatch g_coljitfn_dispatch;
 lval* lval_atom(lval* init);
 void  lval_print(lval* v);
 void  lval_println(lval* v);
