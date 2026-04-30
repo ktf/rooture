@@ -31,6 +31,10 @@
           "named": true
         },
         {
+          "type": "float32",
+          "named": true
+        },
+        {
           "type": "inlinestr",
           "named": true
         },
@@ -78,6 +82,10 @@
           "named": true
         },
         {
+          "type": "float32",
+          "named": true
+        },
+        {
           "type": "named_ref",
           "named": true
         },
@@ -119,6 +127,10 @@
         },
         {
           "type": "float",
+          "named": true
+        },
+        {
+          "type": "float32",
           "named": true
         },
         {
@@ -167,6 +179,10 @@
   },
   {
     "type": "float",
+    "named": true
+  },
+  {
+    "type": "float32",
     "named": true
   },
   {

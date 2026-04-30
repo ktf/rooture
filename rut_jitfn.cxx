@@ -26,7 +26,7 @@ struct JitCtx {
 // calls, new) — used to decide whether an `if` can become a ternary.
 static bool rut_is_pure(lval* v) {
   if (!v) return true;
-  if (v->type == LVAL_NUM || v->type == LVAL_FLOAT ||
+  if (v->type == LVAL_NUM || v->type == LVAL_FLOAT || v->type == LVAL_FLOAT32 ||
       v->type == LVAL_STR || v->type == LVAL_SYM)
     return true;
   if (v->type == LVAL_QEXPR) {
@@ -79,6 +79,10 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
     char buf[32]; snprintf(buf, sizeof(buf), "%.17g", v->floating);
     return buf;
   }
+  if (v->type == LVAL_FLOAT32) {
+    char buf[32]; snprintf(buf, sizeof(buf), "%.9gf", (float)v->floating);
+    return buf;
+  }
   if (v->type == LVAL_STR)
     return "\"" + escape_for_cling_str(v->str) + "\"";
   if (v->type == LVAL_SYM) {
@@ -98,6 +102,9 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
         else if (found->type == LVAL_FLOAT) {
           char buf[32]; snprintf(buf, sizeof(buf), "%.17g", found->floating);
           r = buf;
+        } else if (found->type == LVAL_FLOAT32) {
+          char buf[32]; snprintf(buf, sizeof(buf), "%.9gf", (float)found->floating);
+          r = buf;
         } else if (found->type == LVAL_TOBJ && found->obj) {
           // Fold a heap object to a stable pointer cast: ((ClassName*)0xADDR)
           // The address is baked in at compile time; the value is read at runtime.
@@ -112,13 +119,15 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
     return cid;  // fallback: emit as C++ identifier (hyphens → underscores)
   }
 
-  // Unwrap single-element Q-expression
+  // In rooture {f a b} = (f a b): Q-expressions and S-expressions have the
+  // same semantics in call position. Unwrap single-element, otherwise fall
+  // through to the SEXPR handler below.
   if (v->type == LVAL_QEXPR) {
     if (v->count == 1) return rut_to_cpp_expr(v->cell[0], ctx);
-    return "/*unsupported-qexpr*/";
+    // Multi-element QEXPR: treat as function call (same as SEXPR).
   }
 
-  if (v->type != LVAL_SEXPR || v->count == 0)
+  if ((v->type != LVAL_SEXPR && v->type != LVAL_QEXPR) || v->count == 0)
     return "/*unsupported*/";
 
   lval* head = v->cell[0];
@@ -215,7 +224,18 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
     }
   }
 
-  return "/*unsupported-" + std::string(s) + "*/";
+  // General direct C/C++ function call: (fn arg1 arg2 ...) → fn(arg1, arg2, ...)
+  // This lets col-jit-fn bodies call any C function visible in the Cling session,
+  // e.g. (cosf x), (atan2f y x), (sqrtf x), (fmaxf a b).
+  {
+    std::string call = to_cpp_id(s) + "(";
+    for (int i = 1; i < v->count; i++) {
+      if (i > 1) call += ", ";
+      call += rut_to_cpp_expr(v->cell[i], ctx);
+    }
+    call += ")";
+    return call;
+  }
 }
 
 // Transpile a statement (or block) to C++ code ending with '\n'.
@@ -243,14 +263,25 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
       }
     }
 
-    // {do e1 e2 ...} sugar: first element is the symbol "do"
-    int start = 0;
-    if (v->cell[0]->type == LVAL_SYM && strcmp(v->cell[0]->sym, "do") == 0)
-      start = 1;
-    std::string out;
-    for (int i = start; i < v->count; i++)
-      out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1), ctx);
-    return out;
+    // {do e1 e2 ...} → sequential block
+    if (v->cell[0]->type == LVAL_SYM && strcmp(v->cell[0]->sym, "do") == 0) {
+      std::string out;
+      for (int i = 1; i < v->count; i++)
+        out += rut_to_cpp_stmt(v->cell[i], ind, tail && (i == v->count - 1), ctx);
+      return out;
+    }
+
+    // {f a b ...} → function call (same as (f a b ...) in rooture semantics)
+    // Delegate to the expression transpiler, which handles (::Fn), (.method),
+    // arithmetic, (if ...), and now general C calls like (cosf x).
+    if (tail) {
+      // rut_to_cpp_stmt's emit_tail is not in scope here; reconstruct equivalent.
+      std::string expr = rut_to_cpp_expr(v, ctx);
+      if (ctx.n_outputs > 0)
+        return ind + "__out0[i] = " + expr + ";\n";
+      return ind + "return " + expr + ";\n";
+    }
+    return ind + rut_to_cpp_expr(v, ctx) + ";\n";
   }
 
   // Helper: emit the tail (return or output-assignment depending on context).
@@ -284,7 +315,8 @@ static std::string rut_to_cpp_stmt(lval* v, const std::string& ind,
       varname = to_cpp_id(sym_q->cell[0]->sym);
     else
       varname = "/*bad-var*/";
-    return ind + "auto " + varname + " = " + rut_to_cpp_expr(v->cell[2], ctx) + ";\n";
+    const char* decl_type = (ctx.n_outputs > 0) ? "float " : "auto ";
+    return ind + decl_type + varname + " = " + rut_to_cpp_expr(v->cell[2], ctx) + ";\n";
   }
 
   // (dotimes {i} N {body})

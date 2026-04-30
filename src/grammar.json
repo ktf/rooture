@@ -22,6 +22,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "float32"
+        },
+        {
+          "type": "SYMBOL",
           "name": "float"
         },
         {
@@ -113,6 +117,42 @@
       "content": {
         "type": "PATTERN",
         "value": "[^}\\n]*"
+      }
+    },
+    "float32": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 3,
+        "content": {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "PATTERN",
+              "value": "-?[0-9]+\\.[0-9]*[eE][+-]?[0-9]+f"
+            },
+            {
+              "type": "PATTERN",
+              "value": "-?[0-9]+\\.[0-9]*f"
+            },
+            {
+              "type": "PATTERN",
+              "value": "-?\\.[0-9]+[eE][+-]?[0-9]+f"
+            },
+            {
+              "type": "PATTERN",
+              "value": "-?\\.[0-9]+f"
+            },
+            {
+              "type": "PATTERN",
+              "value": "-?[0-9]+[eE][+-]?[0-9]+f"
+            },
+            {
+              "type": "PATTERN",
+              "value": "-?[0-9]+f"
+            }
+          ]
+        }
       }
     },
     "float": {

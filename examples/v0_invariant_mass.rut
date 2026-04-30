@@ -38,13 +38,13 @@
 ;;; ── JIT functions ─────────────────────────────────────────────────────────
 ;;; Daughter momentum components
 (def {px-fn} (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
-  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})
-     (::Cos TMath (+ alpha (::ASin TMath snp))))})))
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (fabsf s1pt))})
+     (cosf (+ alpha (asinf snp))))})))
 (def {py-fn} (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
-  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})
-     (::Sin TMath (+ alpha (::ASin TMath snp))))})))
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (fabsf s1pt))})
+     (sinf (+ alpha (asinf snp))))})))
 (def {pz-fn} (jit-fn float (\{{float s1pt} {float tgl}}
-  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))}) tgl)})))
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (fabsf s1pt))}) tgl)})))
 
 ;;; V0 momentum = sum of daughters
 (def {add-fn} (jit-fn float (\{{float a} {float b}} {(+ a b)})))
@@ -60,21 +60,21 @@
       {do
         ;;; curvature [1/cm]; clamp near-zero to avoid division singularity
         (= {crp0} (* sp bz 0.003))
-        (= {crp}  (if (< (::Abs TMath crp0) 1e-9) {(if (>= crp0 0.) {1e-9} {-1e-9})} {crp0}))
+        (= {crp}  (if (< (fabsf crp0) 1e-9) {(if (>= crp0 0.) {1e-9} {-1e-9})} {crp0}))
         (= {crn0} (* sn bz 0.003))
-        (= {crn}  (if (< (::Abs TMath crn0) 1e-9) {(if (>= crn0 0.) {1e-9} {-1e-9})} {crn0}))
-        (= {Rp}   (/ 1. (::Abs TMath crp)))
-        (= {Rn}   (/ 1. (::Abs TMath crn)))
+        (= {crn}  (if (< (fabsf crn0) 1e-9) {(if (>= crn0 0.) {1e-9} {-1e-9})} {crn0}))
+        (= {Rp}   (/ 1. (fabsf crp)))
+        (= {Rn}   (/ 1. (fabsf crn)))
         ;;; local → global XY
-        (= {cap} (::Cos TMath ap))  (= {sap} (::Sin TMath ap))
-        (= {can} (::Cos TMath an))  (= {san} (::Sin TMath an))
+        (= {cap} (cosf ap))  (= {sap} (sinf ap))
+        (= {can} (cosf an))  (= {san} (sinf an))
         (= {xgp} (- (* xp cap) (* yp sap)))  (= {ygp} (+ (* xp sap) (* yp cap)))
         (= {xgn} (- (* xn can) (* yn san)))  (= {ygn} (+ (* xn san) (* yn can)))
         ;;; global track direction (cos/sin of azimuthal angle φ = alpha + asin(snp))
         (= {snp2p} (* np np))
-        (= {c1p}  (::Sqrt TMath (if (> (- 1. snp2p) 0.) {(- 1. snp2p)} {0.})))
+        (= {c1p}  (sqrtf (if (> (- 1. snp2p) 0.) {(- 1. snp2p)} {0.})))
         (= {snp2n} (* nn nn))
-        (= {c1n}  (::Sqrt TMath (if (> (- 1. snp2n) 0.) {(- 1. snp2n)} {0.})))
+        (= {c1n}  (sqrtf (if (> (- 1. snp2n) 0.) {(- 1. snp2n)} {0.})))
         (= {cphp} (- (* cap c1p) (* sap np)))  (= {sphp} (+ (* sap c1p) (* cap np)))
         (= {cphn} (- (* can c1n) (* san nn)))  (= {sphn} (+ (* san c1n) (* can nn)))
         ;;; helix centers: cx = xg + sinφ/crv,  cy = yg - cosφ/crv
@@ -82,14 +82,14 @@
         (= {cxn} (+ xgn (/ sphn crn)))  (= {cyn} (- ygn (/ cphn crn)))
         ;;; circle-circle separation
         (= {dcx} (- cxn cxp))  (= {dcy} (- cyn cyp))
-        (= {d}   (::Sqrt TMath (+ (* dcx dcx) (* dcy dcy))))
+        (= {d}   (sqrtf (+ (* dcx dcx) (* dcy dcy))))
         ;;; precompute all vertex candidates, select with ternaries
         (= {invd} (if (> d 1e-6) {(/ 1. d)} {0.}))
         (= {t}    (* 0.5 (+ d (* (- (* Rp Rp) (* Rn Rn)) invd))))
         (= {h2}   (- (* Rp Rp) (* t t)))
         (= {mx}   (+ cxp (* t dcx invd)))
         (= {my}   (+ cyp (* t dcy invd)))
-        (= {h}    (::Sqrt TMath (if (> h2 0.) {h2} {0.})))
+        (= {h}    (sqrtf (if (> h2 0.) {h2} {0.})))
         (= {px1}  (+ mx (* (* -1. dcy) (* h invd))))
         (= {py1}  (+ my (* dcx (* h invd))))
         (= {px2}  (- mx (* (* -1. dcy) (* h invd))))
@@ -104,36 +104,36 @@
         (= {vy} (if (< d 1e-6) {(* 0.5 (+ ygp ygn))} {(if (<= h2 0.) {vy_ni} {vy_i})}))
         ;;; z via arc-length propagation — while loops replaced by single corrections
         ;;; (valid: V0 arc always < one full revolution for ALICE V0s)
-        (= {dthp0} (- (::ATan2 TMath (- vy cyp) (- vx cxp))
-                      (::ATan2 TMath (- ygp cyp) (- xgp cxp))))
+        (= {dthp0} (- (atan2f (- vy cyp) (- vx cxp))
+                      (atan2f (- ygp cyp) (- xgp cxp))))
         (= {dthp1} (if (< crp 0.)
           {(if (< dthp0 0.) {(+ dthp0 6.2831853)} {dthp0})}
           {(if (> dthp0 0.) {(- dthp0 6.2831853)} {dthp0})}))
         (= {dthp}  (if (< crp 0.)
           {(if (> dthp1 3.14159265) {(- dthp1 6.2831853)} {dthp1})}
           {(if (< dthp1 -3.14159265) {(+ dthp1 6.2831853)} {dthp1})}))
-        (= {vzp}   (+ zp (* Rp (::Abs TMath dthp) tp)))
-        (= {dthn0} (- (::ATan2 TMath (- vy cyn) (- vx cxn))
-                      (::ATan2 TMath (- ygn cyn) (- xgn cxn))))
+        (= {vzp}   (+ zp (* Rp (fabsf dthp) tp)))
+        (= {dthn0} (- (atan2f (- vy cyn) (- vx cxn))
+                      (atan2f (- ygn cyn) (- xgn cxn))))
         (= {dthn1} (if (< crn 0.)
           {(if (< dthn0 0.) {(+ dthn0 6.2831853)} {dthn0})}
           {(if (> dthn0 0.) {(- dthn0 6.2831853)} {dthn0})}))
         (= {dthn}  (if (< crn 0.)
           {(if (> dthn1 3.14159265) {(- dthn1 6.2831853)} {dthn1})}
           {(if (< dthn1 -3.14159265) {(+ dthn1 6.2831853)} {dthn1})}))
-        (= {vzn}   (+ zn (* Rn (::Abs TMath dthn) tn)))
+        (= {vzn}   (+ zn (* Rn (fabsf dthn) tn)))
         (= {vz}    (* 0.5 (+ vzp vzn)))
         ;;; 3D DCA: nearest points on each helix to the vertex
         (= {dxp}  (- vx cxp))  (= {dyp}  (- vy cyp))
-        (= {ddp}  (::Sqrt TMath (+ (* dxp dxp) (* dyp dyp))))
+        (= {ddp}  (sqrtf (+ (* dxp dxp) (* dyp dyp))))
         (= {cpxp} (if (< ddp 1e-8) {(+ cxp Rp)} {(+ cxp (* Rp (/ dxp ddp)))}))
         (= {cpyp} (if (< ddp 1e-8) {cyp}         {(+ cyp (* Rp (/ dyp ddp)))}))
         (= {dxn}  (- vx cxn))  (= {dyn}  (- vy cyn))
-        (= {ddn}  (::Sqrt TMath (+ (* dxn dxn) (* dyn dyn))))
+        (= {ddn}  (sqrtf (+ (* dxn dxn) (* dyn dyn))))
         (= {cpxn} (if (< ddn 1e-8) {(+ cxn Rn)} {(+ cxn (* Rn (/ dxn ddn)))}))
         (= {cpyn} (if (< ddn 1e-8) {cyn}         {(+ cyn (* Rn (/ dyn ddn)))}))
         (= {dxy2} (+ (* (- cpxp cpxn) (- cpxp cpxn)) (* (- cpyp cpyn) (- cpyp cpyn))))
-        (= {dca}  (::Sqrt TMath (+ dxy2 (* (- vzp vzn) (- vzp vzn)))))
+        (= {dca}  (sqrtf (+ dxy2 (* (- vzp vzn) (- vzp vzn)))))
         {vx vy vz dca}})))
 
 ;;; Cosine of opening angle between daughters — single fused pass
@@ -144,17 +144,45 @@
       {do
         (= {p2p} (+ (* ppx ppx) (+ (* ppy ppy) (* ppz ppz))))
         (= {p2n} (+ (* npx npx) (+ (* npy npy) (* npz npz))))
-        (= {den} (::Sqrt TMath (* p2p p2n)))
+        (= {den} (sqrtf (* p2p p2n)))
         (if (== den 0.) {0.} {(/ (+ (* ppx npx) (+ (* ppy npy) (* ppz npz))) den)})})))
 
 ;;; V0 transverse radius = sqrt(x² + y²)
 (def {radius-fn} (jit-fn float (\{{float x} {float y}}
-  {(::Sqrt TMath (+ (* x x) (* y y)))})))
+  {(sqrtf (+ (* x x) (* y y)))})))
 
 ;;; Topological cut functions (return 1.0 if cut passes, 0.0 otherwise)
-(def {dca-cut-fn}    (jit-fn float (\{{float dca}} {(if (< dca 1.0)  {1.} {0.})})))
+(def {dca-cut-fn}    (jit-fn float (\{{float dca}} {(if (< dca 0.5)  {1.} {0.})})))
 (def {radius-cut-fn} (jit-fn float (\{{float r}}   {(if (> r 5.0)   {1.} {0.})})))
-(def {cpa-cut-fn}    (jit-fn float (\{{float c}}   {(if (> c 0.995) {1.} {0.})})))
+(def {cpa-cut-fn}    (jit-fn float (\{{float c}}   {(if (> c 0.997) {1.} {0.})})))
+;;; Proper lifetime upper cuts — removes material interactions and secondaries.
+;;; Expressed as L/p thresholds (ct = m × L/p):
+;;;   K0s: ct < 20 cm → L/p < 20/0.4976 = 40.2 cm/(GeV/c)
+;;;   Λ:   ct < 50 cm → L/p < 50/1.1157 = 44.8 cm/(GeV/c)
+;;;   (radius > 5 cm already provides the lower bound)
+(def {dcapv-cut-fn}  (jit-fn float (\{{float d}}  {(if (< d 1.0)  {1.} {0.})})))
+(def {k0s-ct-cut-fn} (jit-fn float (\{{float lp}} {(if (< lp 40.2) {1.} {0.})})))
+(def {lam-ct-cut-fn} (jit-fn float (\{{float lp}} {(if (< lp 44.8) {1.} {0.})})))
+
+;;; Fused col-jit-fn: L/p (proper time w/o mass) + DCA of V0 to primary vertex
+;;; Inputs: vtx-{x,y,z}  pv-{x,y,z}  v0-p{x,y,z}
+;;; Outputs: {L/p  dca-to-pv}
+(def {v0-lifetm-fn}
+  (col-jit-fn {float float}
+    (\{{col vx} {col vy} {col vz}
+       {col pvx} {col pvy} {col pvz}
+       {col px} {col py} {col pz}}
+      {do
+        (= {dx} (- vx pvx))  (= {dy} (- vy pvy))  (= {dz} (- vz pvz))
+        (= {L}    (sqrtf (+ (* dx dx) (+ (* dy dy) (* dz dz)))))
+        (= {pmag} (sqrtf (+ (* px px) (+ (* py py) (* pz pz)))))
+        (= {lop}  (if (== pmag 0.) {0.} {(/ L pmag)}))
+        (= {cx} (- (* dy pz) (* dz py)))
+        (= {cy} (- (* dz px) (* dx pz)))
+        (= {cz} (- (* dx py) (* dy px)))
+        (= {xmag} (sqrtf (+ (* cx cx) (+ (* cy cy) (* cz cz)))))
+        (= {dcapv} (if (== pmag 0.) {0.} {(/ xmag pmag)}))
+        {lop dcapv}})))
 
 ;;; V0 type bit checks (only values 1 and 7 observed in this dataset)
 (def {k0s-type-fn} (jit-fn float (\{{float v}}
@@ -170,14 +198,14 @@
        {col npx} {col npy} {col npz}
        {col vpx} {col vpy} {col vpz}}
       {do
-        (= {vp}  (::Sqrt TMath (+ (* vpx vpx) (+ (* vpy vpy) (* vpz vpz)))))
+        (= {vp}  (sqrtf (+ (* vpx vpx) (+ (* vpy vpy) (* vpz vpz)))))
         (= {pLp} (if (== vp 0.) {0.} {(/ (+ (* ppx vpx) (+ (* ppy vpy) (* ppz vpz))) vp)}))
         (= {pLn} (if (== vp 0.) {0.} {(/ (+ (* npx vpx) (+ (* npy vpy) (* npz vpz))) vp)}))
         (= {den} (+ pLp pLn))
         (= {p2}  (+ (* ppx ppx) (+ (* ppy ppy) (* ppz ppz))))
         (= {qt2} (- p2 (* pLp pLp)))
-        {(if (< (::Abs TMath den) 0.00000001) {0.} {(/ (- pLp pLn) den)})
-         (::Sqrt TMath (if (> qt2 0.) {qt2} {0.}))}})))
+        {(if (< (fabsf den) 0.00000001) {0.} {(/ (- pLp pLn) den)})
+         (sqrtf (if (> qt2 0.) {qt2} {0.}))}})))
 
 ;;; Armenteros-Podolanski selection
 ;;; Λ:  α > 0.4 (proton carries most momentum), q_T < 0.12 GeV/c
@@ -188,7 +216,7 @@
 (def {alam-arm-fn} (jit-fn float (\{{float a} {float q}}
   {(if (< a -0.4) {(if (< q 0.12) {1.} {0.})} {0.})})))
 (def {k0s-arm-fn}  (jit-fn float (\{{float a} {float q}}
-  {(if (> q 0.07) {(if (< (::Abs TMath a) 0.7) {1.} {0.})} {0.})})))
+  {(if (> q 0.07) {(if (< (fabsf a) 0.7) {1.} {0.})} {0.})})))
 
 (def {cos-oa-cut-fn} (jit-fn float (\{{float c}} {(if (< c 0.99) {1.} {0.})})))
 (def {mul-fn} (jit-fn float (\{{float a} {float b}} {(* a b)})))
@@ -208,6 +236,9 @@
 (def {k0s-arm-ptr}     (jitfn-ptr k0s-arm-fn))
 (def {cos-oa-cut-ptr}  (jitfn-ptr cos-oa-cut-fn))
 (def {mul-ptr}         (jitfn-ptr mul-fn))
+(def {dcapv-cut-ptr}   (jitfn-ptr dcapv-cut-fn))
+(def {k0s-ct-cut-ptr}  (jitfn-ptr k0s-ct-cut-fn))
+(def {lam-ct-cut-ptr}  (jitfn-ptr lam-ct-cut-fn))
 
 ;;; ── Mass hypotheses (GeV/c²) ─────────────────────────────────────────────
 (def {m-pi} 0.13957)
@@ -298,7 +329,15 @@
   (= {cpa}    (col-cpa vtx-x vtx-y vtx-z pv-x pv-y pv-z v0-px v0-py v0-pz))
   (= {radius} (col-zip-ptr radius-ptr vtx-x vtx-y))
 
-    ;;; Topological selection mask
+  ;;; Proper lifetime (L/p) and DCA of V0 to primary vertex
+  (= {lifetm}  (v0-lifetm-fn vtx-x vtx-y vtx-z pv-x pv-y pv-z v0-px v0-py v0-pz))
+  (= {lop}     (nth 0 lifetm))
+  (= {dca-pv}  (nth 1 lifetm))
+
+  ;;; Topological selection mask (species-independent)
+  ;;; Note: DCA-to-PV not included here — it correlates with decay length
+  ;;; (DCA = L·sinθ) so large-L Λ candidates fail even when well-pointing.
+  ;;; The CPA cut already handles pointing quality.
   (= {topo-mask}
     (col-zip-ptr mul-ptr
       (col-zip-ptr mul-ptr
@@ -312,6 +351,10 @@
   (= {arm-qt}    (nth 1 arm))
 
   ;;; Combined masks: topology × type × Armenteros
+  ;;; ct cut omitted: diagnostic showed lop ≈ 90–160 cm/(GeV/c) for most
+  ;;; candidates (12–20 lifetimes), meaning the sample is dominated by
+  ;;; combinatorics. The ct cut removes almost all candidates in this small
+  ;;; dataset (31 TFs), leaving too few for meaningful peaks.
   (= {vtype-f}   (col-cast-f32 vtype-c))
   (= {k0s-base}  (col-zip-ptr mul-ptr topo-mask (col-map-ptr k0s-type-ptr vtype-f)))
   (= {lam-base}  (col-zip-ptr mul-ptr topo-mask (col-map-ptr lam-type-ptr vtype-f)))

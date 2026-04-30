@@ -57,7 +57,7 @@ const TSLanguage* tree_sitter_rooture();
 // ---------------------------------------------------------------------------
 // lval type tags
 // ---------------------------------------------------------------------------
-enum { LVAL_ERR, LVAL_NUM, LVAL_FLOAT, LVAL_SYM, LVAL_STR,
+enum { LVAL_ERR, LVAL_NUM, LVAL_FLOAT, LVAL_FLOAT32, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR,
        LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE, LVAL_PROMISE, LVAL_COLUMN,
        LVAL_COLJITFN };
@@ -99,6 +99,7 @@ struct lenv {
 // mpc parser globals (defined in rut_lang.cxx)
 // ---------------------------------------------------------------------------
 extern mpc_parser_t* Number;
+extern mpc_parser_t* Float32;
 extern mpc_parser_t* Floating;
 extern mpc_parser_t* Symbol;
 extern mpc_parser_t* String;

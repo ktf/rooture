@@ -56,7 +56,7 @@ target_link_libraries(rooture PRIVATE
   ROOT::Hist ROOT::Tree ROOT::TreePlayer
   ROOT::ROOTVecOps ROOT::ROOTDataFrame ROOT::ROOTNTuple
 )
-target_compile_options(rooture PRIVATE -g -O0)
+target_compile_options(rooture PRIVATE -g -O2)
 set_target_properties(rooture PROPERTIES
   INSTALL_RPATH "${ROOT_LIBRARY_DIR}"
   BUILD_WITH_INSTALL_RPATH TRUE

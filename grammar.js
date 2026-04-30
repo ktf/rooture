@@ -18,6 +18,7 @@ module.exports = grammar({
       choice(
         $.sexpr,
         $.qexpr,
+        $.float32,      // must come before float (more specific, has f suffix)
         $.float,        // must come before number (more specific)
         $.number,
         $.string,
@@ -47,7 +48,15 @@ module.exports = grammar({
     // Each float alternative is written WITHOUT optional groups so that
     // tree-sitter's DFA does not stop at an early accepting state.
     // "with exponent" alternatives come first so maximal munch always wins.
-    // Explicit priorities: float(2) > number(1) > symbol(0).
+    // Explicit priorities: float32(3) > float(2) > number(1) > symbol(0).
+    float32: ($) => token(prec(3, choice(
+      /-?[0-9]+\.[0-9]*[eE][+-]?[0-9]+f/,  // 1.5e-3f
+      /-?[0-9]+\.[0-9]*f/,                   // 1.5f  2.0f
+      /-?\.[0-9]+[eE][+-]?[0-9]+f/,         // .5e2f
+      /-?\.[0-9]+f/,                          // .5f
+      /-?[0-9]+[eE][+-]?[0-9]+f/,           // 1e-9f  2e4f
+      /-?[0-9]+f/,                            // 1f
+    ))),
     float: ($) => token(prec(2, choice(
       /-?[0-9]+\.[0-9]*[eE][+-]?[0-9]+/,  // 1.5e-3  2.99792458e-4
       /-?[0-9]+\.[0-9]*/,                   // 1.5     2.0

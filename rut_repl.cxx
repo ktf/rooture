@@ -560,6 +560,7 @@ int main(int argc, char** argv) {
   }
 
   /* Create Some Parsers */
+  Float32   = mpc_new("float32");
   Floating  = mpc_new("floating");
   Number    = mpc_new("number");
   Symbol    = mpc_new("symbol");
@@ -574,25 +575,31 @@ int main(int argc, char** argv) {
 
   /* Define them with the following Language */
   mpca_lang(MPCA_LANG_DEFAULT,
-    "                                                         \
-      floating : /-?[0-9]+[.][0-9]*[eE][+-]?[0-9]+/           \
-               | /-?[0-9]+[.][0-9]*/                           \
-               | /-?[.][0-9]+[eE][+-]?[0-9]+/                  \
-               | /-?[.][0-9]+/                                  \
-               | /-?[0-9]+[eE][+-]?[0-9]+/ ;                  \
-      number   : /-?[0-9]+/ ;                                 \
-      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@~?%]+/ ;          \
-      string   : /\"(\\\\.|[^\"])*\"/ ;                       \
-      comment    : /;[^\\r\\n]*/ ;                            \
-      inlinestr  : /[^}\\n]*/ ;                               \
-      qexpr_item : '|' <inlinestr> | <expr> ;                 \
-      sexpr      : '(' <expr>* ')' ;                          \
-      qexpr      : '{' <qexpr_item>* '}' ;                    \
-      expr       : <floating> | <number> | <symbol>           \
-                 | <string> | <comment> | <sexpr> | <qexpr>;  \
-      lispy    : /^/ <expr>* /$/ ;                            \
+    "                                                              \
+      float32  : /-?[0-9]+[.][0-9]*[eE][+-]?[0-9]+f/             \
+               | /-?[0-9]+[.][0-9]*f/                             \
+               | /-?[.][0-9]+[eE][+-]?[0-9]+f/                    \
+               | /-?[.][0-9]+f/                                    \
+               | /-?[0-9]+[eE][+-]?[0-9]+f/                       \
+               | /-?[0-9]+f/ ;                                     \
+      floating : /-?[0-9]+[.][0-9]*[eE][+-]?[0-9]+/               \
+               | /-?[0-9]+[.][0-9]*/                               \
+               | /-?[.][0-9]+[eE][+-]?[0-9]+/                      \
+               | /-?[.][0-9]+/                                      \
+               | /-?[0-9]+[eE][+-]?[0-9]+/ ;                      \
+      number   : /-?[0-9]+/ ;                                     \
+      symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&.:@~?%]+/ ;              \
+      string   : /\"(\\\\.|[^\"])*\"/ ;                           \
+      comment    : /;[^\\r\\n]*/ ;                                \
+      inlinestr  : /[^}\\n]*/ ;                                   \
+      qexpr_item : '|' <inlinestr> | <expr> ;                     \
+      sexpr      : '(' <expr>* ')' ;                              \
+      qexpr      : '{' <qexpr_item>* '}' ;                        \
+      expr       : <float32> | <floating> | <number> | <symbol>   \
+                 | <string> | <comment> | <sexpr> | <qexpr>;      \
+      lispy    : /^/ <expr>* /$/ ;                                \
     ",
-  Floating, Number, Symbol, String, Comment, Inlinestr, QexprItem, Sexpr, Qexpr, Expr, Lispy);
+  Float32, Floating, Number, Symbol, String, Comment, Inlinestr, QexprItem, Sexpr, Qexpr, Expr, Lispy);
 
   /* Build the file search path */
   std::string exe_dir = executable_dir();
@@ -672,8 +679,8 @@ int main(int argc, char** argv) {
   lenv_del(e);
 
   /* Undefine and delete our parsers */
-  mpc_cleanup(11,
-    Number, Floating, Symbol, String, Comment, Inlinestr, QexprItem,
+  mpc_cleanup(12,
+    Float32, Number, Floating, Symbol, String, Comment, Inlinestr, QexprItem,
     Sexpr,  Qexpr,  Expr,   Lispy);
 
   return 0;

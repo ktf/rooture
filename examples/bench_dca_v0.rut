@@ -35,32 +35,32 @@
     (\{{col sp} {col ap} {col np} {col tp} {col xp} {col yp} {col zp}
        {col sn} {col an} {col nn} {col tn} {col xn} {col yn} {col zn}}
       {do
-        (= {crp0} (* sp bz 0.003))
-        (= {crp}  (if (< (::Abs TMath crp0) 1e-9) {(if (>= crp0 0.) {1e-9} {-1e-9})} {crp0}))
-        (= {crn0} (* sn bz 0.003))
-        (= {crn}  (if (< (::Abs TMath crn0) 1e-9) {(if (>= crn0 0.) {1e-9} {-1e-9})} {crn0}))
-        (= {Rp}   (/ 1. (::Abs TMath crp)))
-        (= {Rn}   (/ 1. (::Abs TMath crn)))
-        (= {cap} (::Cos TMath ap))  (= {sap} (::Sin TMath ap))
-        (= {can} (::Cos TMath an))  (= {san} (::Sin TMath an))
+        (= {crp0} (* sp bz 0.003f))
+        (= {crp}  (if (< (fabsf crp0) 1e-9f) {(if (>= crp0 0.) {1e-9f} {-1e-9f})} {crp0}))
+        (= {crn0} (* sn bz 0.003f))
+        (= {crn}  (if (< (fabsf crn0) 1e-9f) {(if (>= crn0 0.) {1e-9f} {-1e-9f})} {crn0}))
+        (= {Rp}   (/ 1. (fabsf crp)))
+        (= {Rn}   (/ 1. (fabsf crn)))
+        (= {cap} (cosf ap))  (= {sap} (sinf ap))
+        (= {can} (cosf an))  (= {san} (sinf an))
         (= {xgp} (- (* xp cap) (* yp sap)))  (= {ygp} (+ (* xp sap) (* yp cap)))
         (= {xgn} (- (* xn can) (* yn san)))  (= {ygn} (+ (* xn san) (* yn can)))
         (= {snp2p} (* np np))
-        (= {c1p}  (::Sqrt TMath (if (> (- 1. snp2p) 0.) {(- 1. snp2p)} {0.})))
+        (= {c1p}  (sqrtf (if (> (- 1. snp2p) 0.) {(- 1. snp2p)} {0.})))
         (= {snp2n} (* nn nn))
-        (= {c1n}  (::Sqrt TMath (if (> (- 1. snp2n) 0.) {(- 1. snp2n)} {0.})))
+        (= {c1n}  (sqrtf (if (> (- 1. snp2n) 0.) {(- 1. snp2n)} {0.})))
         (= {cphp} (- (* cap c1p) (* sap np)))  (= {sphp} (+ (* sap c1p) (* cap np)))
         (= {cphn} (- (* can c1n) (* san nn)))  (= {sphn} (+ (* san c1n) (* can nn)))
         (= {cxp} (+ xgp (/ sphp crp)))  (= {cyp} (- ygp (/ cphp crp)))
         (= {cxn} (+ xgn (/ sphn crn)))  (= {cyn} (- ygn (/ cphn crn)))
         (= {dcx} (- cxn cxp))  (= {dcy} (- cyn cyp))
-        (= {d}   (::Sqrt TMath (+ (* dcx dcx) (* dcy dcy))))
+        (= {d}   (sqrtf (+ (* dcx dcx) (* dcy dcy))))
         (= {invd} (if (> d 1e-6) {(/ 1. d)} {0.}))
         (= {t}    (* 0.5 (+ d (* (- (* Rp Rp) (* Rn Rn)) invd))))
         (= {h2}   (- (* Rp Rp) (* t t)))
         (= {mx}   (+ cxp (* t dcx invd)))
         (= {my}   (+ cyp (* t dcy invd)))
-        (= {h}    (::Sqrt TMath (if (> h2 0.) {h2} {0.})))
+        (= {h}    (sqrtf (if (> h2 0.) {h2} {0.})))
         (= {px1}  (+ mx (* (* -1. dcy) (* h invd))))
         (= {py1}  (+ my (* dcx (* h invd))))
         (= {px2}  (- mx (* (* -1. dcy) (* h invd))))
@@ -73,35 +73,35 @@
         (= {vy_ni} (* 0.5 (+ (+ cyp (* Rp dcy invd)) (- cyn (* Rn dcy invd)))))
         (= {vx} (if (< d 1e-6) {(* 0.5 (+ xgp xgn))} {(if (<= h2 0.) {vx_ni} {vx_i})}))
         (= {vy} (if (< d 1e-6) {(* 0.5 (+ ygp ygn))} {(if (<= h2 0.) {vy_ni} {vy_i})}))
-        (= {dthp0} (- (::ATan2 TMath (- vy cyp) (- vx cxp))
-                      (::ATan2 TMath (- ygp cyp) (- xgp cxp))))
+        (= {dthp0} (- (atan2f (- vy cyp) (- vx cxp))
+                      (atan2f (- ygp cyp) (- xgp cxp))))
         (= {dthp1} (if (< crp 0.)
           {(if (< dthp0 0.) {(+ dthp0 6.2831853)} {dthp0})}
           {(if (> dthp0 0.) {(- dthp0 6.2831853)} {dthp0})}))
         (= {dthp}  (if (< crp 0.)
           {(if (> dthp1 3.14159265) {(- dthp1 6.2831853)} {dthp1})}
           {(if (< dthp1 -3.14159265) {(+ dthp1 6.2831853)} {dthp1})}))
-        (= {vzp}   (+ zp (* Rp (::Abs TMath dthp) tp)))
-        (= {dthn0} (- (::ATan2 TMath (- vy cyn) (- vx cxn))
-                      (::ATan2 TMath (- ygn cyn) (- xgn cxn))))
+        (= {vzp}   (+ zp (* Rp (fabsf dthp) tp)))
+        (= {dthn0} (- (atan2f (- vy cyn) (- vx cxn))
+                      (atan2f (- ygn cyn) (- xgn cxn))))
         (= {dthn1} (if (< crn 0.)
           {(if (< dthn0 0.) {(+ dthn0 6.2831853)} {dthn0})}
           {(if (> dthn0 0.) {(- dthn0 6.2831853)} {dthn0})}))
         (= {dthn}  (if (< crn 0.)
           {(if (> dthn1 3.14159265) {(- dthn1 6.2831853)} {dthn1})}
           {(if (< dthn1 -3.14159265) {(+ dthn1 6.2831853)} {dthn1})}))
-        (= {vzn}   (+ zn (* Rn (::Abs TMath dthn) tn)))
+        (= {vzn}   (+ zn (* Rn (fabsf dthn) tn)))
         (= {vz}    (* 0.5 (+ vzp vzn)))
         (= {dxp}  (- vx cxp))  (= {dyp}  (- vy cyp))
-        (= {ddp}  (::Sqrt TMath (+ (* dxp dxp) (* dyp dyp))))
+        (= {ddp}  (sqrtf (+ (* dxp dxp) (* dyp dyp))))
         (= {cpxp} (if (< ddp 1e-8) {(+ cxp Rp)} {(+ cxp (* Rp (/ dxp ddp)))}))
         (= {cpyp} (if (< ddp 1e-8) {cyp}         {(+ cyp (* Rp (/ dyp ddp)))}))
         (= {dxn}  (- vx cxn))  (= {dyn}  (- vy cyn))
-        (= {ddn}  (::Sqrt TMath (+ (* dxn dxn) (* dyn dyn))))
+        (= {ddn}  (sqrtf (+ (* dxn dxn) (* dyn dyn))))
         (= {cpxn} (if (< ddn 1e-8) {(+ cxn Rn)} {(+ cxn (* Rn (/ dxn ddn)))}))
         (= {cpyn} (if (< ddn 1e-8) {cyn}         {(+ cyn (* Rn (/ dyn ddn)))}))
         (= {dxy2} (+ (* (- cpxp cpxn) (- cpxp cpxn)) (* (- cpyp cpyn) (- cpyp cpyn))))
-        (= {dca}  (::Sqrt TMath (+ dxy2 (* (- vzp vzn) (- vzp vzn)))))
+        (= {dca}  (sqrtf (+ dxy2 (* (- vzp vzn) (- vzp vzn)))))
         {vx vy vz dca}})))
 
 ;;; Helper: load daughter columns for one timeframe
@@ -131,31 +131,43 @@
 (def {tf-cols} (map load-tf-cols tf-names))
 (print "Data loaded.")
 
+;;; Run-all helper: one pass over every timeframe
+(def {run-builtin} (\ {} {
+  map (\ {cols} {
+    col-dca-v0
+      (nth 0 cols) (nth 1 cols) (nth 2 cols) (nth 3 cols)
+      (nth 4 cols) (nth 5 cols) (nth 6 cols)
+      (nth 7 cols) (nth 8 cols) (nth 9 cols) (nth 10 cols)
+      (nth 11 cols) (nth 12 cols) (nth 13 cols)
+      bz
+  }) tf-cols}))
+
+(def {run-jitfn} (\ {} {
+  map (\ {cols} {
+    dca-v0-jit-fn
+      (nth 0 cols) (nth 1 cols) (nth 2 cols) (nth 3 cols)
+      (nth 4 cols) (nth 5 cols) (nth 6 cols)
+      (nth 7 cols) (nth 8 cols) (nth 9 cols) (nth 10 cols)
+      (nth 11 cols) (nth 12 cols) (nth 13 cols)
+  }) tf-cols}))
+
+;;; Warmup: one pass each to trigger JIT compilation
+(run-builtin)
+(run-jitfn)
+(print "Warmup done.")
+
 ;;; ── Benchmark A: C++ builtin col-dca-v0 ─────────────────────────────────
 (def {sw-a} (doto (new TStopwatch) {Start}))
-(map (\ {cols} {
-  col-dca-v0
-    (nth 0 cols) (nth 1 cols) (nth 2 cols) (nth 3 cols)
-    (nth 4 cols) (nth 5 cols) (nth 6 cols)
-    (nth 7 cols) (nth 8 cols) (nth 9 cols) (nth 10 cols)
-    (nth 11 cols) (nth 12 cols) (nth 13 cols)
-    bz
-}) tf-cols)
+(dotimes {i} N-RUNS {run-builtin})
 (.Stop sw-a)
-(def {t-a} (.RealTime sw-a))
-(print "col-dca-v0 (C++ builtin):   total" (* t-a 1000.) "ms")
+(def {t-a} (/ (.RealTime sw-a) N-RUNS))
+(print "col-dca-v0 (C++ builtin):   avg" (* t-a 1000.) "ms/pass")
 
 ;;; ── Benchmark B: col-jit-fn dca-v0-jit-fn ───────────────────────────────
 (def {sw-b} (doto (new TStopwatch) {Start}))
-(map (\ {cols} {
-  dca-v0-jit-fn
-    (nth 0 cols) (nth 1 cols) (nth 2 cols) (nth 3 cols)
-    (nth 4 cols) (nth 5 cols) (nth 6 cols)
-    (nth 7 cols) (nth 8 cols) (nth 9 cols) (nth 10 cols)
-    (nth 11 cols) (nth 12 cols) (nth 13 cols)
-}) tf-cols)
+(dotimes {i} N-RUNS {run-jitfn})
 (.Stop sw-b)
-(def {t-b} (.RealTime sw-b))
-(print "dca-v0-jit-fn (col-jit-fn): total" (* t-b 1000.) "ms")
+(def {t-b} (/ (.RealTime sw-b) N-RUNS))
+(print "dca-v0-jit-fn (col-jit-fn): avg" (* t-b 1000.) "ms/pass")
 
 (print "Ratio (jit/builtin):" (/ t-b t-a) "x  (<1 means jit-fn is faster)")

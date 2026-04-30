@@ -3,6 +3,7 @@
 
 /* Parsers */
 mpc_parser_t* Number;
+mpc_parser_t* Float32;
 mpc_parser_t* Floating;
 mpc_parser_t* Symbol;
 mpc_parser_t* String;
@@ -300,7 +301,8 @@ const char* ltype_name(int t) {
   switch(t) {
     case LVAL_FUN: return "Function";
     case LVAL_NUM: return "Number";
-    case LVAL_FLOAT: return "Floating";
+    case LVAL_FLOAT:   return "Floating";
+    case LVAL_FLOAT32: return "Float32";
     case LVAL_ERR: return "Error";
     case LVAL_SYM: return "Symbol";
     case LVAL_STR: return "String";
@@ -386,6 +388,7 @@ void lval_del(lval* v) {
     /* Do nothing special for number type */
     case LVAL_NUM: break;
     case LVAL_FLOAT: break;
+    case LVAL_FLOAT32: break;
 
     /* For Err or Sym free the string data */
     case LVAL_ERR: free(v->err); break;
@@ -428,6 +431,20 @@ lval* lval_read_floating(mpc_ast_t* t) {
     lval_floating(x) : lval_err("Invalid number", t->contents);
 }
 
+lval* lval_float32(float x) {
+  lval* v = (lval *)malloc(sizeof(lval));
+  v->type = LVAL_FLOAT32;
+  v->floating = x;
+  return v;
+}
+
+lval* lval_read_float32(mpc_ast_t* t) {
+  errno = 0;
+  float x = strtof(t->contents, NULL);
+  return errno != ERANGE ?
+    lval_float32(x) : lval_err("Invalid float32", t->contents);
+}
+
 lval* lval_add(lval* v, lval* x) {
   v->count++;
   v->cell = (lval **)realloc(v->cell, sizeof(lval*) * v->count);
@@ -454,8 +471,9 @@ void lval_print_str(lval* v) {
 // Escape a raw C string for embedding inside a C++ double-quoted literal that
 void lval_print(lval* v) {
   switch (v->type) {
-    case LVAL_NUM:    rut_print("%li", v->num); break;
-    case LVAL_FLOAT:  rut_print("%f", v->floating); break;
+    case LVAL_NUM:     rut_print("%li", v->num); break;
+    case LVAL_FLOAT:   rut_print("%f", v->floating); break;
+    case LVAL_FLOAT32: rut_print("%gf", (float)v->floating); break;
     case LVAL_ERR:    rut_print("Error: %s", v->err); break;
     case LVAL_FUN:
       if (v->builtin) {
@@ -544,6 +562,7 @@ static char* trim_ws(char* buf) {
 lval* lval_read(mpc_ast_t* t) {
   /* Leaf nodes */
   if (strstr(t->tag, "number"))   { return lval_read_num(t); }
+  if (strstr(t->tag, "float32"))  { return lval_read_float32(t); }
   if (strstr(t->tag, "floating")) { return lval_read_floating(t); }
   if (strstr(t->tag, "symbol"))   { return lval_sym(t->contents); }
   if (strstr(t->tag, "string"))   { return lval_read_str(t); }
@@ -632,8 +651,9 @@ lval* lval_copy(lval* v) {
       x->methodArgs = strdup(v->methodArgs);
     break;
 
-    case LVAL_NUM: x->num = v->num; break;
-    case LVAL_FLOAT: x->floating = v->floating; break;
+    case LVAL_NUM:     x->num = v->num; break;
+    case LVAL_FLOAT:   x->floating = v->floating; break;
+    case LVAL_FLOAT32: x->floating = v->floating; break;
     
     /* Copy Strings using malloc and strcpy */
     case LVAL_ERR:
@@ -987,6 +1007,9 @@ lval* promote_to_floating(lval *a) {
 }
 
 void best_numeric_type(lval *&x, lval *&y) {
+  // Normalize float32 to float for runtime arithmetic (f-suffix only matters in transpiler)
+  if (x->type == LVAL_FLOAT32) x->type = LVAL_FLOAT;
+  if (y->type == LVAL_FLOAT32) y->type = LVAL_FLOAT;
   if (x->type == LVAL_NUM && y->type == LVAL_FLOAT)
     x = promote_to_floating(x);
   if (x->type == LVAL_FLOAT && y->type == LVAL_NUM)
@@ -996,8 +1019,9 @@ void best_numeric_type(lval *&x, lval *&y) {
 lval* builtin_op(lenv *e, lval* a, const char* op) {
   /* Ensure all arguments are numbers */
   for (int i = 0; i < a->count; i++) {
-    LASSERT(a, a->cell[i]->type == LVAL_NUM 
-               || a->cell[i]->type == LVAL_FLOAT,
+    LASSERT(a, a->cell[i]->type == LVAL_NUM
+               || a->cell[i]->type == LVAL_FLOAT
+               || a->cell[i]->type == LVAL_FLOAT32,
       "Cannot operate on non-number!");
   }
   
@@ -1069,11 +1093,12 @@ lval* builtin_op(lenv *e, lval* a, const char* op) {
 lval* builtin_ord(lenv* e, lval* a, const char* op) {
   LASSERT_NUM(op, a, 2);
   for (int i = 0; i < a->count; i++) {
-    LASSERT(a, a->cell[i]->type == LVAL_NUM 
-               || a->cell[i]->type == LVAL_FLOAT,
+    LASSERT(a, a->cell[i]->type == LVAL_NUM
+               || a->cell[i]->type == LVAL_FLOAT
+               || a->cell[i]->type == LVAL_FLOAT32,
       "Cannot operate on non-number!");
   }
-  
+
   best_numeric_type(a->cell[0], a->cell[1]);
   
   int r;
@@ -1321,8 +1346,9 @@ int lval_eq(lval* x, lval* y) {
   /* Compare Based upon type */
   switch (x->type) {
     /* Compare Number Value */
-    case LVAL_NUM: return (x->num == y->num);
-    case LVAL_FLOAT: return (x->floating == y->floating);
+    case LVAL_NUM:     return (x->num == y->num);
+    case LVAL_FLOAT:   return (x->floating == y->floating);
+    case LVAL_FLOAT32: return ((float)x->floating == (float)y->floating);
 
     /* Compare String Values */
     case LVAL_ERR: return (strcmp(x->err, y->err) == 0);
