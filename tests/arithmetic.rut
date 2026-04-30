@@ -86,5 +86,25 @@
 (assert-eq "sum via foldl"     (foldl + 0 {1 2 3 4 5})   15)
 (assert-eq "product via foldl" (foldl * 1 {1 2 3 4 5})  120)
 
+;;; ── Bitwise operators ─────────────────────────────────────────────────────────
+
+(assert-eq "band basic"        (band 12 10)         8)   ; 0b1100 & 0b1010 = 0b1000
+(assert-eq "band mask"         (band 255 15)        15)  ; low nibble
+(assert-eq "band zero"         (band 42 0)          0)
+(assert-eq "band self"         (band 7 7)           7)
+(assert-eq "bor basic"         (bor  12 10)         14)  ; 0b1100 | 0b1010 = 0b1110
+(assert-eq "bor zero"          (bor  42 0)          42)
+(assert-eq "bor self"          (bor  5 5)           5)
+(assert-eq "bxor basic"        (bxor 12 10)         6)   ; 0b1100 ^ 0b1010 = 0b0110
+(assert-eq "bxor same"         (bxor 7 7)           0)
+(assert-eq "bxor zero"         (bxor 9 0)           9)
+(assert-eq "bnot zero bits"    (band (bnot 0) 255)  255) ; ~0 & 0xFF = 0xFF
+(assert-eq "bnot ff bits"      (band (bnot 255) 255) 0)  ; ~0xFF & 0xFF = 0
+
+;;; typical use case: check a bitmask flag
+(def {kGlobalTrack} 32767)
+(assert-eq "flag check pass"   (== (band 32767 kGlobalTrack) kGlobalTrack)  1)
+(assert-eq "flag check fail"   (== (band 32766 kGlobalTrack) kGlobalTrack)  0)
+
 (print "All arithmetic tests passed.")
 (exit 0)

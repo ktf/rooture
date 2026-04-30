@@ -79,6 +79,36 @@
 (process-line "__rut_jit_5(42.0)")
 (print "void jit-fn PASS")
 
-;;; ── Done ──────────────────────────────��────────────────────────��─────────────
+;;; ── 7. Bitwise operators in jit-fn ──────────────────────────────────────────
+;;; band / bor / bxor / bnot must transpile to &, |, ^, ~
+
+;;; (band x mask) → x & mask
+(def {bit-and-fn} (jit-fn int (\{{int x} {int mask}} {(band x mask)})))
+(assert-eq "band 12&10=8"   (process-line "(long)__rut_jit_6(12, 10)") 8)
+(assert-eq "band 255&15=15" (process-line "(long)__rut_jit_6(255, 15)") 15)
+
+;;; (bor x y) → x | y
+(def {bit-or-fn} (jit-fn int (\{{int x} {int y}} {(bor x y)})))
+(assert-eq "bor 12|10=14"  (process-line "(long)__rut_jit_7(12, 10)") 14)
+(assert-eq "bor 42|0=42"   (process-line "(long)__rut_jit_7(42, 0)")  42)
+
+;;; (bxor x y) → x ^ y
+(def {bit-xor-fn} (jit-fn int (\{{int x} {int y}} {(bxor x y)})))
+(assert-eq "bxor 12^10=6"  (process-line "(long)__rut_jit_8(12, 10)") 6)
+(assert-eq "bxor 7^7=0"    (process-line "(long)__rut_jit_8(7, 7)")   0)
+
+;;; (bnot x) → ~x  — check low byte to avoid sign-extension issues
+(def {bit-not-fn} (jit-fn int (\{{int x}} {(band (bnot x) 255)})))
+(assert-eq "bnot 0  low8=255" (process-line "(long)__rut_jit_9(0)")   255)
+(assert-eq "bnot 255 low8=0"  (process-line "(long)__rut_jit_9(255)") 0)
+
+;;; typical spectraTPC use: global-track flag check
+;;; (band flag kGlobalTrack) == kGlobalTrack
+(def {is-global-fn}
+  (jit-fn int (\{{int flag}} {(if (== (band flag 32767) 32767) {1} {0})})))
+(assert-eq "global flag pass" (process-line "(long)__rut_jit_10(32767)") 1)
+(assert-eq "global flag fail" (process-line "(long)__rut_jit_10(32766)") 0)
+
+;;; ── Done ─────────────────────────────────────────────────────────────────────
 (print "All jit-fn tests passed.")
 (exit 0)

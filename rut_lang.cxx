@@ -1299,6 +1299,44 @@ lval* builtin_mod(lenv* e, lval* a) {
   return builtin_op(e, a, "%");
 }
 
+lval* builtin_band(lenv* e, lval* a) {
+  LASSERT_NUM("band", a, 2);
+  for (int i = 0; i < a->count; i++)
+    LASSERT(a, a->cell[i]->type == LVAL_NUM, "band requires integer arguments");
+  lval* x = lval_pop(a, 0);
+  lval* y = lval_pop(a, 0);
+  x->num &= y->num;
+  lval_del(y); lval_del(a); return x;
+}
+
+lval* builtin_bor(lenv* e, lval* a) {
+  LASSERT_NUM("bor", a, 2);
+  for (int i = 0; i < a->count; i++)
+    LASSERT(a, a->cell[i]->type == LVAL_NUM, "bor requires integer arguments");
+  lval* x = lval_pop(a, 0);
+  lval* y = lval_pop(a, 0);
+  x->num |= y->num;
+  lval_del(y); lval_del(a); return x;
+}
+
+lval* builtin_bxor(lenv* e, lval* a) {
+  LASSERT_NUM("bxor", a, 2);
+  for (int i = 0; i < a->count; i++)
+    LASSERT(a, a->cell[i]->type == LVAL_NUM, "bxor requires integer arguments");
+  lval* x = lval_pop(a, 0);
+  lval* y = lval_pop(a, 0);
+  x->num ^= y->num;
+  lval_del(y); lval_del(a); return x;
+}
+
+lval* builtin_bnot(lenv* e, lval* a) {
+  LASSERT_NUM("bnot", a, 1);
+  LASSERT(a, a->cell[0]->type == LVAL_NUM, "bnot requires integer argument");
+  lval* x = lval_pop(a, 0);
+  x->num = ~x->num;
+  lval_del(a); return x;
+}
+
 lval* builtin_var(lenv* e, lval* a, const char* func) {
   LASSERT_TYPE(func, a, 0, LVAL_QEXPR);
   
@@ -1973,7 +2011,11 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "-", builtin_sub);
   lenv_add_builtin(e, "*", builtin_mul);
   lenv_add_builtin(e, "/", builtin_div);
-  lenv_add_builtin(e, "%", builtin_mod);
+  lenv_add_builtin(e, "%",    builtin_mod);
+  lenv_add_builtin(e, "band", builtin_band);
+  lenv_add_builtin(e, "bor",  builtin_bor);
+  lenv_add_builtin(e, "bxor", builtin_bxor);
+  lenv_add_builtin(e, "bnot", builtin_bnot);
   /* Conditionals */
   lenv_add_builtin(e, "cond", builtin_cond);
   lenv_add_builtin(e, "if",   builtin_if);
