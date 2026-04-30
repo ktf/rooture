@@ -1,0 +1,161 @@
+;;; bench_dca_v0.rut
+;;;
+;;; Benchmark col-dca-v0 (C++ builtin) vs dca-v0-jit-fn (col-jit-fn) on a
+;;; single timeframe.  Data is loaded once; the geometry kernel is called
+;;; N-RUNS times each to get stable wall-clock times.
+;;;
+;;; Run:
+;;;   (load "examples/bench_dca_v0.rut")
+
+(load stdlib.rut)
+
+(def {aod-path} "/Users/ktf/src/O2/AO2D.root")
+(def {trk-tree} "O2track_iu")
+(def {v0-tree}  "O2v0_002")
+(def {bz}       0.5)
+(def {N-RUNS}   20)
+
+;;; ── Collect all timeframe names ──────────────────────────────────────────
+(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+(print "Timeframes:" (len tf-names))
+
+;;; ── dca-v0-jit-fn definition ─────────────────────────────────────────────
+(def {dca-v0-jit-fn}
+  (col-jit-fn {float float float float}
+    (\{{col sp} {col ap} {col np} {col tp} {col xp} {col yp} {col zp}
+       {col sn} {col an} {col nn} {col tn} {col xn} {col yn} {col zn}}
+      {do
+        (= {crp0} (* sp bz 0.003))
+        (= {crp}  (if (< (::Abs TMath crp0) 1e-9) {(if (>= crp0 0.) {1e-9} {-1e-9})} {crp0}))
+        (= {crn0} (* sn bz 0.003))
+        (= {crn}  (if (< (::Abs TMath crn0) 1e-9) {(if (>= crn0 0.) {1e-9} {-1e-9})} {crn0}))
+        (= {Rp}   (/ 1. (::Abs TMath crp)))
+        (= {Rn}   (/ 1. (::Abs TMath crn)))
+        (= {cap} (::Cos TMath ap))  (= {sap} (::Sin TMath ap))
+        (= {can} (::Cos TMath an))  (= {san} (::Sin TMath an))
+        (= {xgp} (- (* xp cap) (* yp sap)))  (= {ygp} (+ (* xp sap) (* yp cap)))
+        (= {xgn} (- (* xn can) (* yn san)))  (= {ygn} (+ (* xn san) (* yn can)))
+        (= {snp2p} (* np np))
+        (= {c1p}  (::Sqrt TMath (if (> (- 1. snp2p) 0.) {(- 1. snp2p)} {0.})))
+        (= {snp2n} (* nn nn))
+        (= {c1n}  (::Sqrt TMath (if (> (- 1. snp2n) 0.) {(- 1. snp2n)} {0.})))
+        (= {cphp} (- (* cap c1p) (* sap np)))  (= {sphp} (+ (* sap c1p) (* cap np)))
+        (= {cphn} (- (* can c1n) (* san nn)))  (= {sphn} (+ (* san c1n) (* can nn)))
+        (= {cxp} (+ xgp (/ sphp crp)))  (= {cyp} (- ygp (/ cphp crp)))
+        (= {cxn} (+ xgn (/ sphn crn)))  (= {cyn} (- ygn (/ cphn crn)))
+        (= {dcx} (- cxn cxp))  (= {dcy} (- cyn cyp))
+        (= {d}   (::Sqrt TMath (+ (* dcx dcx) (* dcy dcy))))
+        (= {invd} (if (> d 1e-6) {(/ 1. d)} {0.}))
+        (= {t}    (* 0.5 (+ d (* (- (* Rp Rp) (* Rn Rn)) invd))))
+        (= {h2}   (- (* Rp Rp) (* t t)))
+        (= {mx}   (+ cxp (* t dcx invd)))
+        (= {my}   (+ cyp (* t dcy invd)))
+        (= {h}    (::Sqrt TMath (if (> h2 0.) {h2} {0.})))
+        (= {px1}  (+ mx (* (* -1. dcy) (* h invd))))
+        (= {py1}  (+ my (* dcx (* h invd))))
+        (= {px2}  (- mx (* (* -1. dcy) (* h invd))))
+        (= {py2}  (- my (* dcx (* h invd))))
+        (= {dot1} (+ (* (- px1 xgp) cphp) (* (- py1 ygp) sphp)))
+        (= {dot2} (+ (* (- px2 xgp) cphp) (* (- py2 ygp) sphp)))
+        (= {vx_i} (if (>= dot1 dot2) {px1} {px2}))
+        (= {vy_i} (if (>= dot1 dot2) {py1} {py2}))
+        (= {vx_ni} (* 0.5 (+ (+ cxp (* Rp dcx invd)) (- cxn (* Rn dcx invd)))))
+        (= {vy_ni} (* 0.5 (+ (+ cyp (* Rp dcy invd)) (- cyn (* Rn dcy invd)))))
+        (= {vx} (if (< d 1e-6) {(* 0.5 (+ xgp xgn))} {(if (<= h2 0.) {vx_ni} {vx_i})}))
+        (= {vy} (if (< d 1e-6) {(* 0.5 (+ ygp ygn))} {(if (<= h2 0.) {vy_ni} {vy_i})}))
+        (= {dthp0} (- (::ATan2 TMath (- vy cyp) (- vx cxp))
+                      (::ATan2 TMath (- ygp cyp) (- xgp cxp))))
+        (= {dthp1} (if (< crp 0.)
+          {(if (< dthp0 0.) {(+ dthp0 6.2831853)} {dthp0})}
+          {(if (> dthp0 0.) {(- dthp0 6.2831853)} {dthp0})}))
+        (= {dthp}  (if (< crp 0.)
+          {(if (> dthp1 3.14159265) {(- dthp1 6.2831853)} {dthp1})}
+          {(if (< dthp1 -3.14159265) {(+ dthp1 6.2831853)} {dthp1})}))
+        (= {vzp}   (+ zp (* Rp (::Abs TMath dthp) tp)))
+        (= {dthn0} (- (::ATan2 TMath (- vy cyn) (- vx cxn))
+                      (::ATan2 TMath (- ygn cyn) (- xgn cxn))))
+        (= {dthn1} (if (< crn 0.)
+          {(if (< dthn0 0.) {(+ dthn0 6.2831853)} {dthn0})}
+          {(if (> dthn0 0.) {(- dthn0 6.2831853)} {dthn0})}))
+        (= {dthn}  (if (< crn 0.)
+          {(if (> dthn1 3.14159265) {(- dthn1 6.2831853)} {dthn1})}
+          {(if (< dthn1 -3.14159265) {(+ dthn1 6.2831853)} {dthn1})}))
+        (= {vzn}   (+ zn (* Rn (::Abs TMath dthn) tn)))
+        (= {vz}    (* 0.5 (+ vzp vzn)))
+        (= {dxp}  (- vx cxp))  (= {dyp}  (- vy cyp))
+        (= {ddp}  (::Sqrt TMath (+ (* dxp dxp) (* dyp dyp))))
+        (= {cpxp} (if (< ddp 1e-8) {(+ cxp Rp)} {(+ cxp (* Rp (/ dxp ddp)))}))
+        (= {cpyp} (if (< ddp 1e-8) {cyp}         {(+ cyp (* Rp (/ dyp ddp)))}))
+        (= {dxn}  (- vx cxn))  (= {dyn}  (- vy cyn))
+        (= {ddn}  (::Sqrt TMath (+ (* dxn dxn) (* dyn dyn))))
+        (= {cpxn} (if (< ddn 1e-8) {(+ cxn Rn)} {(+ cxn (* Rn (/ dxn ddn)))}))
+        (= {cpyn} (if (< ddn 1e-8) {cyn}         {(+ cyn (* Rn (/ dyn ddn)))}))
+        (= {dxy2} (+ (* (- cpxp cpxn) (- cpxp cpxn)) (* (- cpyp cpyn) (- cpyp cpyn))))
+        (= {dca}  (::Sqrt TMath (+ dxy2 (* (- vzp vzn) (- vzp vzn)))))
+        {vx vy vz dca}})))
+
+;;; Helper: load daughter columns for one timeframe
+;;; returns list of 14 gathered columns: pos-(s1pt alpha snp tgl x y z) neg-(...)
+(def {load-tf-cols} (\ {tf} {
+  do
+  (= {pos-idx}  (load-branch aod-path (concat tf "/" v0-tree) "fIndexTracks_Pos"))
+  (= {neg-idx}  (load-branch aod-path (concat tf "/" v0-tree) "fIndexTracks_Neg"))
+  (= {s1pt-c}   (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {alpha-c}  (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
+  (= {snp-c}    (load-branch aod-path (concat tf "/" trk-tree) "fSnp"))
+  (= {tgl-c}    (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {x-c}      (load-branch aod-path (concat tf "/" trk-tree) "fX"))
+  (= {y-c}      (load-branch aod-path (concat tf "/" trk-tree) "fY"))
+  (= {z-c}      (load-branch aod-path (concat tf "/" trk-tree) "fZ"))
+  (list
+    (col-gather s1pt-c  pos-idx) (col-gather alpha-c pos-idx)
+    (col-gather snp-c   pos-idx) (col-gather tgl-c   pos-idx)
+    (col-gather x-c     pos-idx) (col-gather y-c     pos-idx)
+    (col-gather z-c     pos-idx)
+    (col-gather s1pt-c  neg-idx) (col-gather alpha-c neg-idx)
+    (col-gather snp-c   neg-idx) (col-gather tgl-c   neg-idx)
+    (col-gather x-c     neg-idx) (col-gather y-c     neg-idx)
+    (col-gather z-c     neg-idx))}))
+
+;;; Pre-load all timeframes
+(def {tf-cols} (map load-tf-cols tf-names))
+(print "Data loaded.")
+
+;;; ── Benchmark A: C++ builtin col-dca-v0 ─────────────────────────────────
+(def {sw-a} (doto (new TStopwatch) {Start}))
+(map (\ {cols} {
+  col-dca-v0
+    (nth 0 cols) (nth 1 cols) (nth 2 cols) (nth 3 cols)
+    (nth 4 cols) (nth 5 cols) (nth 6 cols)
+    (nth 7 cols) (nth 8 cols) (nth 9 cols) (nth 10 cols)
+    (nth 11 cols) (nth 12 cols) (nth 13 cols)
+    bz
+}) tf-cols)
+(.Stop sw-a)
+(def {t-a} (.RealTime sw-a))
+(print "col-dca-v0 (C++ builtin):   total" (* t-a 1000.) "ms")
+
+;;; ── Benchmark B: col-jit-fn dca-v0-jit-fn ───────────────────────────────
+(def {sw-b} (doto (new TStopwatch) {Start}))
+(map (\ {cols} {
+  dca-v0-jit-fn
+    (nth 0 cols) (nth 1 cols) (nth 2 cols) (nth 3 cols)
+    (nth 4 cols) (nth 5 cols) (nth 6 cols)
+    (nth 7 cols) (nth 8 cols) (nth 9 cols) (nth 10 cols)
+    (nth 11 cols) (nth 12 cols) (nth 13 cols)
+}) tf-cols)
+(.Stop sw-b)
+(def {t-b} (.RealTime sw-b))
+(print "dca-v0-jit-fn (col-jit-fn): total" (* t-b 1000.) "ms")
+
+(print "Ratio (jit/builtin):" (/ t-b t-a) "x  (<1 means jit-fn is faster)")
