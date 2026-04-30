@@ -87,8 +87,9 @@ before the `&` variadic check.
 | Construct | Output |
 |---|---|
 | `LVAL_NUM` / `LVAL_FLOAT` / `LVAL_STR` / `LVAL_SYM` | literal |
+| `LVAL_FLOAT32` (e.g. `1.5f`) | `f`-suffixed float literal |
 | `(do e1 e2 …)` | sequential statements |
-| `(= {x} rhs)` | `auto x = rhs;` |
+| `(= {x} rhs)` | `float x = rhs;` (col-jit-fn) or `auto x = rhs;` (jit-fn) |
 | `(dotimes {i} n {body})` | `for(int i=0; i<n; ++i)` |
 | `(if …)` pure branches | ternary |
 | `(if …)` statement branches | `if/else` |
