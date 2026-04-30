@@ -1,0 +1,75 @@
+;;; mean_pt_per_collision.rut
+;;;
+;;; Plot the distribution of mean pT per collision using the columnar API.
+;;;
+;;; For each timeframe, fIndexCollisions groups tracks by their originating
+;;; collision.  col-fill-mean-h1 accumulates sum(pT) and count per group in
+;;; one native C++ pass, then fills the histogram with per-collision means.
+;;;
+;;; Collision indices reset to 0 for each timeframe, so timeframes are
+;;; processed independently and their histograms merged afterwards.
+;;;
+;;; Usage:
+;;;   (load "examples/mean_pt_per_collision.rut")
+
+(load stdlib.rut)
+
+(def {aod-path}  "/Users/ktf/src/O2/AO2D.root")
+(def {trk-tree}  "O2track_iu")
+
+;;; ── Collect timeframe names ───────────────────────────────────────────────
+(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+(print "Timeframes:" (len tf-names))
+
+;;; ── pT function: 1/|fSigned1Pt|, guarded against zero ───────────────────
+(def {pt-fn}
+  (jit-fn float (\{{float s1pt}}
+    {(if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})})))
+(def {pt-ptr} (jitfn-ptr pt-fn))
+
+;;; ── Pre-create one histogram per timeframe (collision indices are local) ──
+(def {tf-hmpt}
+  (map (\ {tf} {
+    doto (new TH1F (concat "mp_" tf) "" 100 0. 3.) {SetDirectory 0}
+  }) tf-names))
+
+;;; ── Parallel fill: each future handles one timeframe independently ────────
+(def {sw} (doto (new TStopwatch) {Start}))
+
+(pmap (\ {tf-h} {
+  do
+  (= {tf}     (fst tf-h))
+  (= {h}      (snd tf-h))
+  (= {s1pt-c} (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {cidx-c} (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+  (= {pt-c}   (col-map-ptr pt-ptr s1pt-c))
+  (col-fill-mean-h1 h pt-c cidx-c)
+}) (zip tf-names tf-hmpt))
+
+(.Stop sw)
+(print "Wall time:" (.RealTime sw) "s")
+
+;;; ── Merge per-TF histograms into one ─────────────────────────────────────
+(def {h-mean-pt}
+  (doto (new TH1F "hmeanpt" ";#LT p_{T} #GT per collision (GeV/c);Collisions"
+             100 0. 3.)
+    {SetDirectory 0}
+    {SetLineWidth 2}))
+
+(map (\ {h} {.Add h-mean-pt h}) tf-hmpt)
+
+(print "Collisions:" (.GetEntries h-mean-pt)
+       "  Mean #LT pT #GT:" (.GetMean h-mean-pt) "GeV/c")
+
+;;; ── Draw ─────────────────────────────────────────────────────────────────
+(.Draw h-mean-pt)

@@ -1,0 +1,259 @@
+;;; v0_invariant_mass.rut
+;;;
+;;; Plot K0s → π+π- and Λ/Λ̄ → pπ∓ invariant mass spectra from O2v0_002
+;;; using proper topological V0 selection.
+;;;
+;;; Topological cuts (applied via col-dca-v0 + col-cpa):
+;;;   dca_daughters < 1.0 cm   — daughters must actually cross
+;;;   v0_radius     > 5.0 cm   — decay vertex displaced from beam
+;;;   cos(PA)       > 0.995    — V0 momentum points back to primary vertex
+;;;
+;;; Run:
+;;;   (load "examples/v0_invariant_mass.rut")
+
+(load stdlib.rut)
+
+(def {aod-path} "/Users/ktf/src/O2/AO2D.root")
+(def {trk-tree} "O2track_iu")
+(def {v0-tree}  "O2v0_002")
+(def {col-tree} "O2collision_001")
+
+;;; Solenoid field [T]. ALICE Run 3 nominal: +0.5 or -0.5 depending on fill.
+(def {bz} 0.5)
+
+;;; ── Collect timeframe names ───────────────────────────────────────────────
+(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+(print "Timeframes:" (len tf-names))
+
+;;; ── JIT functions ─────────────────────────────────────────────────────────
+;;; Daughter momentum components
+(def {px-fn} (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})
+     (::Cos TMath (+ alpha (::ASin TMath snp))))})))
+(def {py-fn} (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))})
+     (::Sin TMath (+ alpha (::ASin TMath snp))))})))
+(def {pz-fn} (jit-fn float (\{{float s1pt} {float tgl}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (::Abs TMath s1pt))}) tgl)})))
+
+;;; V0 momentum = sum of daughters
+(def {add-fn} (jit-fn float (\{{float a} {float b}} {(+ a b)})))
+
+;;; V0 transverse radius = sqrt(x² + y²)
+(def {radius-fn} (jit-fn float (\{{float x} {float y}}
+  {(::Sqrt TMath (+ (* x x) (* y y)))})))
+
+;;; Topological cut functions (return 1.0 if cut passes, 0.0 otherwise)
+(def {dca-cut-fn}    (jit-fn float (\{{float dca}} {(if (< dca 1.0)  {1.} {0.})})))
+(def {radius-cut-fn} (jit-fn float (\{{float r}}   {(if (> r 5.0)   {1.} {0.})})))
+(def {cpa-cut-fn}    (jit-fn float (\{{float c}}   {(if (> c 0.995) {1.} {0.})})))
+
+;;; V0 type bit checks (only values 1 and 7 observed in this dataset)
+(def {k0s-type-fn} (jit-fn float (\{{float v}}
+  {(if (== v 1.) {1.} {(if (== v 7.) {1.} {0.})})})))
+(def {lam-type-fn} (jit-fn float (\{{float v}}
+  {(if (== v 7.) {1.} {0.})})))
+
+;;; Armenteros-Podolanski selection
+;;; Λ:  α > 0.4 (proton carries most momentum), q_T < 0.12 GeV/c
+;;; Λ̄:  α < -0.4 (anti-proton carries most momentum), q_T < 0.12 GeV/c
+;;; K0s: q_T > 0.07 GeV/c AND |α| < 0.7 (symmetric ellipse; removes Λ/Λ̄ arms)
+(def {lam-arm-fn}  (jit-fn float (\{{float a} {float q}}
+  {(if (> a 0.4) {(if (< q 0.12) {1.} {0.})} {0.})})))
+(def {alam-arm-fn} (jit-fn float (\{{float a} {float q}}
+  {(if (< a -0.4) {(if (< q 0.12) {1.} {0.})} {0.})})))
+(def {k0s-arm-fn}  (jit-fn float (\{{float a} {float q}}
+  {(if (> q 0.07) {(if (< (::Abs TMath a) 0.7) {1.} {0.})} {0.})})))
+
+(def {mul-fn} (jit-fn float (\{{float a} {float b}} {(* a b)})))
+
+(def {px-ptr}          (jitfn-ptr px-fn))
+(def {py-ptr}          (jitfn-ptr py-fn))
+(def {pz-ptr}          (jitfn-ptr pz-fn))
+(def {add-ptr}         (jitfn-ptr add-fn))
+(def {radius-ptr}      (jitfn-ptr radius-fn))
+(def {dca-cut-ptr}     (jitfn-ptr dca-cut-fn))
+(def {radius-cut-ptr}  (jitfn-ptr radius-cut-fn))
+(def {cpa-cut-ptr}     (jitfn-ptr cpa-cut-fn))
+(def {k0s-type-ptr}    (jitfn-ptr k0s-type-fn))
+(def {lam-type-ptr}    (jitfn-ptr lam-type-fn))
+(def {lam-arm-ptr}     (jitfn-ptr lam-arm-fn))
+(def {alam-arm-ptr}    (jitfn-ptr alam-arm-fn))
+(def {k0s-arm-ptr}     (jitfn-ptr k0s-arm-fn))
+(def {mul-ptr}         (jitfn-ptr mul-fn))
+
+;;; ── Mass hypotheses (GeV/c²) ─────────────────────────────────────────────
+(def {m-pi} 0.13957)
+(def {m-pr} 0.93827)
+
+;;; ── Pre-create per-TF histograms ─────────────────────────────────────────
+(def {tf-hk0s} (map (\ {tf} {doto (new TH1F (concat "k0s_" tf) "" 200 0.43 0.565) {SetDirectory 0}}) tf-names))
+(def {tf-hlam} (map (\ {tf} {doto (new TH1F (concat "lam_" tf) "" 160 1.08 1.16)  {SetDirectory 0}}) tf-names))
+(def {tf-harm} (map (\ {tf} {doto (new TH2F (concat "arm_" tf) "" 100 -1. 1. 100 0. 0.25) {SetDirectory 0}}) tf-names))
+
+(def {tf-idx} (do
+  (= {acc} {})
+  (dotimes {i} (len tf-names) {= {acc} (join acc (list i))})
+  acc))
+
+;;; ── Parallel fill ────────────────────────────────────────────────────────
+(def {sw} (doto (new TStopwatch) {Start}))
+
+(pmap (\ {i} {
+  do
+  (= {tf}   (nth i tf-names))
+  (= {hk0s} (nth i tf-hk0s))
+  (= {hlam} (nth i tf-hlam))
+  (= {harm} (nth i tf-harm))
+
+  ;;; V0 table branches
+  (= {pos-idx}   (load-branch aod-path (concat tf "/" v0-tree)  "fIndexTracks_Pos"))
+  (= {neg-idx}   (load-branch aod-path (concat tf "/" v0-tree)  "fIndexTracks_Neg"))
+  (= {v0-colidx} (load-branch aod-path (concat tf "/" v0-tree)  "fIndexCollisions"))
+  (= {vtype-c}   (load-branch aod-path (concat tf "/" v0-tree)  "fV0Type"))
+
+  ;;; Track parameter branches (7 per track)
+  (= {s1pt-c}  (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {alpha-c} (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
+  (= {snp-c}   (load-branch aod-path (concat tf "/" trk-tree) "fSnp"))
+  (= {tgl-c}   (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {x-c}     (load-branch aod-path (concat tf "/" trk-tree) "fX"))
+  (= {y-c}     (load-branch aod-path (concat tf "/" trk-tree) "fY"))
+  (= {z-c}     (load-branch aod-path (concat tf "/" trk-tree) "fZ"))
+
+  ;;; Primary vertex positions (per collision)
+  (= {pv-x-c}  (load-branch aod-path (concat tf "/" col-tree) "fPosX"))
+  (= {pv-y-c}  (load-branch aod-path (concat tf "/" col-tree) "fPosY"))
+  (= {pv-z-c}  (load-branch aod-path (concat tf "/" col-tree) "fPosZ"))
+
+  ;;; Gather track params for each daughter
+  (= {pos-s1pt}  (col-gather s1pt-c  pos-idx))
+  (= {pos-alpha} (col-gather alpha-c pos-idx))
+  (= {pos-snp}   (col-gather snp-c   pos-idx))
+  (= {pos-tgl}   (col-gather tgl-c   pos-idx))
+  (= {pos-x}     (col-gather x-c     pos-idx))
+  (= {pos-y}     (col-gather y-c     pos-idx))
+  (= {pos-z}     (col-gather z-c     pos-idx))
+  (= {neg-s1pt}  (col-gather s1pt-c  neg-idx))
+  (= {neg-alpha} (col-gather alpha-c neg-idx))
+  (= {neg-snp}   (col-gather snp-c   neg-idx))
+  (= {neg-tgl}   (col-gather tgl-c   neg-idx))
+  (= {neg-x}     (col-gather x-c     neg-idx))
+  (= {neg-y}     (col-gather y-c     neg-idx))
+  (= {neg-z}     (col-gather z-c     neg-idx))
+
+  ;;; Gather PV position for each V0 via its collision index
+  (= {pv-x} (col-gather pv-x-c v0-colidx))
+  (= {pv-y} (col-gather pv-y-c v0-colidx))
+  (= {pv-z} (col-gather pv-z-c v0-colidx))
+
+  ;;; Compute V0 geometry: decay vertex + DCA between daughters
+  (= {v0geo}   (col-dca-v0
+    pos-s1pt pos-alpha pos-snp pos-tgl pos-x pos-y pos-z
+    neg-s1pt neg-alpha neg-snp neg-tgl neg-x neg-y neg-z
+    bz))
+  (= {vtx-x}   (nth 0 v0geo))
+  (= {vtx-y}   (nth 1 v0geo))
+  (= {vtx-z}   (nth 2 v0geo))
+  (= {dca-dau} (nth 3 v0geo))
+
+  ;;; Daughter momenta and V0 momentum sum
+  (= {pos-px} (col-zip-ptr px-ptr pos-s1pt pos-alpha pos-snp))
+  (= {pos-py} (col-zip-ptr py-ptr pos-s1pt pos-alpha pos-snp))
+  (= {pos-pz} (col-zip-ptr pz-ptr pos-s1pt pos-tgl))
+  (= {neg-px} (col-zip-ptr px-ptr neg-s1pt neg-alpha neg-snp))
+  (= {neg-py} (col-zip-ptr py-ptr neg-s1pt neg-alpha neg-snp))
+  (= {neg-pz} (col-zip-ptr pz-ptr neg-s1pt neg-tgl))
+  (= {v0-px}  (col-zip-ptr add-ptr pos-px neg-px))
+  (= {v0-py}  (col-zip-ptr add-ptr pos-py neg-py))
+  (= {v0-pz}  (col-zip-ptr add-ptr pos-pz neg-pz))
+
+  ;;; Cosine of pointing angle and transverse decay radius
+  (= {cpa}    (col-cpa vtx-x vtx-y vtx-z pv-x pv-y pv-z v0-px v0-py v0-pz))
+  (= {radius} (col-zip-ptr radius-ptr vtx-x vtx-y))
+
+  ;;; Topological selection mask
+  (= {topo-mask}
+    (col-zip-ptr mul-ptr
+      (col-zip-ptr mul-ptr
+        (col-map-ptr dca-cut-ptr    dca-dau)
+        (col-map-ptr radius-cut-ptr radius))
+      (col-map-ptr cpa-cut-ptr cpa)))
+
+  ;;; Armenteros-Podolanski variables
+  (= {arm}       (col-armenteros pos-px pos-py pos-pz neg-px neg-py neg-pz v0-px v0-py v0-pz))
+  (= {arm-alpha} (nth 0 arm))
+  (= {arm-qt}    (nth 1 arm))
+
+  ;;; Combined masks: topology × type × Armenteros
+  (= {vtype-f}   (col-cast-f32 vtype-c))
+  (= {k0s-base}  (col-zip-ptr mul-ptr topo-mask (col-map-ptr k0s-type-ptr vtype-f)))
+  (= {lam-base}  (col-zip-ptr mul-ptr topo-mask (col-map-ptr lam-type-ptr vtype-f)))
+  (= {k0s-mask}  (col-zip-ptr mul-ptr k0s-base  (col-zip-ptr k0s-arm-ptr  arm-alpha arm-qt)))
+  (= {lam-mask}  (col-zip-ptr mul-ptr lam-base  (col-zip-ptr lam-arm-ptr  arm-alpha arm-qt)))
+  (= {alam-mask} (col-zip-ptr mul-ptr lam-base  (col-zip-ptr alam-arm-ptr arm-alpha arm-qt)))
+
+  ;;; Armenteros scatter plot (topo-masked candidates only)
+  (col-fill-h2 harm (col-mask topo-mask arm-alpha) (col-mask topo-mask arm-qt))
+
+  ;;; K0s → π+π-  (Armenteros: q_T > 0.07 GeV/c, |α| < 0.7)
+  (col-fill-minv2-h1 hk0s
+    (col-mask k0s-mask pos-px) (col-mask k0s-mask pos-py) (col-mask k0s-mask pos-pz)
+    (col-mask k0s-mask neg-px) (col-mask k0s-mask neg-py) (col-mask k0s-mask neg-pz)
+    m-pi m-pi)
+
+  ;;; Λ → pπ-  (pos = proton, Armenteros: α > 0, q_T < 0.12 GeV/c)
+  (col-fill-minv2-h1 hlam
+    (col-mask lam-mask pos-px) (col-mask lam-mask pos-py) (col-mask lam-mask pos-pz)
+    (col-mask lam-mask neg-px) (col-mask lam-mask neg-py) (col-mask lam-mask neg-pz)
+    m-pr m-pi)
+
+  ;;; Λ̄ → p̄π+  (neg = anti-proton, Armenteros: α < 0, q_T < 0.12 GeV/c)
+  (col-fill-minv2-h1 hlam
+    (col-mask alam-mask pos-px) (col-mask alam-mask pos-py) (col-mask alam-mask pos-pz)
+    (col-mask alam-mask neg-px) (col-mask alam-mask neg-py) (col-mask alam-mask neg-pz)
+    m-pi m-pr)
+}) tf-idx)
+
+(.Stop sw)
+(print "Wall time:" (.RealTime sw) "s")
+
+;;; ── Merge ────────────────────────────────────────────────────────────────
+(def {h-k0s}
+  (doto (new TH1F "hk0s"
+             "K^{0}_{S} #rightarrow #pi^{+}#pi^{-};m_{#pi#pi} (GeV/c^{2});V0 candidates"
+             200 0.43 0.565)
+    {SetDirectory 0} {SetLineWidth 2}))
+(def {h-lam}
+  (doto (new TH1F "hlam"
+             "#Lambda/#bar{#Lambda} #rightarrow p#pi;m_{p#pi} (GeV/c^{2});V0 candidates"
+             160 1.08 1.16)
+    {SetDirectory 0} {SetLineWidth 2}))
+
+(map (\ {h} {.Add h-k0s h}) tf-hk0s)
+(map (\ {h} {.Add h-lam h}) tf-hlam)
+
+(def {h-arm}
+  (doto (new TH2F "harm" "Armenteros-Podolanski;#alpha;q_{T} (GeV/c)" 100 -1. 1. 100 0. 0.25)
+    {SetDirectory 0}))
+(map (\ {h} {.Add h-arm h}) tf-harm)
+
+(print "K0s selected:" (.GetEntries h-k0s) "  mean:" (.GetMean h-k0s) "GeV/c²")
+(print "Lambda selected:" (.GetEntries h-lam) "  mean:" (.GetMean h-lam) "GeV/c²")
+
+;;; ── Draw ─────────────────────────────────────────────────────────────────
+(def {cv} (doto (new TCanvas "cv0" "V0 invariant mass spectra" 1600 500)
+  {Divide 3 1}))
+(.cd cv 1) (.Draw h-k0s)
+(.cd cv 2) (.Draw h-lam)
+(.cd cv 3) (.Draw h-arm "COLZ")
