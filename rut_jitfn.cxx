@@ -80,8 +80,14 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
     return buf;
   }
   if (v->type == LVAL_FLOAT32) {
-    char buf[32]; snprintf(buf, sizeof(buf), "%.9gf", (float)v->floating);
-    return buf;
+    char buf[32]; snprintf(buf, sizeof(buf), "%.9g", (float)v->floating);
+    // C++ requires a decimal point or exponent before the 'f' suffix.
+    // "%.9g" may omit it for integer-valued floats (e.g. 1.0 → "1").
+    std::string s = buf;
+    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
+        s.find('E') == std::string::npos && s.find('n') == std::string::npos)
+      s += ".0";
+    return s + "f";
   }
   if (v->type == LVAL_STR)
     return "\"" + escape_for_cling_str(v->str) + "\"";

@@ -228,6 +228,37 @@ Use `=` (not `def`) for local bindings inside lambdas — `def` writes to the gl
 (if cond  true-value   false-value)    ; ERROR: "Got Number/Float, expected Q-Expression"
 ```
 
+## Prefer `cond` over nested `if`
+
+When dispatching on more than two cases, use `cond` instead of nested `if`. It reads like a flat list of `{condition} {result}` pairs and avoids deep indentation.
+
+```scheme
+;;; avoid: hard to scan, grows rightward
+(if (< x 0) {-1} {(if (> x 0) {1} {0})})
+
+;;; prefer: flat, each case on its own line
+(cond
+  {(< x 0)} {-1}
+  {(> x 0)} {1}
+  {else}     {0})
+```
+
+`cond` takes pairs of Q-expressions: `{test} {value}`. It returns the value of the first truthy test, or `nil` if none match. `{else}` and `{otherwise}` are always-truthy catch-alls.
+
+```scheme
+;;; grade example
+(def {grade} (\ {n} {
+  cond
+    {(>= n 90)} {"A"}
+    {(>= n 80)} {"B"}
+    {(>= n 70)} {"C"}
+    {(>= n 60)} {"D"}
+    {else}      {"F"}
+}))
+```
+
+**Note:** `cond` is a language builtin and works in any rooture context (lambdas, `do` blocks, etc.). It does **not** work inside `col-jit-fn` or `jit-fn` transpiler bodies — those require native C++ conditionals expressed as `(if ...)`.
+
 ## Common pitfalls
 
 - `doto` block methods use bare symbols without a dot: `{FillRandom gaus 1000}`, not `{.FillRandom gaus 1000}`.

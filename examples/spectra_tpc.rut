@@ -1,0 +1,274 @@
+;;; examples/spectra_tpc.rut
+;;;
+;;; TPC pT spectrum with DCA-to-PV track propagation.
+;;;
+;;; Implements O2 TrackParametrization::propagateParamToDCA as a col-jit-fn,
+;;; gathering primary-vertex coordinates per track from O2collision_001.
+;;;
+;;; The propagation is a literal translation of the O2 algorithm:
+;;;   1. rotateParam(alpha + asin(sn2))  — re-express track in frame aligned with vertex
+;;;   2. propagateParamTo(xv, b)         — advance track to vertex x position
+;;;   3. dca = (getY() - yv, getZ() - zv)
+;;; Derived closed-form (dx_propagate = -x2):
+;;;   dcaXY = y2 - x2 * dy2dx
+;;;   dcaZ  = fZ + dz - pvZ
+;;;
+;;; Cuts:
+;;;   nCls (found TPC clusters) >= 70
+;;;   |dcaXY| < 2.4 cm,  |dcaZ| < 3.2 cm
+;;;
+;;; Usage:
+;;;   (load "examples/spectra_tpc.rut")
+
+(load stdlib.rut)
+
+(def {aod-path}   "/Users/ktf/src/O2/AO2D.root")
+(def {trk-tree}   "O2track_iu")
+(def {extra-tree} "O2trackextra_002")
+(def {coll-tree}  "O2collision_001")
+(def {bz}         0.5)   ;;; solenoid field in Tesla
+
+;;; ── Collect timeframe directory names ────────────────────────────────────
+(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
+(def {tf-names} (do
+  (= {acc} {})
+  (dotimes {i} (.GetEntries tf-keys) {
+    do
+    (= {k} (.At tf-keys i))
+    (if (== (.GetClassName k) "TDirectoryFile")
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc))
+(print "Timeframes:" (len tf-names))
+
+;;; ── propagate-to-dca ─────────────────────────────────────────────────────
+;;;
+;;; Closed-form of TrackParametrization::propagateParamToDCA (O2 GPU track).
+;;; The O2 code calls rotateParam + propagateParamTo internally.  This
+;;; col-jit-fn inlines both into a single pass with no heap allocation.
+;;;
+;;; Variable correspondence with O2 propagateParamTo(xv, b):
+;;;   dx_prop  = -x2        (propagation distance from track to vertex)
+;;;   x2r_prop = crv*dx_prop (arc parameter)
+;;;   f1 = snp2, f2 = snp2 + x2r_prop = snp2 - crv*x2
+;;;   dy2dx = (f1+f2)/(r1+r2)
+;;;   dcaXY = y_after - yv2  = (y2+yv2) + dx_prop*dy2dx - yv2
+;;;         = y2 - x2*dy2dx
+;;;
+;;; B2C = -0.299792458e-3
+;;; crv = fQ1Pt * bz * B2C  (bz captured from outer env, constant-folded)
+
+(def {propagate-to-dca}
+  (col-jit-fn {float float}
+    (\{{col fX} {col fY} {col fZ} {col fSnp} {col fTgl} {col fQ1Pt} {col fAlpha}
+       {col pvX} {col pvY} {col pvZ}}
+      {do
+        ;;; signed curvature
+        (= {crv}   (* fQ1Pt bz -2.99792458e-4f))
+
+        ;;; sin/cos of sector angle; rotate PV into local (alpha) frame
+        (= {sn}    (sinf fAlpha))
+        (= {cs}    (cosf fAlpha))
+        (= {xv}    (+ (* pvX cs) (* pvY sn)))
+        (= {yv}    (- (* pvY cs) (* pvX sn)))
+
+        ;;; track position relative to PV in local frame
+        (= {x0}    (- fX xv))
+        (= {y0}    (- fY yv))
+
+        ;;; cos(phi_track)
+        (= {csp}   (sqrtf (fabsf (- 1.0f (* fSnp fSnp)))))
+
+        ;;; rotation angle to align track-vertex direction with x-axis
+        (= {denom} (+ (* crv y0) csp))
+        (= {tgfv}  (if (> (fabsf denom) 1e-8f)
+          {(/ (- fSnp (* crv x0)) denom)}
+          {0.0f}))
+
+        ;;; sin2: sin of extra rotation
+        (= {sn2}   (/ tgfv (sqrtf (+ 1.0f (* tgfv tgfv)))))
+        ;;; cs2: use sn2/tgfv (O2 formula, more stable than sqrt(1-sn2^2))
+        (= {cs2}   (if (> (fabsf tgfv) 1e-8f) {(/ sn2 tgfv)} {1.0f}))
+
+        ;;; vertex in new (doubly-rotated) frame — used for Z DCA only
+        (= {yv2}   (- (* yv cs2) (* xv sn2)))
+
+        ;;; track displacement in new frame (relative to vertex)
+        (= {x2}    (+ (* x0 cs2) (* y0 sn2)))
+        (= {y2}    (- (* y0 cs2) (* x0 sn2)))
+
+        ;;; rotated snp2 = snp*cos(extra_rotation) - csp*sin(extra_rotation)
+        (= {snp2}  (- (* fSnp cs2) (* csp sn2)))
+
+        ;;; ── Translate propagateParamTo(xv2, b) ──────────────────────────
+        ;;; dx_prop = xv2 - mX_after_rotate = -x2  (vertex is at x = mX_new + x2)
+        ;;; x2r_prop = crv * dx_prop = -crv*x2
+        (= {x2rp}  (* (- 0.0f crv) x2))   ;;; -crv*x2
+        (= {f1}    snp2)
+        (= {f2}    (+ f1 x2rp))            ;;; snp2 - crv*x2
+        (= {r1}    (sqrtf (fabsf (- 1.0f (* f1 f1)))))
+        (= {r2}    (sqrtf (fabsf (- 1.0f (* f2 f2)))))
+        (= {dy2dx} (/ (+ f1 f2) (+ r1 r2)))
+
+        ;;; XY DCA: y_after_propagation - yv2
+        ;;; y_after = (y2 + yv2) + dx_prop*dy2dx = (y2+yv2) - x2*dy2dx
+        ;;; dca[0] = y_after - yv2 = y2 - x2*dy2dx
+        (= {dcaXY} (- y2 (* x2 dy2dx)))
+
+        ;;; Z DCA: use arc or linear formula from propagateParamTo
+        (= {arcz}  (> (fabsf x2rp) 0.05f))
+        (= {arg_z} (- (* r1 f2) (* r2 f1)))
+        ;;; clamp arg_z to [-1,1] before asinf
+        (= {arg_c} (if (> arg_z  1.0f) {1.0f}
+                    {(if (< arg_z -1.0f) {-1.0f} {arg_z})}))
+        (= {rot0}  (asinf arg_c))
+        ;;; large-rotation correction (O2: if f1^2+f2^2>1 and f1*f2<0)
+        (= {rot}   (if (> (+ (* f1 f1) (* f2 f2)) 1.0f)
+                    {(if (< (* f1 f2) 0.0f)
+                      {(if (> f2 0.0f)
+                        {(- 3.14159265f rot0)}
+                        {(- (- 0.0f 3.14159265f) rot0)})}
+                      {rot0})}
+                    {rot0}))
+        ;;; arc dz = tgl/crv * rot;  use crv directly (|x2rp|>0.05 ⟹ crv≠0)
+        (= {dz_arc} (* (/ fTgl crv) rot))
+        ;;; linear dz = dx_prop * (r2 + f2*dy2dx) * tgl  (dx_prop = -x2)
+        (= {dz_lin} (* (- 0.0f x2) (+ r2 (* f2 dy2dx)) fTgl))
+        (= {dz}    (if arcz {dz_arc} {dz_lin}))
+
+        ;;; Z DCA: z_after_propagation - pvZ
+        (= {dcaZ}  (- (+ fZ dz) pvZ))
+
+        {dcaXY dcaZ}})))
+
+;;; ── Auxiliary jit-fns ────────────────────────────────────────────────────
+
+(def {pt-fn}
+  (jit-fn float (\{{float s1pt}}
+    {(if (== s1pt 0.0f) {0.0f} {(/ 1.0f (fabsf s1pt))})})))
+
+(def {sub-fn}
+  (jit-fn float (\{{float a} {float b}} {(- a b)})))
+
+(def {mul-fn}
+  (jit-fn float (\{{float a} {float b}} {(* a b)})))
+
+;;; DCA quality mask: 1.0f if |dcaXY|<2.4 AND |dcaZ|<3.2, else 0.0f
+(def {dca-ok-fn}
+  (jit-fn float (\{{float dxy} {float dz}}
+    {(if (< (fabsf dxy) 2.4f)
+      {(if (< (fabsf dz) 3.2f) {1.0f} {0.0f})}
+      {0.0f})})))
+
+;;; mutable nCls threshold
+(def {min-cls-box} (new TArrayI 1))
+(.SetAt min-cls-box 70 0)
+
+(def {cls-ok-fn}
+  (jit-fn float (\{{float ncls}}
+    {(if (>= ncls (.GetAt min-cls-box 0)) {1.0f} {0.0f})})))
+
+;;; resolve function pointers once on the main thread
+(def {pt-ptr}     (jitfn-ptr pt-fn))
+(def {sub-ptr}    (jitfn-ptr sub-fn))
+(def {mul-ptr}    (jitfn-ptr mul-fn))
+(def {dca-ok-ptr} (jitfn-ptr dca-ok-fn))
+(def {cls-ok-ptr} (jitfn-ptr cls-ok-fn))
+
+;;; ── Histograms — pre-created on main thread ──────────────────────────────
+
+;;; Per-TF histograms: reset and filled each pass
+(def {tf-hpt}  (map (\ {tf} {doto (new TH1F (concat "pt_"  tf) "" 50  0.  5.) {SetDirectory 0}}) tf-names))
+(def {tf-hdxy} (map (\ {tf} {doto (new TH1F (concat "dxy_" tf) "" 100 -5. 5.) {SetDirectory 0}}) tf-names))
+(def {tf-hdz}  (map (\ {tf} {doto (new TH1F (concat "dz_"  tf) "" 100 -5. 5.) {SetDirectory 0}}) tf-names))
+
+;;; Global merged histograms
+(def {h-pt}
+  (doto (new TH1F "hpt" ";p_{T} (GeV/c);Tracks" 50 0. 5.) {SetDirectory 0}))
+(def {h-dcaxy}
+  (doto (new TH1F "hdcaxy" ";DCA_{XY} (cm);Tracks" 100 -5. 5.) {SetDirectory 0}))
+(def {h-dcaz}
+  (doto (new TH1F "hdcaz" ";DCA_{Z} (cm);Tracks" 100 -5. 5.) {SetDirectory 0}))
+
+;;; ── Canvas: three pads ───────────────────────────────────────────────────
+(def {c}  (new TCanvas "c_spectra" "TPC p_{T} spectrum" 1200 400))
+(def {p1} (doto (new TPad "p1" "" 0.    0. 0.333 1.) {SetLogy} {Draw}))
+(def {p2} (doto (new TPad "p2" "" 0.333 0. 0.667 1.) {Draw}))
+(def {p3} (doto (new TPad "p3" "" 0.667 0. 1.    1.) {Draw}))
+
+;;; ── Process all timeframes ────────────────────────────────────────────────
+(def {sw} (doto (new TStopwatch) {Start}))
+
+(map (\ {i} {
+  do
+  (= {tf}   (nth i tf-names))
+  (= {hpt}  (nth i tf-hpt))
+  (= {hdxy} (nth i tf-hdxy))
+  (= {hdz}  (nth i tf-hdz))
+
+  ;;; track parameters in local alpha frame
+  (= {fx-c}   (load-branch aod-path (concat tf "/" trk-tree) "fX"))
+  (= {fy-c}   (load-branch aod-path (concat tf "/" trk-tree) "fY"))
+  (= {fz-c}   (load-branch aod-path (concat tf "/" trk-tree) "fZ"))
+  (= {snp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fSnp"))
+  (= {tgl-c}  (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {q1pt-c} (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {alp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
+  (= {cidx-c} (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+
+  ;;; extra: findable and (findable - found) → nCls = found clusters
+  (= {find-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+  (= {fmin-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+
+  ;;; collision vertex
+  (= {pvxc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosX"))
+  (= {pvyc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosY"))
+  (= {pvzc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosZ"))
+
+  ;;; gather PV position to per-track using fIndexCollisions
+  (= {pvX-c}  (col-gather pvxc-c cidx-c))
+  (= {pvY-c}  (col-gather pvyc-c cidx-c))
+  (= {pvZ-c}  (col-gather pvzc-c cidx-c))
+
+  ;;; compute DCA → {dcaXY, dcaZ}
+  (= {dca}     (propagate-to-dca
+                  fx-c fy-c fz-c snp-c tgl-c q1pt-c alp-c
+                  pvX-c pvY-c pvZ-c))
+  (= {dcaxy-c} (nth 0 dca))
+  (= {dcaz-c}  (nth 1 dca))
+
+  ;;; nCls = fTPCNClsFindable - fTPCNClsFindableMinusFound
+  (= {ncls-c} (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {pt-c}   (col-map-ptr pt-ptr q1pt-c))
+
+  ;;; quality mask: nCls AND DCA cuts combined
+  (= {m-cls}  (col-map-ptr cls-ok-ptr ncls-c))
+  (= {m-dca}  (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c))
+  (= {mask}   (col-zip-ptr mul-ptr m-cls m-dca))
+
+  ;;; fill histograms
+  (col-fill-h1 hpt  (col-mask mask pt-c))
+  (col-fill-h1 hdxy (col-mask mask dcaxy-c))
+  (col-fill-h1 hdz  (col-mask mask dcaz-c))
+}) (do
+  (= {acc} {})
+  (dotimes {i} (len tf-names) {= {acc} (join acc (list i))})
+  acc))
+
+(.Stop sw)
+
+;;; ── Merge per-TF histograms ──────────────────────────────────────────────
+(map (\ {h} {.Add h-pt    h}) tf-hpt)
+(map (\ {h} {.Add h-dcaxy h}) tf-hdxy)
+(map (\ {h} {.Add h-dcaz  h}) tf-hdz)
+
+(def {n-sel}  (.GetEntries h-pt))
+(def {wall-s} (.RealTime sw))
+(print "Selected tracks:" n-sel "  wall time:" wall-s "s")
+
+;;; ── Draw ─────────────────────────────────────────────────────────────────
+(.cd p1) (.Draw h-pt)
+(.cd p2) (.Draw h-dcaxy)
+(.cd p3) (.Draw h-dcaz)
+(.Update c) (.RaiseWindow c)
