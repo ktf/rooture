@@ -1,0 +1,142 @@
+;;; examples/pid_tpc.rut
+;;;
+;;; TPC PID via ALEPH Bethe-Bloch parameterization.
+;;; Computes per-track species masks from fTPCSignal and total momentum.
+;;;
+;;; Supported species: El  Mu  Pi  Ka  Pr  De
+;;; Index in pid-masks list:  0   1   2   3   4   5
+;;;
+;;; Parameters (override before loading):
+;;;   bb0..bb4   — ALEPH BB shape params (defaults scaled for Run2 a.u., MIP~50)
+;;;   bb-res     — relative resolution  (default 0.07 = 7%)
+;;;   nsigma-max — |nσ| cut            (default 2.0)
+;;;
+;;; Usage:
+;;;   (load "examples/pid_tpc.rut")
+;;;   ; per time-frame:
+;;;   (= {pmasks} (pid-masks sig-c p-c))
+;;;   (col-fill-h1 h-pi (col-mask (col-zip-ptr mul-ptr (nth 2 pmasks) mask) pt-c))
+
+;;; ── BB parameters ────────────────────────────────────────────────────────
+;;; O2Physics ALEPH defaults scaled so MIP(pion) ~ 50 Run2 a.u.
+(if (== bb0 "bb0") {def {bb0} 1.60491}      {})
+(if (== bb1 "bb1") {def {bb1} 19.9768}      {})
+(if (== bb2 "bb2") {def {bb2} 2.52666e-16}  {})
+(if (== bb3 "bb3") {def {bb3} 2.72123}      {})
+(if (== bb4 "bb4") {def {bb4} 6.08092}      {})
+(if (== bb-res     "bb-res")     {def {bb-res}     0.07} {})
+(if (== nsigma-max "nsigma-max") {def {nsigma-max} 2.0}  {})
+
+;;; ── Particle masses (GeV/c^2) as globals ─────────────────────────────────
+;;; Declared as globals so jit-fn constant-folding picks them up.
+(def {pid-m-el} 0.000511)
+(def {pid-m-mu} 0.105658)
+(def {pid-m-pi} 0.139570)
+(def {pid-m-ka} 0.493677)
+(def {pid-m-pr} 0.938272)
+(def {pid-m-de} 1.875613)
+
+;;; ── BB nσ jit-fn template ────────────────────────────────────────────────
+;;; Each species gets its own jit-fn with its mass constant-folded.
+;;; Structure: all assignments at the top do-level; if branches are
+;;; single expressions (no do-blocks), satisfying the C++ ternary constraint.
+
+(def {pid-el-fn}
+  (jit-fn float (\{{float sig} {float ptot}}
+    {do
+      (= {bg}     (/ ptot pid-m-el))
+      (= {safe}   (> bg 0.05))
+      (= {bg_s}   (if safe {bg}   {1.0}))
+      (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}     (pow beta bb3))
+      (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+(def {pid-mu-fn}
+  (jit-fn float (\{{float sig} {float ptot}}
+    {do
+      (= {bg}     (/ ptot pid-m-mu))
+      (= {safe}   (> bg 0.05))
+      (= {bg_s}   (if safe {bg}   {1.0}))
+      (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}     (pow beta bb3))
+      (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+(def {pid-pi-fn}
+  (jit-fn float (\{{float sig} {float ptot}}
+    {do
+      (= {bg}     (/ ptot pid-m-pi))
+      (= {safe}   (> bg 0.05))
+      (= {bg_s}   (if safe {bg}   {1.0}))
+      (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}     (pow beta bb3))
+      (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+(def {pid-ka-fn}
+  (jit-fn float (\{{float sig} {float ptot}}
+    {do
+      (= {bg}     (/ ptot pid-m-ka))
+      (= {safe}   (> bg 0.05))
+      (= {bg_s}   (if safe {bg}   {1.0}))
+      (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}     (pow beta bb3))
+      (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+(def {pid-pr-fn}
+  (jit-fn float (\{{float sig} {float ptot}}
+    {do
+      (= {bg}     (/ ptot pid-m-pr))
+      (= {safe}   (> bg 0.05))
+      (= {bg_s}   (if safe {bg}   {1.0}))
+      (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}     (pow beta bb3))
+      (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+(def {pid-de-fn}
+  (jit-fn float (\{{float sig} {float ptot}}
+    {do
+      (= {bg}     (/ ptot pid-m-de))
+      (= {safe}   (> bg 0.05))
+      (= {bg_s}   (if safe {bg}   {1.0}))
+      (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}     (pow beta bb3))
+      (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+;;; ── Function pointers ────────────────────────────────────────────────────
+(def {pid-el-ptr} (jitfn-ptr pid-el-fn))
+(def {pid-mu-ptr} (jitfn-ptr pid-mu-fn))
+(def {pid-pi-ptr} (jitfn-ptr pid-pi-fn))
+(def {pid-ka-ptr} (jitfn-ptr pid-ka-fn))
+(def {pid-pr-ptr} (jitfn-ptr pid-pr-fn))
+(def {pid-de-ptr} (jitfn-ptr pid-de-fn))
+
+;;; ── pid-masks ─────────────────────────────────────────────────────────────
+;;; (pid-masks sig-c p-c) -> list of 6 float32 masks: {el mu pi ka pr de}
+(def {pid-masks} (\{sig-c p-c}
+  {(list
+    (col-zip-ptr pid-el-ptr sig-c p-c)
+    (col-zip-ptr pid-mu-ptr sig-c p-c)
+    (col-zip-ptr pid-pi-ptr sig-c p-c)
+    (col-zip-ptr pid-ka-ptr sig-c p-c)
+    (col-zip-ptr pid-pr-ptr sig-c p-c)
+    (col-zip-ptr pid-de-ptr sig-c p-c))}))
+
+(print "pid_tpc.rut loaded."
+  "bb0=" bb0 "bb-res=" bb-res "nsigma-max=" nsigma-max)

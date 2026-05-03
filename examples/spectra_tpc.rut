@@ -45,6 +45,7 @@
 (def {tvx-bit}   -1)      ;;; -1 = skip TVX (fTriggerMask not filled in all datasets)
 (def {pvz-cut}   10.0)
 (load examples/eventsel.rut)
+(load examples/pid_tpc.rut)
 
 ;;; ── Collect {path tf-name} pairs across all input files ─────────────────
 (def {tf-pairs} (do
@@ -231,6 +232,17 @@
 (def {h-vz}
   (doto (new TH1F "hvz" ";Vertex Z (cm);Collisions" 100 -20. 20.) {SetDirectory 0}))
 
+;;; Per-species histograms (El Mu Pi Ka Pr De)
+(def {species-names} (list "El" "Mu" "Pi" "Ka" "Pr" "De"))
+(def {h-pt-species} (map (\ {s} {
+  doto (new TH1F (concat "hpt_" s) (concat s ";p_{T} (GeV/c);Tracks") 100 0. 20.)
+    {SetDirectory 0}
+}) species-names))
+(def {h-p-species}  (map (\ {s} {
+  doto (new TH1F (concat "hp_" s) (concat s ";p (GeV/c);Tracks") 100 0. 20.)
+    {SetDirectory 0}
+}) species-names))
+
 ;;; ── Canvas: 5 pads ───────────────────────────────────────────────────────
 (def {c} (new TCanvas "c_spectra" "TPC spectra" 1800 400))
 (def {p1} (doto (new TPad "p1" "" 0.0  0. 0.2 1.) {SetLogy} {Draw}))
@@ -262,9 +274,10 @@
   (= {alp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
   (= {cidx-c} (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
 
-  ;;; extra: findable and (findable - found) → nCls = found clusters
+  ;;; extra: findable, (findable-found), and TPC signal
   (= {find-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
   (= {fmin-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+  (= {sig-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCSignal"))
 
   ;;; collision vertex
   (= {pvxc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosX"))
@@ -307,6 +320,27 @@
   (col-fill-h1 hp   (col-mask mask p-c))
   (col-fill-h1 hdxy (col-mask mask dcaxy-c))
   (col-fill-h1 hdz  (col-mask mask dcaz-c))
+
+  ;;; per-species: compute pid masks then combine with quality mask
+  (= {pmasks} (pid-masks sig-c p-c))
+  (= {msk-el} (col-zip-ptr mul-ptr mask (nth 0 pmasks)))
+  (= {msk-mu} (col-zip-ptr mul-ptr mask (nth 1 pmasks)))
+  (= {msk-pi} (col-zip-ptr mul-ptr mask (nth 2 pmasks)))
+  (= {msk-ka} (col-zip-ptr mul-ptr mask (nth 3 pmasks)))
+  (= {msk-pr} (col-zip-ptr mul-ptr mask (nth 4 pmasks)))
+  (= {msk-de} (col-zip-ptr mul-ptr mask (nth 5 pmasks)))
+  (col-fill-h1 (nth 0 h-pt-species) (col-mask msk-el pt-c))
+  (col-fill-h1 (nth 1 h-pt-species) (col-mask msk-mu pt-c))
+  (col-fill-h1 (nth 2 h-pt-species) (col-mask msk-pi pt-c))
+  (col-fill-h1 (nth 3 h-pt-species) (col-mask msk-ka pt-c))
+  (col-fill-h1 (nth 4 h-pt-species) (col-mask msk-pr pt-c))
+  (col-fill-h1 (nth 5 h-pt-species) (col-mask msk-de pt-c))
+  (col-fill-h1 (nth 0 h-p-species)  (col-mask msk-el p-c))
+  (col-fill-h1 (nth 1 h-p-species)  (col-mask msk-mu p-c))
+  (col-fill-h1 (nth 2 h-p-species)  (col-mask msk-pi p-c))
+  (col-fill-h1 (nth 3 h-p-species)  (col-mask msk-ka p-c))
+  (col-fill-h1 (nth 4 h-p-species)  (col-mask msk-pr p-c))
+  (col-fill-h1 (nth 5 h-p-species)  (col-mask msk-de p-c))
 }) (do
   (= {acc} {})
   (dotimes {i} (len tf-pairs) {= {acc} (join acc (list i))})
