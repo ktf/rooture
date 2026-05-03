@@ -216,6 +216,7 @@ TFile* rut_open_file(const char* path);
 // ---------------------------------------------------------------------------
 enum ColDtype {
   COL_FLOAT32, COL_FLOAT64,
+  COL_INT64,   COL_UINT64,
   COL_INT32,   COL_UINT32,
   COL_INT16,   COL_UINT16,
   COL_INT8,    COL_UINT8,

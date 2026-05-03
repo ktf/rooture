@@ -155,6 +155,7 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   if (strcmp(s, "band") == 0) binop = "&";
   if (strcmp(s, "bor")  == 0) binop = "|";
   if (strcmp(s, "bxor") == 0) binop = "^";
+  if (strcmp(s, "rem")  == 0) binop = "%";
   if (binop && v->count >= 3) {
     std::string result = rut_to_cpp_expr(v->cell[1], ctx);
     for (int i = 2; i < v->count; i++)

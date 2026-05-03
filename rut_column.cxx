@@ -45,7 +45,9 @@ static inline void* col_alloc(size_t n_bytes) {
 // ---------------------------------------------------------------------------
 static size_t col_dtype_size(int d) {
   switch (d) {
-    case COL_FLOAT64:              return 8;
+    case COL_FLOAT64:
+    case COL_INT64:
+    case COL_UINT64:               return 8;
     case COL_FLOAT32:
     case COL_INT32:
     case COL_UINT32:               return 4;
@@ -62,6 +64,8 @@ static const char* col_dtype_name(int d) {
   switch (d) {
     case COL_FLOAT32: return "float";
     case COL_FLOAT64: return "double";
+    case COL_INT64:   return "long long";
+    case COL_UINT64:  return "unsigned long long";
     case COL_INT32:   return "int";
     case COL_UINT32:  return "unsigned int";
     case COL_INT16:   return "short";
@@ -73,10 +77,30 @@ static const char* col_dtype_name(int d) {
   }
 }
 
+// Parse a C type name string to a ColDtype, returns -1 if unknown.
+static int col_dtype_from_name(const char* name) {
+  if (strcmp(name, "float")              == 0) return COL_FLOAT32;
+  if (strcmp(name, "double")             == 0) return COL_FLOAT64;
+  if (strcmp(name, "long long")          == 0) return COL_INT64;
+  if (strcmp(name, "unsigned long long") == 0) return COL_UINT64;
+  if (strcmp(name, "ULong64_t")          == 0) return COL_UINT64;
+  if (strcmp(name, "Long64_t")           == 0) return COL_INT64;
+  if (strcmp(name, "int")                == 0) return COL_INT32;
+  if (strcmp(name, "unsigned int")       == 0) return COL_UINT32;
+  if (strcmp(name, "short")              == 0) return COL_INT16;
+  if (strcmp(name, "unsigned short")     == 0) return COL_UINT16;
+  if (strcmp(name, "char")               == 0) return COL_INT8;
+  if (strcmp(name, "unsigned char")      == 0) return COL_UINT8;
+  if (strcmp(name, "bool")               == 0) return COL_BOOL;
+  return -1;
+}
+
 static int branch_dtype(TBranch* br) {
   TString t = br->GetTitle();
   if (t.EndsWith("/F")) return COL_FLOAT32;
   if (t.EndsWith("/D")) return COL_FLOAT64;
+  if (t.EndsWith("/L")) return COL_INT64;
+  if (t.EndsWith("/l")) return COL_UINT64;
   if (t.EndsWith("/I")) return COL_INT32;
   if (t.EndsWith("/i")) return COL_UINT32;
   if (t.EndsWith("/S")) return COL_INT16;
@@ -266,11 +290,13 @@ static lval* builtin_jitfn_ptr(lenv* /*e*/, lval* a) {
 // These are called by both the jitfn variants (which resolve fp first) and
 // the ptr variants (which receive fp as a pre-resolved LVAL_NUM).
 // ---------------------------------------------------------------------------
-static lval* col_map_impl(void* fp, RutColumnPtr& in_col) {
-  size_t n     = in_col->n;
-  int    dtype = in_col->dtype;
-  size_t esz   = col_dtype_size(dtype);
-  void*  out   = col_alloc(n * esz);
+// out_dtype == -1 means "same as input dtype"
+static lval* col_map_impl(void* fp, RutColumnPtr& in_col, int out_dtype = -1) {
+  size_t n      = in_col->n;
+  int    idtype = in_col->dtype;
+  int    odtype = (out_dtype < 0) ? idtype : out_dtype;
+  size_t oesz   = col_dtype_size(odtype);
+  void*  out    = col_alloc(n ? n * oesz : oesz);
   if (!out) return lval_err("col-map: out of memory");
 
 #define TYPED_MAP(Tin, Tout) do { \
@@ -279,21 +305,38 @@ static lval* col_map_impl(void* fp, RutColumnPtr& in_col) {
     Tout* out2 = (Tout*)out; \
     for (size_t i = 0; i < n; i++) out2[i] = f(in[i]); \
   } while (0)
-  switch (dtype) {
-    case COL_FLOAT32: TYPED_MAP(float,    float);    break;
-    case COL_FLOAT64: TYPED_MAP(double,   double);   break;
-    case COL_INT32:   TYPED_MAP(int32_t,  int32_t);  break;
-    case COL_UINT32:  TYPED_MAP(uint32_t, uint32_t); break;
-    case COL_INT16:   TYPED_MAP(int16_t,  int16_t);  break;
-    case COL_UINT16:  TYPED_MAP(uint16_t, uint16_t); break;
-    case COL_INT8:    TYPED_MAP(int8_t,   int8_t);   break;
-    case COL_UINT8:   TYPED_MAP(uint8_t,  uint8_t);  break;
-    case COL_BOOL:    TYPED_MAP(char,     char);      break;
-    default: free(out); return lval_err("col-map: unsupported dtype");
+#define CROSS_DISPATCH(Tin) \
+    switch (odtype) { \
+      case COL_FLOAT32: TYPED_MAP(Tin, float);    break; \
+      case COL_FLOAT64: TYPED_MAP(Tin, double);   break; \
+      case COL_INT64:   TYPED_MAP(Tin, int64_t);  break; \
+      case COL_UINT64:  TYPED_MAP(Tin, uint64_t); break; \
+      case COL_INT32:   TYPED_MAP(Tin, int32_t);  break; \
+      case COL_UINT32:  TYPED_MAP(Tin, uint32_t); break; \
+      case COL_INT16:   TYPED_MAP(Tin, int16_t);  break; \
+      case COL_UINT16:  TYPED_MAP(Tin, uint16_t); break; \
+      case COL_INT8:    TYPED_MAP(Tin, int8_t);   break; \
+      case COL_UINT8:   TYPED_MAP(Tin, uint8_t);  break; \
+      default: free(out); return lval_err("col-map: unsupported output dtype"); \
+    }
+  switch (idtype) {
+    case COL_FLOAT32: CROSS_DISPATCH(float);    break;
+    case COL_FLOAT64: CROSS_DISPATCH(double);   break;
+    case COL_INT64:   CROSS_DISPATCH(int64_t);  break;
+    case COL_UINT64:  CROSS_DISPATCH(uint64_t); break;
+    case COL_INT32:   CROSS_DISPATCH(int32_t);  break;
+    case COL_UINT32:  CROSS_DISPATCH(uint32_t); break;
+    case COL_INT16:   CROSS_DISPATCH(int16_t);  break;
+    case COL_UINT16:  CROSS_DISPATCH(uint16_t); break;
+    case COL_INT8:    CROSS_DISPATCH(int8_t);   break;
+    case COL_UINT8:   CROSS_DISPATCH(uint8_t);  break;
+    case COL_BOOL:    CROSS_DISPATCH(char);      break;
+    default: free(out); return lval_err("col-map: unsupported input dtype");
   }
+#undef CROSS_DISPATCH
 #undef TYPED_MAP
   auto c = std::make_shared<RutColumn>();
-  c->dtype = dtype; c->n = n; c->data = out;
+  c->dtype = odtype; c->n = n; c->data = out;
   return lval_column(std::move(c));
 }
 
@@ -314,6 +357,8 @@ static lval* col_filter_impl(void* fp, RutColumnPtr& in_col) {
   switch (dtype) {
     case COL_FLOAT32: TYPED_FILTER(float);    break;
     case COL_FLOAT64: TYPED_FILTER(double);   break;
+    case COL_INT64:   TYPED_FILTER(int64_t);  break;
+    case COL_UINT64:  TYPED_FILTER(uint64_t); break;
     case COL_INT32:   TYPED_FILTER(int32_t);  break;
     case COL_UINT32:  TYPED_FILTER(uint32_t); break;
     case COL_INT16:   TYPED_FILTER(int16_t);  break;
@@ -347,6 +392,8 @@ static lval* col_reduce_impl(void* fp, lval* init, RutColumnPtr& col) {
   switch (dtype) {
     case COL_FLOAT32: TYPED_REDUCE(float);    break;
     case COL_FLOAT64: TYPED_REDUCE(double);   break;
+    case COL_INT64:   TYPED_REDUCE(int64_t);  break;
+    case COL_UINT64:  TYPED_REDUCE(uint64_t); break;
     case COL_INT32:   TYPED_REDUCE(int32_t);  break;
     case COL_UINT32:  TYPED_REDUCE(uint32_t); break;
     case COL_INT16:   TYPED_REDUCE(int16_t);  break;
@@ -387,6 +434,8 @@ static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx) {
   switch (dtype) {
     case COL_FLOAT32: DISPATCH_ZIP(float);    break;
     case COL_FLOAT64: DISPATCH_ZIP(double);   break;
+    case COL_INT64:   DISPATCH_ZIP(int64_t);  break;
+    case COL_UINT64:  DISPATCH_ZIP(uint64_t); break;
     case COL_INT32:   DISPATCH_ZIP(int32_t);  break;
     case COL_UINT32:  DISPATCH_ZIP(uint32_t); break;
     case COL_INT16:   DISPATCH_ZIP(int16_t);  break;
@@ -442,6 +491,8 @@ static lval* builtin_col_ref(lenv* /*e*/, lval* a) {
   switch (col->dtype) {
     case COL_FLOAT32: r = lval_floating(((float*)col->data)[idx]);         break;
     case COL_FLOAT64: r = lval_floating(((double*)col->data)[idx]);        break;
+    case COL_INT64:   r = lval_num((long)((int64_t*)col->data)[idx]);      break;
+    case COL_UINT64:  r = lval_num((long)((uint64_t*)col->data)[idx]);     break;
     case COL_INT32:   r = lval_num(((int32_t*)col->data)[idx]);            break;
     case COL_UINT32:  r = lval_num((long)((uint32_t*)col->data)[idx]);     break;
     case COL_INT16:   r = lval_num(((int16_t*)col->data)[idx]);            break;
@@ -471,15 +522,17 @@ static lval* builtin_col_to_list(lenv* /*e*/, lval* a) {
   for (size_t i = 0; i < lim; i++) {
     lval* elem;
     switch (col->dtype) {
-      case COL_FLOAT32: elem = lval_floating(((float*)col->data)[i]);  break;
-      case COL_FLOAT64: elem = lval_floating(((double*)col->data)[i]); break;
-      case COL_INT32:   elem = lval_num(((int32_t*)col->data)[i]);     break;
-      case COL_UINT32:  elem = lval_num((long)((uint32_t*)col->data)[i]); break;
-      case COL_INT16:   elem = lval_num(((int16_t*)col->data)[i]);     break;
-      case COL_UINT16:  elem = lval_num((long)((uint16_t*)col->data)[i]); break;
-      case COL_INT8:    elem = lval_num(((int8_t*)col->data)[i]);      break;
-      case COL_UINT8:   elem = lval_num((long)((uint8_t*)col->data)[i]); break;
-      case COL_BOOL:    elem = lval_num(((char*)col->data)[i] ? 1 : 0); break;
+      case COL_FLOAT32: elem = lval_floating(((float*)col->data)[i]);      break;
+      case COL_FLOAT64: elem = lval_floating(((double*)col->data)[i]);     break;
+      case COL_INT64:   elem = lval_num((long)((int64_t*)col->data)[i]);   break;
+      case COL_UINT64:  elem = lval_num((long)((uint64_t*)col->data)[i]);  break;
+      case COL_INT32:   elem = lval_num(((int32_t*)col->data)[i]);         break;
+      case COL_UINT32:  elem = lval_num((long)((uint32_t*)col->data)[i]);  break;
+      case COL_INT16:   elem = lval_num(((int16_t*)col->data)[i]);         break;
+      case COL_UINT16:  elem = lval_num((long)((uint16_t*)col->data)[i]);  break;
+      case COL_INT8:    elem = lval_num(((int8_t*)col->data)[i]);          break;
+      case COL_UINT8:   elem = lval_num((long)((uint8_t*)col->data)[i]);   break;
+      case COL_BOOL:    elem = lval_num(((char*)col->data)[i] ? 1 : 0);    break;
       default:          elem = lval_num(0); break;
     }
     lval_add(q, elem);
@@ -503,15 +556,119 @@ static lval* builtin_col_map(lenv* /*e*/, lval* a) {
   lval_del(a);
   return r;
 }
+// (col-map-ptr fp col)          — output dtype same as input
+// (col-map-ptr fp col "float")  — cross-type: output is float32 (or any named type)
 static lval* builtin_col_map_ptr(lenv* /*e*/, lval* a) {
-  LASSERT_NUM("col-map-ptr", a, 2);
+  LASSERT(a, a->count == 2 || a->count == 3,
+          "'col-map-ptr' expects 2 or 3 arguments");
   LASSERT_TYPE("col-map-ptr", a, 0, LVAL_NUM);
   LASSERT_TYPE("col-map-ptr", a, 1, LVAL_COLUMN);
   void* fp = (void*)a->cell[0]->num;
   auto& col = col_of(a->cell[1]);
-  lval* r = col_map_impl(fp, col);
+  int out_dtype = -1;
+  if (a->count == 3) {
+    LASSERT_TYPE("col-map-ptr", a, 2, LVAL_STR);
+    out_dtype = col_dtype_from_name(a->cell[2]->str);
+    LASSERT(a, out_dtype >= 0,
+            "col-map-ptr: unknown output type '%s'", a->cell[2]->str);
+  }
+  lval* r = col_map_impl(fp, col, out_dtype);
   lval_del(a);
   return r;
+}
+
+// ---------------------------------------------------------------------------
+// (col-test-bit col bit) → bool column
+// Returns true (1) where (col[i] >> bit) & 1 is set, false (0) otherwise.
+// bit < 0 means "skip check" — returns all true.
+// col may be any integer dtype.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_test_bit(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-test-bit", a, 2);
+  LASSERT_TYPE("col-test-bit", a, 0, LVAL_COLUMN);
+  LASSERT_TYPE("col-test-bit", a, 1, LVAL_NUM);
+  auto& col  = col_of(a->cell[0]);
+  int   bit  = (int)a->cell[1]->num;
+  size_t n   = col->n;
+  char* out  = (char*)col_alloc(n ? n : 1);
+  if (!out) { lval_del(a); return lval_err("col-test-bit: out of memory"); }
+  if (bit < 0) {
+    memset(out, 1, n);
+    lval_del(a);
+    auto c = std::make_shared<RutColumn>();
+    c->dtype = COL_BOOL; c->n = n; c->data = out;
+    return lval_column(std::move(c));
+  }
+#define TEST_BIT(T) do { \
+    T* p = (T*)col->data; \
+    for (size_t i = 0; i < n; i++) out[i] = ((p[i] >> bit) & (T)1) ? 1 : 0; \
+  } while (0)
+  switch (col->dtype) {
+    case COL_UINT64:  TEST_BIT(uint64_t); break;
+    case COL_INT64:   TEST_BIT(int64_t);  break;
+    case COL_UINT32:  TEST_BIT(uint32_t); break;
+    case COL_INT32:   TEST_BIT(int32_t);  break;
+    case COL_UINT16:  TEST_BIT(uint16_t); break;
+    case COL_INT16:   TEST_BIT(int16_t);  break;
+    case COL_UINT8:   TEST_BIT(uint8_t);  break;
+    case COL_INT8:    TEST_BIT(int8_t);   break;
+    default:
+      free(out); lval_del(a);
+      return lval_err("col-test-bit: column must be an integer dtype");
+  }
+#undef TEST_BIT
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = COL_BOOL; c->n = n; c->data = out;
+  return lval_column(std::move(c));
+}
+
+
+// ---------------------------------------------------------------------------
+// col-unique-mask
+// (col-unique-mask col) → COL_BOOL
+// Returns true for each element that appears exactly once in col.
+// Useful for kNoSameBunchPileup: (col-unique-mask fIndexBCs) keeps only
+// collisions whose BC index is not shared with another collision.
+// Supports any integer dtype (int32, uint32, int64, uint64, …).
+// ---------------------------------------------------------------------------
+static lval* builtin_col_unique_mask(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-unique-mask", a, 1);
+  LASSERT_TYPE("col-unique-mask", a, 0, LVAL_COLUMN);
+  auto col = *static_cast<RutColumnPtr*>(a->cell[0]->obj);
+  size_t n = col->n;
+
+  uint8_t* out = (uint8_t*)malloc(n);
+  if (!out) { lval_del(a); return lval_err("col-unique-mask: out of memory"); }
+
+  std::unordered_map<uint64_t, uint32_t> freq;
+  freq.reserve(n);
+
+#define COUNT_FREQ(T) do { \
+  const T* d = (const T*)col->data; \
+  for (size_t i = 0; i < n; i++) freq[(uint64_t)(d[i])]++; \
+  for (size_t i = 0; i < n; i++) out[i] = (freq[(uint64_t)(d[i])] == 1) ? 1 : 0; \
+} while(0)
+
+  switch (col->dtype) {
+    case COL_UINT64: COUNT_FREQ(uint64_t); break;
+    case COL_INT64:  COUNT_FREQ(int64_t);  break;
+    case COL_UINT32: COUNT_FREQ(uint32_t); break;
+    case COL_INT32:  COUNT_FREQ(int32_t);  break;
+    case COL_UINT16: COUNT_FREQ(uint16_t); break;
+    case COL_INT16:  COUNT_FREQ(int16_t);  break;
+    case COL_UINT8:  COUNT_FREQ(uint8_t);  break;
+    case COL_INT8:   COUNT_FREQ(int8_t);   break;
+    default:
+      free(out); lval_del(a);
+      return lval_err("col-unique-mask: column must be an integer dtype");
+  }
+#undef COUNT_FREQ
+
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = COL_BOOL; c->n = n; c->data = out;
+  return lval_column(std::move(c));
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +789,8 @@ static lval* builtin_col_fill_h1(lenv* /*e*/, lval* a) {
   switch (col->dtype) {
     case COL_FLOAT32: FILL_LOOP(float);    break;
     case COL_FLOAT64: FILL_LOOP(double);   break;
+    case COL_INT64:   FILL_LOOP(int64_t);  break;
+    case COL_UINT64:  FILL_LOOP(uint64_t); break;
     case COL_INT32:   FILL_LOOP(int32_t);  break;
     case COL_UINT32:  FILL_LOOP(uint32_t); break;
     case COL_INT16:   FILL_LOOP(int16_t);  break;
@@ -741,6 +900,8 @@ static lval* builtin_col_cast_f32(lenv* /*e*/, lval* a) {
   switch (col->dtype) {
     case COL_FLOAT32: CAST32(float);    break;
     case COL_FLOAT64: CAST32(double);   break;
+    case COL_INT64:   CAST32(int64_t);  break;
+    case COL_UINT64:  CAST32(uint64_t); break;
     case COL_INT32:   CAST32(int32_t);  break;
     case COL_UINT32:  CAST32(uint32_t); break;
     case COL_INT16:   CAST32(int16_t);  break;
@@ -1290,6 +1451,8 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "col->list",      builtin_col_to_list);
   lenv_add_builtin(e, "col-map",        builtin_col_map);
   lenv_add_builtin(e, "col-map-ptr",    builtin_col_map_ptr);
+  lenv_add_builtin(e, "col-test-bit",   builtin_col_test_bit);
+  lenv_add_builtin(e, "col-unique-mask", builtin_col_unique_mask);
   lenv_add_builtin(e, "col-filter",     builtin_col_filter);
   lenv_add_builtin(e, "col-filter-ptr", builtin_col_filter_ptr);
   lenv_add_builtin(e, "col-reduce",     builtin_col_reduce);

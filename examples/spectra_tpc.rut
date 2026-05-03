@@ -22,25 +22,47 @@
 
 (load stdlib.rut)
 
-(def {aod-path}   "/Users/ktf/src/O2/AO2D.root")
-(def {trk-tree}   "O2track_iu")
-(def {extra-tree} "O2trackextra_002")
-(def {coll-tree}  "O2collision_001")
-(def {bz}         0.5)   ;;; solenoid field in Tesla
+;;; aod-paths must be set before loading, e.g.:
+;;;   (def {aod-paths} (list "/path/to/AO2D.root"))
+;;;   (def {aod-paths} (list "/path/1.root" "/path/2.root"))
 
-;;; ── Collect timeframe directory names ────────────────────────────────────
-(def {tf-keys}  (.GetListOfKeys (new TFile aod-path "READ")))
-(def {tf-names} (do
+;;; Tree name defaults (Run3). For Run2-converted files use:
+;;;   O2track  O2trackextra  O2collision  O2bc
+;;; If set before loading, those values are kept; otherwise defaults apply.
+(if (== trk-tree   "trk-tree")   {def {trk-tree}   "O2track_iu"}       {})
+(if (== extra-tree "extra-tree") {def {extra-tree} "O2trackextra_002"} {})
+(if (== coll-tree  "coll-tree")  {def {coll-tree}  "O2collision_001"}  {})
+(if (== bc-tree    "bc-tree")    {def {bc-tree}    "O2bc_001"}         {})
+(def {bz} 0.5)   ;;; solenoid field in Tesla
+
+;;; ── Event selection parameters ───────────────────────────────────────────
+;;; Set bcSOR = 0 to disable TF/ITS ROF border checks (pass all).
+;;; Set to the actual first-BC-of-run value from the run CCDB page to enable.
+(def {bcSOR}     0)
+(def {nBCsPerTF} 456192)   ;;; 128 * 3564 (Run 3)
+(def {rofLength} 594)      ;;; ITS ROF length in BCs (Run 3)
+(def {rofOffset} 0)
+(def {tvx-bit}   -1)      ;;; -1 = skip TVX (fTriggerMask not filled in all datasets)
+(def {pvz-cut}   10.0)
+(load examples/eventsel.rut)
+
+;;; ── Collect {path tf-name} pairs across all input files ─────────────────
+(def {tf-pairs} (do
   (= {acc} {})
-  (dotimes {i} (.GetEntries tf-keys) {
+  (dotimes {pi} (len aod-paths) {
     do
-    (= {k} (.At tf-keys i))
-    (if (== (.GetClassName k) "TDirectoryFile")
-      {= {acc} (join acc (list (.GetName k)))}
-      {})
+    (= {path} (nth pi aod-paths))
+    (= {keys} (.GetListOfKeys (new TFile path "READ")))
+    (dotimes {i} (.GetEntries keys) {
+      do
+      (= {k} (.At keys i))
+      (if (== (.GetClassName k) "TDirectoryFile")
+        {= {acc} (join acc (list (list path (.GetName k))))}
+        {})
+    })
   })
   acc))
-(print "Timeframes:" (len tf-names))
+(print "Timeframes:" (len tf-pairs) "across" (len aod-paths) "file(s)")
 
 ;;; ── propagate-to-dca ─────────────────────────────────────────────────────
 ;;;
@@ -148,6 +170,17 @@
   (jit-fn float (\{{float s1pt}}
     {(if (== s1pt 0.0f) {0.0f} {(/ 1.0f (fabsf s1pt))})})))
 
+;;; total momentum p = sqrt(1 + tgl²) / |q/pT|
+(def {p-fn}
+  (jit-fn float (\{{float s1pt} {float tgl}}
+    {(if (== s1pt 0.0f) {0.0f}
+      {(/ (sqrtf (+ 1.0f (* tgl tgl))) (fabsf s1pt))})})))
+
+;;; η = asinh(tgl); mask: |η| < 0.8
+(def {eta-ok-fn}
+  (jit-fn float (\{{float tgl}}
+    {(if (< (fabsf (asinhf tgl)) 0.8f) {1.0f} {0.0f})})))
+
 (def {sub-fn}
   (jit-fn float (\{{float a} {float b}} {(- a b)})))
 
@@ -170,40 +203,52 @@
     {(if (>= ncls (.GetAt min-cls-box 0)) {1.0f} {0.0f})})))
 
 ;;; resolve function pointers once on the main thread
-(def {pt-ptr}     (jitfn-ptr pt-fn))
-(def {sub-ptr}    (jitfn-ptr sub-fn))
-(def {mul-ptr}    (jitfn-ptr mul-fn))
-(def {dca-ok-ptr} (jitfn-ptr dca-ok-fn))
-(def {cls-ok-ptr} (jitfn-ptr cls-ok-fn))
+(def {pt-ptr}      (jitfn-ptr pt-fn))
+(def {p-ptr}       (jitfn-ptr p-fn))
+(def {eta-ok-ptr}  (jitfn-ptr eta-ok-fn))
+(def {sub-ptr}     (jitfn-ptr sub-fn))
+(def {mul-ptr}     (jitfn-ptr mul-fn))
+(def {dca-ok-ptr}  (jitfn-ptr dca-ok-fn))
+(def {cls-ok-ptr}  (jitfn-ptr cls-ok-fn))
 
 ;;; ── Histograms — pre-created on main thread ──────────────────────────────
 
-;;; Per-TF histograms: reset and filled each pass
-(def {tf-hpt}  (map (\ {tf} {doto (new TH1F (concat "pt_"  tf) "" 50  0.  5.) {SetDirectory 0}}) tf-names))
-(def {tf-hdxy} (map (\ {tf} {doto (new TH1F (concat "dxy_" tf) "" 100 -5. 5.) {SetDirectory 0}}) tf-names))
-(def {tf-hdz}  (map (\ {tf} {doto (new TH1F (concat "dz_"  tf) "" 100 -5. 5.) {SetDirectory 0}}) tf-names))
+;;; Per-TF histograms (keyed by index; TF dir names are unique timestamps)
+(def {tf-hpt}  (map (\ {pr} {doto (new TH1F (concat "pt_"  (nth 1 pr)) "" 100 0. 20.) {SetDirectory 0}}) tf-pairs))
+(def {tf-hp}   (map (\ {pr} {doto (new TH1F (concat "p_"   (nth 1 pr)) "" 100 0. 20.) {SetDirectory 0}}) tf-pairs))
+(def {tf-hdxy} (map (\ {pr} {doto (new TH1F (concat "dxy_" (nth 1 pr)) "" 100 -5. 5.) {SetDirectory 0}}) tf-pairs))
+(def {tf-hdz}  (map (\ {pr} {doto (new TH1F (concat "dz_"  (nth 1 pr)) "" 100 -5. 5.) {SetDirectory 0}}) tf-pairs))
 
 ;;; Global merged histograms
 (def {h-pt}
-  (doto (new TH1F "hpt" ";p_{T} (GeV/c);Tracks" 50 0. 5.) {SetDirectory 0}))
+  (doto (new TH1F "hpt" ";p_{T} (GeV/c);Tracks" 100 0. 20.) {SetDirectory 0}))
+(def {h-p}
+  (doto (new TH1F "hp" ";p (GeV/c);Tracks" 100 0. 20.) {SetDirectory 0}))
 (def {h-dcaxy}
   (doto (new TH1F "hdcaxy" ";DCA_{XY} (cm);Tracks" 100 -5. 5.) {SetDirectory 0}))
 (def {h-dcaz}
   (doto (new TH1F "hdcaz" ";DCA_{Z} (cm);Tracks" 100 -5. 5.) {SetDirectory 0}))
+(def {h-vz}
+  (doto (new TH1F "hvz" ";Vertex Z (cm);Collisions" 100 -20. 20.) {SetDirectory 0}))
 
-;;; ── Canvas: three pads ───────────────────────────────────────────────────
-(def {c}  (new TCanvas "c_spectra" "TPC p_{T} spectrum" 1200 400))
-(def {p1} (doto (new TPad "p1" "" 0.    0. 0.333 1.) {SetLogy} {Draw}))
-(def {p2} (doto (new TPad "p2" "" 0.333 0. 0.667 1.) {Draw}))
-(def {p3} (doto (new TPad "p3" "" 0.667 0. 1.    1.) {Draw}))
+;;; ── Canvas: 5 pads ───────────────────────────────────────────────────────
+(def {c} (new TCanvas "c_spectra" "TPC spectra" 1800 400))
+(def {p1} (doto (new TPad "p1" "" 0.0  0. 0.2 1.) {SetLogy} {Draw}))
+(def {p2} (doto (new TPad "p2" "" 0.2  0. 0.4 1.) {SetLogy} {Draw}))
+(def {p3} (doto (new TPad "p3" "" 0.4  0. 0.6 1.) {Draw}))
+(def {p4} (doto (new TPad "p4" "" 0.6  0. 0.8 1.) {Draw}))
+(def {p5} (doto (new TPad "p5" "" 0.8  0. 1.0 1.) {Draw}))
 
 ;;; ── Process all timeframes ────────────────────────────────────────────────
 (def {sw} (doto (new TStopwatch) {Start}))
 
 (map (\ {i} {
   do
-  (= {tf}   (nth i tf-names))
+  (= {pr}   (nth i tf-pairs))
+  (= {aod-path} (nth 0 pr))
+  (= {tf}   (nth 1 pr))
   (= {hpt}  (nth i tf-hpt))
+  (= {hp}   (nth i tf-hp))
   (= {hdxy} (nth i tf-hdxy))
   (= {hdz}  (nth i tf-hdz))
 
@@ -226,10 +271,18 @@
   (= {pvyc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosY"))
   (= {pvzc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosZ"))
 
-  ;;; gather PV position to per-track using fIndexCollisions
-  (= {pvX-c}  (col-gather pvxc-c cidx-c))
-  (= {pvY-c}  (col-gather pvyc-c cidx-c))
-  (= {pvZ-c}  (col-gather pvzc-c cidx-c))
+  ;;; per-collision event selection mask (TVX + TF border + ITS ROF + pvZ + no-pileup)
+  (= {evsel-cols} (compute-evsel-tf aod-path tf))
+  (= {evsel-col}  (evsel-and evsel-cols))
+
+  ;;; vertex Z: fill only selected collisions (after event selection, matches official)
+  (col-fill-h1 h-vz (col-mask evsel-col pvzc-c))
+
+  ;;; gather PV position and event-sel mask to per-track using fIndexCollisions
+  (= {pvX-c}    (col-gather pvxc-c    cidx-c))
+  (= {pvY-c}    (col-gather pvyc-c    cidx-c))
+  (= {pvZ-c}    (col-gather pvzc-c    cidx-c))
+  (= {m-ev}     (col-gather evsel-col cidx-c))
 
   ;;; compute DCA → {dcaXY, dcaZ}
   (= {dca}     (propagate-to-dca
@@ -239,27 +292,31 @@
   (= {dcaz-c}  (nth 1 dca))
 
   ;;; nCls = fTPCNClsFindable - fTPCNClsFindableMinusFound
-  (= {ncls-c} (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
-  (= {pt-c}   (col-map-ptr pt-ptr q1pt-c))
+  (= {ncls-c}   (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {pt-c}     (col-map-ptr pt-ptr q1pt-c))
+  (= {p-c}      (col-zip-ptr p-ptr q1pt-c tgl-c))
+  (= {m-eta}    (col-map-ptr eta-ok-ptr tgl-c))
 
-  ;;; quality mask: nCls AND DCA cuts combined
+  ;;; quality mask: event sel AND eta AND nCls  (no DCA — matches official "tiny")
   (= {m-cls}  (col-map-ptr cls-ok-ptr ncls-c))
-  (= {m-dca}  (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c))
-  (= {mask}   (col-zip-ptr mul-ptr m-cls m-dca))
+  (= {mask}   (col-zip-ptr mul-ptr m-ev
+                (col-zip-ptr mul-ptr m-eta m-cls)))
 
   ;;; fill histograms
   (col-fill-h1 hpt  (col-mask mask pt-c))
+  (col-fill-h1 hp   (col-mask mask p-c))
   (col-fill-h1 hdxy (col-mask mask dcaxy-c))
   (col-fill-h1 hdz  (col-mask mask dcaz-c))
 }) (do
   (= {acc} {})
-  (dotimes {i} (len tf-names) {= {acc} (join acc (list i))})
+  (dotimes {i} (len tf-pairs) {= {acc} (join acc (list i))})
   acc))
 
 (.Stop sw)
 
 ;;; ── Merge per-TF histograms ──────────────────────────────────────────────
 (map (\ {h} {.Add h-pt    h}) tf-hpt)
+(map (\ {h} {.Add h-p     h}) tf-hp)
 (map (\ {h} {.Add h-dcaxy h}) tf-hdxy)
 (map (\ {h} {.Add h-dcaz  h}) tf-hdz)
 
@@ -268,7 +325,19 @@
 (print "Selected tracks:" n-sel "  wall time:" wall-s "s")
 
 ;;; ── Draw ─────────────────────────────────────────────────────────────────
-(.cd p1) (.Draw h-pt)
-(.cd p2) (.Draw h-dcaxy)
-(.cd p3) (.Draw h-dcaz)
+;;; pad 1: pT spectrum (log y)
+(.cd p1)
+(doto h-pt {SetLineColor 4} {Draw})
+;;; pad 2: p spectrum (log y)
+(.cd p2)
+(doto h-p {SetLineColor 2} {Draw})
+;;; pad 3: vertex Z
+(.cd p3)
+(doto h-vz {SetLineColor 1} {Draw})
+;;; pad 4: DCA_XY
+(.cd p4)
+(doto h-dcaxy {SetLineColor 4} {Draw})
+;;; pad 5: DCA_Z
+(.cd p5)
+(doto h-dcaz {SetLineColor 2} {Draw})
 (.Update c) (.RaiseWindow c)
