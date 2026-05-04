@@ -181,6 +181,13 @@ When making multiple method calls on the same object, always prefer `doto` over 
 
 ## Available skills
 
+- `spectra-comparison` (in `.claude/skills/spectra-comparison.md`) — how to compare
+  `spectra_tpc.rut` output against the reference `AnalysisResults.root`: file structure,
+  histogram symbol names, TFile navigation pitfalls, and a ready-to-paste comparison
+  snippet.  Invoke this skill whenever the user asks for a spectra comparison plot.
+
+
+
 - `rooture-lang` (in `.claude/skills/rooture-lang.md`) — explains how the
   rooture language works and its quirks.  Invoke this skill whenever you need
   context on the language before writing or debugging rooture (`.rut`) code.

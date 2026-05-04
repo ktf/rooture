@@ -10,6 +10,9 @@
 ;;;   bb0..bb4   — ALEPH BB shape params (defaults scaled for Run2 a.u., MIP~50)
 ;;;   bb-res     — relative resolution  (default 0.07 = 7%)
 ;;;   nsigma-max — |nσ| cut            (default 2.0)
+;;;   p-min-pid  — minimum total momentum for PID (default 0.1 GeV/c)
+;;;                Below this threshold TPC track reconstruction is unreliable
+;;;                and the signal is junk (per tracking expert advice).
 ;;;
 ;;; Usage:
 ;;;   (load "examples/pid_tpc.rut")
@@ -19,13 +22,15 @@
 
 ;;; ── BB parameters ────────────────────────────────────────────────────────
 ;;; O2Physics ALEPH defaults scaled so MIP(pion) ~ 50 Run2 a.u.
-(default {bb0}       1.60491)
-(default {bb1}       19.9768)
-(default {bb2}       2.52666e-16)
-(default {bb3}       2.72123)
-(default {bb4}       6.08092)
-(default {bb-res}    0.07)
+(default {bb0}        1.60491)
+(default {bb1}        19.9768)
+(default {bb2}        2.52666e-16)
+(default {bb3}        2.72123)
+(default {bb4}        6.08092)
+(default {bb-res}     0.07)
 (default {nsigma-max} 2.0)
+(default {p-min-pid}  0.1)   ;;; 100 MeV/c — below this TPC PID is unreliable
+(default {sig-min}    20.0)  ;;; min TPC signal — tracks with near-zero signal have failed extraction
 
 ;;; ── Particle masses (GeV/c^2) as globals ─────────────────────────────────
 ;;; Declared as globals so jit-fn constant-folding picks them up.
@@ -127,16 +132,32 @@
 (def {pid-pr-ptr} (jitfn-ptr pid-pr-fn))
 (def {pid-de-ptr} (jitfn-ptr pid-de-fn))
 
+;;; ── Validity cuts ────────────────────────────────────────────────────────
+;;; Tracks with p < p-min-pid have unreliable TPC reconstruction (junk signal).
+;;; Tracks with sig < sig-min have failed TPC signal extraction (near-zero).
+(def {pid-p-ok-fn}   (jit-fn float (\{{float p}}   {(if (> p p-min-pid) {1.0f} {0.0f})})))
+(def {pid-p-ok-ptr}  (jitfn-ptr pid-p-ok-fn))
+(def {pid-sig-ok-fn} (jit-fn float (\{{float sig}} {(if (> sig sig-min) {1.0f} {0.0f})})))
+(def {pid-sig-ok-ptr}(jitfn-ptr pid-sig-ok-fn))
+(def {pid-mul-fn}    (jit-fn float (\{{float a} {float b}} {(* a b)})))
+(def {pid-mul-ptr}   (jitfn-ptr pid-mul-fn))
+
 ;;; ── pid-masks ─────────────────────────────────────────────────────────────
 ;;; (pid-masks sig-c p-c) -> list of 6 float32 masks: {el mu pi ka pr de}
+;;; Each mask is zero for tracks with p < p-min-pid or sig < sig-min.
 (def {pid-masks} (\{sig-c p-c}
-  {(list
-    (col-zip-ptr pid-el-ptr sig-c p-c)
-    (col-zip-ptr pid-mu-ptr sig-c p-c)
-    (col-zip-ptr pid-pi-ptr sig-c p-c)
-    (col-zip-ptr pid-ka-ptr sig-c p-c)
-    (col-zip-ptr pid-pr-ptr sig-c p-c)
-    (col-zip-ptr pid-de-ptr sig-c p-c))}))
+  {do
+  (= {m-p}   (col-map-ptr pid-p-ok-ptr   p-c))
+  (= {m-sig} (col-map-ptr pid-sig-ok-ptr sig-c))
+  (= {m-ok}  (col-zip-ptr pid-mul-ptr m-p m-sig))
+  (list
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-el-ptr sig-c p-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mu-ptr sig-c p-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pi-ptr sig-c p-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-ka-ptr sig-c p-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pr-ptr sig-c p-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-de-ptr sig-c p-c)))}))
 
 (print "pid_tpc.rut loaded."
-  "bb0=" bb0 "bb-res=" bb-res "nsigma-max=" nsigma-max)
+  "bb0=" bb0 "bb-res=" bb-res "nsigma-max=" nsigma-max
+  "p-min-pid=" p-min-pid "sig-min=" sig-min)
