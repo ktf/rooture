@@ -306,4 +306,5 @@ void lenv_add_builtins_lang(lenv* e);
 void lenv_add_builtins_root(lenv* e);
 void lenv_add_builtins_jitfn(lenv* e);
 void lenv_add_builtins_column(lenv* e);
+void lenv_add_builtins_net(lenv* e);
 void lenv_add_builtins(lenv* e);

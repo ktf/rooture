@@ -11,6 +11,7 @@ include(${ROOT_USE_FILE})
 
 find_package(Threads REQUIRED)
 find_package(replxx REQUIRED)
+find_package(CURL REQUIRED)
 find_library(TREE_SITTER_LIB NAMES tree-sitter REQUIRED)
 find_path(TREE_SITTER_INCLUDE NAMES tree_sitter/api.h REQUIRED)
 
@@ -40,6 +41,7 @@ add_executable(rooture
   rut_root.cxx
   rut_jitfn.cxx
   rut_column.cxx
+  rut_net.cxx
   rut_repl.cxx
   mpc.c
   ${PARSER_C}
@@ -56,6 +58,7 @@ target_link_libraries(rooture PRIVATE
   ROOT::Core ROOT::MathCore ROOT::RIO
   ROOT::Hist ROOT::Tree ROOT::TreePlayer
   ROOT::ROOTVecOps ROOT::ROOTDataFrame ROOT::ROOTNTuple
+  CURL::libcurl
 )
 target_compile_options(rooture PRIVATE -g -O2)
 set_target_properties(rooture PROPERTIES
