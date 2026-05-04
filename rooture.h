@@ -164,6 +164,46 @@ lval* lval_err(const char* fmt, ...);
             ltype_name(a->cell[0]->type),                           \
             ltype_name(expected));
 
+// Forward-declared here so RutFuture::~RutFuture() can call it.
+void rut_drain_cling_queue();
+
+// ---------------------------------------------------------------------------
+// RutAtom — mutable reference cell (used by LVAL_ATOM)
+// ---------------------------------------------------------------------------
+struct RutAtom {
+  std::mutex mu;
+  lval*      val;
+  explicit RutAtom(lval* v) : val(v) {}
+  ~RutAtom() { lval_del(val); }
+};
+using RutAtomPtr = std::shared_ptr<RutAtom>;
+
+// ---------------------------------------------------------------------------
+// RutFuture — deferred value evaluated on a background thread
+// ---------------------------------------------------------------------------
+struct RutFuture {
+  std::mutex              mu;
+  std::condition_variable cv;
+  bool                    realized   = false;
+  bool                    is_promise = false;
+  lval*                   result     = nullptr;
+
+  ~RutFuture() {
+    if (is_promise) {
+      if (result) lval_del(result);
+      return;
+    }
+    while (true) {
+      rut_drain_cling_queue();
+      std::unique_lock<std::mutex> lock(mu);
+      if (realized) { if (result) lval_del(result); return; }
+      lock.unlock();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+};
+using RutFuturePtr = std::shared_ptr<RutFuture>;
+
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
@@ -184,8 +224,11 @@ lval* lval_sexpr(void);
 lval* lval_qexpr(void);
 lval* lval_add(lval* v, lval* x);
 lval* lval_pop(lval* v, int i);
+lval* lval_take(lval* v, int i);
 lval* lval_read(mpc_ast_t* t);
 lval* lval_jitfn(const char* name, long nparams);
+lval* lval_fun(lbuiltin func);
+lval* lval_lambda(lval* formals, lval* body);
 // col-jit-fn: sym=kernel_name, num=n_inputs, count=n_outputs, obj=dispatch_ptr
 lval* lval_coljitfn(const char* name, int n_inputs, int n_outputs, void* dispatch_ptr);
 
@@ -193,8 +236,11 @@ lval* lval_coljitfn(const char* name, int n_inputs, int n_outputs, void* dispatc
 typedef lval* (*ColJitFnDispatch)(lval* fn, lval* args);
 extern ColJitFnDispatch g_coljitfn_dispatch;
 lval* lval_atom(lval* init);
+lval* lval_future_new(RutFuturePtr rf);
+lval* lval_promise_new();
 void  lval_print(lval* v);
 void  lval_println(lval* v);
+lenv* lenv_snapshot(lenv* e);
 
 std::string executable_dir();
 extern std::vector<std::string> load_path;
@@ -203,8 +249,7 @@ TFileHandler* rut_make_cling_handler(int fd);
 
 // Dispatch work to the main thread if called from a future thread; run inline otherwise.
 void   rut_dispatch_work(std::function<void()> fn);
-// Drain all pending Cling work items (must be called from main thread).
-void   rut_drain_cling_queue();
+// rut_drain_cling_queue — declared earlier (needed by RutFuture destructor).
 // Cling primitives — always execute on the main thread (dispatch if needed).
 Long_t rut_calc(const char* expr, TInterpreter::EErrorCode* ec = nullptr);
 Long_t rut_process_line(const char* code, TInterpreter::EErrorCode* ec = nullptr);

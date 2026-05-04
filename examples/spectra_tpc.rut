@@ -29,10 +29,10 @@
 ;;; Tree name defaults (Run3). For Run2-converted files use:
 ;;;   O2track  O2trackextra  O2collision  O2bc
 ;;; If set before loading, those values are kept; otherwise defaults apply.
-(if (== trk-tree   "trk-tree")   {def {trk-tree}   "O2track_iu"}       {})
-(if (== extra-tree "extra-tree") {def {extra-tree} "O2trackextra_002"} {})
-(if (== coll-tree  "coll-tree")  {def {coll-tree}  "O2collision_001"}  {})
-(if (== bc-tree    "bc-tree")    {def {bc-tree}    "O2bc_001"}         {})
+(default {trk-tree}   "O2track_iu")
+(default {extra-tree} "O2trackextra_002")
+(default {coll-tree}  "O2collision_001")
+(default {bc-tree}    "O2bc_001")
 (def {bz} 0.5)   ;;; solenoid field in Tesla
 
 ;;; ── Event selection parameters ───────────────────────────────────────────

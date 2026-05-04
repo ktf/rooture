@@ -19,13 +19,13 @@
 
 ;;; ── BB parameters ────────────────────────────────────────────────────────
 ;;; O2Physics ALEPH defaults scaled so MIP(pion) ~ 50 Run2 a.u.
-(if (== bb0 "bb0") {def {bb0} 1.60491}      {})
-(if (== bb1 "bb1") {def {bb1} 19.9768}      {})
-(if (== bb2 "bb2") {def {bb2} 2.52666e-16}  {})
-(if (== bb3 "bb3") {def {bb3} 2.72123}      {})
-(if (== bb4 "bb4") {def {bb4} 6.08092}      {})
-(if (== bb-res     "bb-res")     {def {bb-res}     0.07} {})
-(if (== nsigma-max "nsigma-max") {def {nsigma-max} 2.0}  {})
+(default {bb0}       1.60491)
+(default {bb1}       19.9768)
+(default {bb2}       2.52666e-16)
+(default {bb3}       2.72123)
+(default {bb4}       6.08092)
+(default {bb-res}    0.07)
+(default {nsigma-max} 2.0)
 
 ;;; ── Particle masses (GeV/c^2) as globals ─────────────────────────────────
 ;;; Declared as globals so jit-fn constant-folding picks them up.

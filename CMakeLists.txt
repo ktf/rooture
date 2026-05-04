@@ -36,6 +36,7 @@ endif()
 
 add_executable(rooture
   rut_lang.cxx
+  rut_builtins_lang.cxx
   rut_root.cxx
   rut_jitfn.cxx
   rut_column.cxx

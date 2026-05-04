@@ -271,3 +271,29 @@ connected AI assistant, letting it understand the meaningful knobs in your analy
 - **Lambda bodies need `do` for sequences** — `(\{x} {expr1 expr2})` calls `expr1` on `expr2`; use `(\{x} {do expr1 expr2})` for sequencing.
 - **`if` branches must be Q-expressions** — `(if cond {a} {b})`, never bare values.
 - **Namespaced types need no quotes** — `ROOT::RDF::TH1DModel` is a single symbol and auto-converts to a string.
+
+## Script parameters and `default`
+
+Scripts that accept caller-configurable parameters use `default` (from `stdlib.rut`) instead of
+unconditional `def`.  `default` sets a variable only when it is not already bound — letting
+callers override it beforehand:
+
+```scheme
+;;; script.rut
+(default {min-cls} 70)     ; used if caller didn't set it
+(default {eta-max} 0.8)
+
+;;; caller
+(def {min-cls} 60)         ; override before loading
+(load "script.rut")        ; min-cls stays 60, eta-max becomes 0.8
+```
+
+Internally, `default` relies on the `undefined?` builtin, which returns `1` when a symbol has
+no binding in any enclosing environment:
+
+```scheme
+(undefined? {x})   ; → 1 if x is unbound, 0 otherwise
+```
+
+The old pattern `(if (== x "x") {def {x} val} {})` exploited the rule that unbound symbols
+evaluate to a string of their own name; `default` and `undefined?` are the idiomatic replacement.

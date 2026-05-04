@@ -267,3 +267,13 @@
 
 ;;; OO interactions
 ; doto is a C++ builtin (see rooture.cxx builtin_doto).
+
+;;; Parameter defaults
+; (default {sym} val) — set sym=val only if sym is not yet defined.
+; Idiomatic pattern for overridable script parameters: callers def the symbol
+; before loading, and `default` leaves that value untouched.
+(fun {default sym val} {
+  if (undefined? sym)
+    {def sym val}
+    {}
+})

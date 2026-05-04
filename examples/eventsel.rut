@@ -44,8 +44,8 @@
 (def {pvz-cut}   10.0)
 
 ;;; ── Tree name defaults (override before loading for non-standard layouts) ─
-(if (== bc-tree   "bc-tree")   {def {bc-tree}   "O2bc_001"}        {})
-(if (== coll-tree "coll-tree") {def {coll-tree} "O2collision_001"} {})
+(default {bc-tree}   "O2bc_001")
+(default {coll-tree} "O2collision_001")
 
 ;;; ── TF border jit-fn ─────────────────────────────────────────────────────
 ;;; (globalBC - bcSOR) % nBCsPerTF must be in (300, nBCsPerTF-4000)
