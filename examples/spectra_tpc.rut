@@ -35,6 +35,12 @@
 (default {bc-tree}    "O2bc_001")
 (def {bz} 0.5)   ;;; solenoid field in Tesla
 
+;;; ITS cluster branch name:
+;;;   "fITSClusterMap"   — Run2 local files (uint8 bitmask, 1 bit per layer)
+;;;   "fITSClusterSizes" — Open Data / newer AO2D (packed nibbles, 4 bits per layer)
+;;; Both: nonzero ↔ has ITS hit — the its-ok-fn check (> itsmap 0.5f) works for both.
+(default {its-map-branch} "fITSClusterMap")
+
 ;;; ── Event selection parameters ───────────────────────────────────────────
 ;;; Set bcSOR = 0 to disable TF/ITS ROF border checks (pass all).
 ;;; Set to the actual first-BC-of-run value from the run CCDB page to enable.
@@ -84,7 +90,7 @@
   (dotimes {pi} (len aod-paths) {
     do
     (= {path} (nth pi aod-paths))
-    (= {keys} (.GetListOfKeys (new TFile path "READ")))
+    (= {keys} (.GetListOfKeys (::Open TFile path)))
     (dotimes {i} (.GetEntries keys) {
       do
       (= {k} (.At keys i))
@@ -336,7 +342,7 @@
   (= {fcrows-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusCrossedRows"))
   (= {sig-c}     (load-branch aod-path (concat tf "/" extra-tree) "fTPCSignal"))
   (= {pinner-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCInnerParam"))
-  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) "fITSClusterMap"))
+  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) its-map-branch))
   (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
   (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
 
