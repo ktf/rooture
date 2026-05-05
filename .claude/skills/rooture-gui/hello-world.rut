@@ -1,0 +1,23 @@
+;;; Hello World GUI with click counter
+(.Load gSystem "libGui")
+(global "gClient")
+
+(def {win}         (new TGMainFrame (.GetRoot gClient) 300 120))
+(def {btn}         (new TGTextButton win "Hello World"))
+(def {lbl}         (new TGLabel win "Clicks: 0   "))
+(def {click-count} 0)
+(def {hints}       (new TGLayoutHints 18 5 5 5 5))
+
+(.AddFrame win btn hints)
+(.AddFrame win lbl hints)
+
+(connect btn "Clicked()" (\{}
+  {do
+    (def {click-count} (+ click-count 1))
+    (.SetText lbl (new TGString (str "Clicks: " click-count)))
+    (.Layout win)}))
+
+(.SetWindowName win "Hello World")
+(.MapSubwindows win)
+(.Resize win (.GetDefaultWidth win) (.GetDefaultHeight win))
+(.MapRaised win)

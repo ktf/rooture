@@ -1,4 +1,6 @@
-# Skill: plot-conventions
+# plot-conventions
+
+Use this skill when creating any per-species plot to ensure colors are consistent.
 
 ## Species color assignments
 

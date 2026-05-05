@@ -1,0 +1,100 @@
+;;; Minimal complete rooture analysis skeleton
+;;; Prerequisites: define aod-paths, then load this file or paste inline.
+
+(load stdlib.rut)
+
+;;; --- guard ---
+(if (== aod-paths "aod-paths") {
+  do (print "ERROR: define aod-paths first") (def {aod-paths} {})
+} {})
+
+;;; --- tree defaults ---
+(default {trk-tree}   "O2track_iu")
+(default {extra-tree} "O2trackextra_002")
+(default {coll-tree}  "O2collision_001")
+(default {bc-tree}    "O2bc_001")
+(def {bz} 0.5)
+
+;;; --- event selection ---
+(def {bcSOR} 0) (def {nBCsPerTF} 456192) (def {rofLength} 594)
+(def {rofOffset} 0) (def {tvx-bit} -1) (def {pvz-cut} 10.0)
+(load examples/eventsel.rut)
+
+;;; --- PID (includes TOF) ---
+(load examples/pid_tpc.rut)
+
+;;; --- enumerate timeframes ---
+(def {tf-pairs} (do
+  (= {acc} {})
+  (dotimes {pi} (len aod-paths) {
+    do
+    (= {path} (nth pi aod-paths))
+    (= {keys} (.GetListOfKeys (::Open TFile path)))
+    (dotimes {i} (.GetEntries keys) {
+      do
+      (= {k} (.At keys i))
+      (if (== (.GetClassName k) "TDirectoryFile")
+        {= {acc} (join acc (list (list path (.GetName k))))}
+        {})
+    })
+  })
+  acc))
+(print "Timeframes:" (len tf-pairs))
+
+;;; --- jit-fns: define before pmap ---
+(def {pt-fn}
+  (jit-fn float (\{{float s1pt}}
+    {(if (== s1pt 0.0f) {0.0f} {(/ 1.0f (fabsf s1pt))})})))
+(def {eta-ok-fn}
+  (jit-fn float (\{{float tgl}}
+    {(if (< (fabsf (asinhf tgl)) 0.8f) {1.0f} {0.0f})})))
+(def {mul-fn}
+  (jit-fn float (\{{float a} {float b}} {(* a b)})))
+(def {sub-fn}
+  (jit-fn float (\{{float a} {float b}} {(- a b)})))
+(def {pt-ptr}     (jitfn-ptr pt-fn))
+(def {eta-ok-ptr} (jitfn-ptr eta-ok-fn))
+(def {mul-ptr}    (jitfn-ptr mul-fn))
+(def {sub-ptr}    (jitfn-ptr sub-fn))
+
+;;; --- pre-create histograms on main thread ---
+(def {tf-hpt} (map (\ {pr} {
+  doto (new TH1F (concat "pt_" (nth 1 pr)) "" 100 0. 20.)
+    {SetDirectory 0}
+}) tf-pairs))
+(def {h-pt}
+  (doto (new TH1F "hpt" ";p_{T} (GeV/c);Tracks" 100 0. 20.) {SetDirectory 0}))
+
+;;; --- parallel processing ---
+(pmap (\ {i} {
+  do
+  (= {pr}      (nth i tf-pairs))
+  (= {aod-path} (nth 0 pr))
+  (= {tf}       (nth 1 pr))
+  (= {hpt}      (nth i tf-hpt))
+
+  (= {q1pt-c} (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {tgl-c}  (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {cidx-c} (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+  (= {pvzc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosZ"))
+
+  (= {evsel-col} (evsel-and (compute-evsel-tf aod-path tf)))
+  (= {m-ev}      (col-gather evsel-col cidx-c))
+  (= {pt-c}      (col-map-ptr pt-ptr q1pt-c))
+  (= {m-eta}     (col-map-ptr eta-ok-ptr tgl-c))
+  (= {mask}      (col-zip-ptr mul-ptr m-ev m-eta))
+
+  (col-fill-h1 hpt (col-mask mask pt-c))
+}) (do
+  (= {acc} {})
+  (dotimes {i} (len tf-pairs) {= {acc} (join acc (list i))})
+  acc))
+
+;;; --- merge ---
+(map (\ {h} {.Add h-pt h}) tf-hpt)
+
+;;; --- draw ---
+(def {c} (new TCanvas "c" "pT" 800 600))
+(.SetLogy c 1)
+(doto h-pt {SetLineColor 4} {Draw})
+(.Update c) (.RaiseWindow c)

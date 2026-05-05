@@ -1,0 +1,79 @@
+;;; TPC PID plot: dE/dx vs p_inner with Bethe-Bloch curves overlaid
+;;;
+;;; Prerequisites: spectra_tpc.rut must have been loaded, which defines:
+;;;   tf-pairs, extra-tree, trk-tree, coll-tree
+;;;   sub-ptr, eta-ok-ptr, cls-ok-ptr, its-ok-ptr, tpcchi2-ok-ptr, crows-ok-ptr, mul-ptr
+;;;   compute-evsel-tf, evsel-and
+;;;   bb0..bb4, pid-m-el..pid-m-de
+
+;;; ── Fill 2D histogram ───────────────────────────────────────────────────────
+(def {h2}
+  (doto (new TH2F "h2pid" ";p_{inner} (GeV/c);TPC dE/dx (a.u.)" 400 0. 5. 400 0. 300.)
+    {SetDirectory 0}))
+
+(dotimes {i} (len tf-pairs) {
+  do
+  (= {pr}        (nth i tf-pairs))
+  (= {aod-path}  (nth 0 pr))
+  (= {tf}        (nth 1 pr))
+  (= {sig-c}     (load-branch aod-path (concat tf "/" extra-tree) "fTPCSignal"))
+  (= {pinner-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCInnerParam"))
+  (= {find-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+  (= {fmin-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+  (= {fcrows-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusCrossedRows"))
+  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) "fITSClusterMap"))
+  (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
+  (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
+  (= {tgl-c}     (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {q1pt-c}    (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {cidx-c}    (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+  (= {pvzc-c}    (load-branch aod-path (concat tf "/" coll-tree) "fPosZ"))
+  (= {evsel-col}  (evsel-and (compute-evsel-tf aod-path tf)))
+  (= {m-ev}      (col-gather evsel-col cidx-c))
+  (= {ncls-c}    (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {ncrows-c}  (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
+  (= {m-eta}     (col-map-ptr eta-ok-ptr tgl-c))
+  (= {m-cls}     (col-map-ptr cls-ok-ptr ncls-c))
+  (= {m-its}     (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c)))
+  (= {m-tpcq}    (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
+  (= {m-crows}   (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))
+  (= {mask}      (col-zip-ptr mul-ptr m-ev
+                   (col-zip-ptr mul-ptr m-eta
+                     (col-zip-ptr mul-ptr m-cls
+                       (col-zip-ptr mul-ptr m-its
+                         (col-zip-ptr mul-ptr m-tpcq m-crows))))))
+  (col-fill-h2 h2 (col-mask mask pinner-c) (col-mask mask sig-c))
+})
+
+;;; ── Draw with BB curves ─────────────────────────────────────────────────────
+(def {cpid} (doto (new TCanvas "cpid" "TPC PID" 900 700) {SetLogz}))
+(doto h2 {SetStats 0} {Draw "COLZ"})
+
+;;; BB curve helper
+(def {bb-curve} (\{mass color npts} {
+  do
+  (= {gr} (doto (new TGraph npts) {SetLineColor color} {SetLineWidth 2}))
+  (= {dp} (/ 4.9 npts))
+  (dotimes {i} npts {
+    do
+    (= {p}    (+ 0.1 (* i dp)))
+    (= {bg}   (/ p mass))
+    (= {beta} (/ bg (sqrt (+ 1.0 (* bg bg)))))
+    (= {aa}   (pow beta bb3))
+    (= {lnt}  (log (+ bb2 (pow (/ 1.0 bg) bb4))))
+    (= {ex}   (/ (* bb0 (- (- bb1 aa) lnt)) aa))
+    (.SetPoint gr i p ex)
+  })
+  gr
+}))
+
+;;; Colors per plot-conventions: e=2, μ=3, π=4, K=6, p=7, d=8
+(map (\{gr} {.Draw gr "L SAME"})
+     (list (bb-curve pid-m-el 2 200)
+           (bb-curve pid-m-mu 3 200)
+           (bb-curve pid-m-pi 4 200)
+           (bb-curve pid-m-ka 6 200)
+           (bb-curve pid-m-pr 7 200)
+           (bb-curve pid-m-de 8 200)))
+(.Update cpid)
+;;; Then: get_canvas name="cpid"

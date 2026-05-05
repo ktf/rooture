@@ -181,39 +181,27 @@ When making multiple method calls on the same object, always prefer `doto` over 
 
 ## Available skills
 
-- `spectra-comparison` (in `.claude/skills/spectra-comparison.md`) — the primary
-  end-to-end demonstrator workflow: quick setup for `spectra_tpc.rut` with Run 2
-  AO2D files, how to compare output against the reference `AnalysisResults.root`
-  (file structure, histogram symbol names, TFile navigation pitfalls,
-  ready-to-paste comparison snippet), and how to produce the TPC PID plot
-  (dE/dx vs p_inner 2D histogram with Bethe-Bloch curves overlaid using the
-  native `pow`/`log`/`sqrt` math builtins).  Invoke this skill whenever the
-  user asks for spectra, a spectra comparison, or a PID plot.
+All skills use the folder-based format (`.claude/skills/<name>/SKILL.md`) with YAML
+frontmatter `description` fields that drive auto-invocation. Supporting scripts are
+in separate files within each skill's folder and referenced from `SKILL.md`.
 
+- `alice-analysis` — ALICE analysis umbrella: standard flow, tree name conventions,
+  critical rules. Auto-invoked for any ALICE data analysis question. Points to sub-skills.
 
+- `alice-aod` — reading AO2D files: file structure, timeframe iteration, branch names,
+  and the **native column API** (`load-branch` + `col-*`) as the preferred approach.
 
-- `rooture-lang` (in `.claude/skills/rooture-lang.md`) — explains how the
-  rooture language works and its quirks.  Invoke this skill whenever you need
-  context on the language before writing or debugging rooture (`.rut`) code.
+- `rooture-analysis-basics` — full analysis setup: event selection, track quality cuts,
+  DCA propagation, TPC+TOF PID via BB, CCDB parameter fetch, pmap patterns.
+  Supporting file: `minimal-example.rut`.
 
-- `rooture-gui` (in `.claude/skills/rooture-gui.md`) — how to build ROOT GUI
-  windows, buttons, and layouts in rooture.  Invoke this skill whenever the
-  user asks for a GUI, dialog, or any `TGFrame`/`TGWidget`-based interface.
+- `spectra-comparison` — running `spectra_tpc.rut` and comparing output to reference.
+  Supporting files: `comparison.rut`, `pid-plot.rut`.
 
-- `rooture-debug-gui` (in `.claude/skills/rooture-debug-gui.md`) — how to
-  debug GUI and layout issues: widgets not appearing, zero-width labels, wrong
-  positions, text not refreshing after SetText.  Invoke this skill whenever
-  something in a rooture GUI looks wrong or a label fails to update.
+- `plot-conventions` — per-species ROOT color assignments and general style rules.
 
-- `alice-aod` (in `.claude/skills/alice-aod.md`) — how to read ALICE Run 3
-  AO2D data in rooture: file structure, building TChains across time frames,
-  friend chains for track+trackextra, RDataFrame column definitions (eta, phi,
-  pt, nCls), and the interactive 3D cluster-cut GUI example.  Invoke this skill
-  whenever the user is working with AO2D.root files or ALICE O2 track data.
+- `rooture-lang` — language reference: syntax, semantics, MCP workflow, gotchas.
 
-- `plot-conventions` (in `.claude/skills/plot-conventions.md`) — canonical
-  per-species ROOT color assignments (e=red/2, μ=green/3, π=blue/4,
-  K=magenta/6, p=cyan/7, d=dark-green/8) and general ROOT style rules (line
-  widths, dashed references, axis ranges, clone-before-scale).  Invoke this
-  skill whenever creating any per-species plot — spectra, PID curves, BB
-  overlays — to ensure colors are consistent across all plots.
+- `rooture-gui` — building TGFrame-based GUIs. Supporting file: `hello-world.rut`.
+
+- `rooture-debug-gui` — diagnosing widget sizing, label update, and layout issues.

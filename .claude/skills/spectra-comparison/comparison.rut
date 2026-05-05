@@ -1,0 +1,47 @@
+;;; Spectra comparison: rooture output vs AnalysisResults.root reference
+;;;
+;;; Prerequisites: spectra_tpc.rut must have been loaded, which defines:
+;;;   h-pt-species — list of 6 TH1F {El Mu Pi Ka Pr De}
+;;;   h-p-species  — same order, momentum spectra
+;;;
+;;; Reference file: /tmp/AnalysisResults.root
+;;;   Structure: tpc-spectra-tiny/pt/{El,Mu,Pi,Ka,Pr,De,...}
+
+(do
+  (= {f}        (new TFile "/tmp/AnalysisResults.root" "READ"))
+  (= {h-pi-ref} (. Get f "tpc-spectra-tiny/pt/Pi"))
+  (= {h-ka-ref} (. Get f "tpc-spectra-tiny/pt/Ka"))
+  (= {h-pr-ref} (. Get f "tpc-spectra-tiny/pt/Pr"))
+  (= {h-pi-us}  (nth 2 h-pt-species))
+  (= {h-ka-us}  (nth 3 h-pt-species))
+  (= {h-pr-us}  (nth 4 h-pt-species))
+
+  (def {norm} (\ {h nm} {
+    do (= {hc} (. Clone h nm))
+    (= {i} (. Integral hc))
+    (if (> i 0) {. Scale hc (/ 1.0 i)} {})
+    hc}))
+
+  (= {rpi} (norm h-pi-ref "rpi")) (= {upi} (norm h-pi-us "upi"))
+  (= {rka} (norm h-ka-ref "rka")) (= {uka} (norm h-ka-us "uka"))
+  (= {rpr} (norm h-pr-ref "rpr")) (= {upr} (norm h-pr-us "upr"))
+
+  (= {c} (new TCanvas "c_cmp" "Spectra comparison (normalized)" 1400 480))
+  (. Divide c 3 1)
+
+  (def {draw-pad} (\ {pad href hus col title} {
+    do
+    (. cd c pad)
+    (doto href {SetLineColor 1} {SetLineWidth 2} {SetLineStyle 2} {SetTitle title} {SetMinimum 0})
+    (. SetRangeUser (. GetXaxis href) 0.1 4.0)
+    (. Draw href "HIST")
+    (doto hus {SetLineColor col} {SetLineWidth 2})
+    (. Draw hus "HIST SAME")}))
+
+  ;;; Colors per plot-conventions: π=4(blue), K=6(magenta), p=7(cyan)
+  (draw-pad 1 rpi upi 4 "#pi  (dashed=ref, solid=ours)")
+  (draw-pad 2 rka uka 6 "K")
+  (draw-pad 3 rpr upr 7 "p")
+  (. Update c))
+
+;;; Then: get_canvas name="c_cmp"
