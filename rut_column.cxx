@@ -188,15 +188,24 @@ static RutColumnPtr load_branch_impl(const char* path,
   TFile* f = file_cache_get(p);
   if (!f) return nullptr;
 
-  TTree* tree = f->Get<TTree>(tp.c_str());
-  if (!tree) return nullptr;
-
-  TBranch* br = tree->GetBranch(bn.c_str());
-  if (!br) return nullptr;
-
-  int      dtype = branch_dtype(br);
-  Long64_t total = br->GetEntries();
-  if (dtype < 0 || total <= 0) return nullptr;
+  // TTree deserialization (TTree::Streamer) touches ROOT's global StreamerInfo
+  // registry (TClass::RegisterStreamerInfo) which is not thread-safe.  Dispatch
+  // to the main thread so registrations are always serialised, even though each
+  // worker thread has its own TFile handle.
+  TTree*   tree  = nullptr;
+  TBranch* br    = nullptr;
+  int      dtype = -1;
+  Long64_t total = 0;
+  TFile*   f_cap = f;
+  rut_dispatch_work([&]{
+    tree = f_cap->Get<TTree>(tp.c_str());
+    if (!tree) return;
+    br    = tree->GetBranch(bn.c_str());
+    if (!br) return;
+    dtype = branch_dtype(br);
+    total = br->GetEntries();
+  });
+  if (!tree || !br || dtype < 0 || total <= 0) return nullptr;
 
   size_t esz = col_dtype_size(dtype);
   void*  buf = col_alloc((size_t)total * esz);

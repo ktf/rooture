@@ -41,6 +41,10 @@
 (def {pid-m-pr} 0.938272)
 (def {pid-m-de} 1.875613)
 
+;;; Speed of light in cm/ns — for TOF expected-time calculation.
+;;; t_exp [ns] = fLength [cm] / (beta_exp * tof-c)  (fTrackTime/fTrackTimeRes are in ns)
+(def {tof-c} 29.9792458)
+
 ;;; ── BB nσ jit-fn template ────────────────────────────────────────────────
 ;;; Each species gets its own jit-fn with its mass constant-folded.
 ;;; Structure: all assignments at the top do-level; if branches are
@@ -148,23 +152,119 @@
 (def {pid-mul-fn}    (jit-fn float (\{{float a} {float b}} {(* a b)})))
 (def {pid-mul-ptr}   (jitfn-ptr pid-mul-fn))
 
+;;; ── TOF PID ──────────────────────────────────────────────────────────────
+;;; Extends TPC PID with TOF beta measurement for tracks that have a TOF hit.
+;;; For tracks without a TOF hit (fTOFChi2 < 0), the TOF requirement passes by default,
+;;; so the combined mask reduces to TPC-only for those tracks.
+;;;
+;;; Per-species expected TOF time: (fTOFExpMom [GeV/c], fLength [cm]) → t_exp [ns]
+;;; beta_exp = p / sqrt(p² + m²);  t_exp = fLength / (beta_exp * tof-c)
+
+(def {tof-texp-el-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do (= {bg}   (/ p pid-m-el))
+        (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+        (/ length (* beta tof-c))})))
+
+(def {tof-texp-mu-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do (= {bg}   (/ p pid-m-mu))
+        (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+        (/ length (* beta tof-c))})))
+
+(def {tof-texp-pi-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do (= {bg}   (/ p pid-m-pi))
+        (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+        (/ length (* beta tof-c))})))
+
+(def {tof-texp-ka-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do (= {bg}   (/ p pid-m-ka))
+        (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+        (/ length (* beta tof-c))})))
+
+(def {tof-texp-pr-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do (= {bg}   (/ p pid-m-pr))
+        (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+        (/ length (* beta tof-c))})))
+
+(def {tof-texp-de-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do (= {bg}   (/ p pid-m-de))
+        (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+        (/ length (* beta tof-c))})))
+
+;;; TOF accept mask (species-independent):
+;;; (fTOFChi2, fTrackTime, t_exp, fTrackTimeRes) → 1.0 if accepted, 0.0 if rejected
+;;; Accepts if: no TOF hit (chi2 < 0) OR bad resolution (t_res <= 0) OR |nσ_TOF| < nsigma-max
+(def {tof-ok-fn}
+  (jit-fn float (\{{float chi2} {float t_meas} {float t_exp} {float t_res}}
+    {(if (< chi2 0.0f)
+      {1.0f}
+      {(if (<= t_res 0.0f)
+        {1.0f}
+        {(if (< (fabsf (/ (- t_meas t_exp) t_res)) nsigma-max)
+          {1.0f}
+          {0.0f})})})})))
+
+(def {tof-texp-el-ptr} (jitfn-ptr tof-texp-el-fn))
+(def {tof-texp-mu-ptr} (jitfn-ptr tof-texp-mu-fn))
+(def {tof-texp-pi-ptr} (jitfn-ptr tof-texp-pi-fn))
+(def {tof-texp-ka-ptr} (jitfn-ptr tof-texp-ka-fn))
+(def {tof-texp-pr-ptr} (jitfn-ptr tof-texp-pr-fn))
+(def {tof-texp-de-ptr} (jitfn-ptr tof-texp-de-fn))
+(def {tof-ok-ptr}      (jitfn-ptr tof-ok-fn))
+
 ;;; ── pid-masks ─────────────────────────────────────────────────────────────
-;;; (pid-masks sig-c p-c pinner-c) -> list of 6 float32 masks: {el mu pi ka pr de}
-;;; p-c      — total reconstructed momentum (used for p > p-min-pid validity cut)
-;;; pinner-c — momentum at inner TPC wall (fTPCInnerParam), used for BB evaluation
-;;; Each mask is zero for tracks with p < p-min-pid or sig < sig-min.
-(def {pid-masks} (\{sig-c p-c pinner-c}
+;;; (pid-masks sig-c p-c pinner-c tofchi2-c tofp-c length-c time-c timeres-c)
+;;;   → list of 6 float32 masks: {el mu pi ka pr de}
+;;; p-c      — total reconstructed momentum (p > p-min-pid validity cut)
+;;; pinner-c — momentum at inner TPC wall (BB evaluation)
+;;; tofchi2-c — fTOFChi2 (< 0 = no hit; passes TOF requirement by default)
+;;; tofp-c   — fTOFExpMom (momentum at TOF, used for t_exp)
+;;; length-c  — fLength (track length in cm)
+;;; time-c   — fTrackTime (measured TOF time in ns)
+;;; timeres-c — fTrackTimeRes (TOF time resolution in ns)
+(def {pid-masks} (\{sig-c p-c pinner-c tofchi2-c tofp-c length-c time-c timeres-c}
   {do
   (= {m-p}   (col-map-ptr pid-p-ok-ptr   p-c))
   (= {m-sig} (col-map-ptr pid-sig-ok-ptr sig-c))
   (= {m-ok}  (col-zip-ptr pid-mul-ptr m-p m-sig))
+
+  ;;; TPC nσ masks
+  (= {tpc-el} (col-zip-ptr pid-el-ptr sig-c pinner-c))
+  (= {tpc-mu} (col-zip-ptr pid-mu-ptr sig-c pinner-c))
+  (= {tpc-pi} (col-zip-ptr pid-pi-ptr sig-c pinner-c))
+  (= {tpc-ka} (col-zip-ptr pid-ka-ptr sig-c pinner-c))
+  (= {tpc-pr} (col-zip-ptr pid-pr-ptr sig-c pinner-c))
+  (= {tpc-de} (col-zip-ptr pid-de-ptr sig-c pinner-c))
+
+  ;;; TOF expected times per species
+  (= {texp-el} (col-zip-ptr tof-texp-el-ptr tofp-c length-c))
+  (= {texp-mu} (col-zip-ptr tof-texp-mu-ptr tofp-c length-c))
+  (= {texp-pi} (col-zip-ptr tof-texp-pi-ptr tofp-c length-c))
+  (= {texp-ka} (col-zip-ptr tof-texp-ka-ptr tofp-c length-c))
+  (= {texp-pr} (col-zip-ptr tof-texp-pr-ptr tofp-c length-c))
+  (= {texp-de} (col-zip-ptr tof-texp-de-ptr tofp-c length-c))
+
+  ;;; TOF accept masks: 1.0 if no hit OR |nσ_TOF| < nsigma-max
+  (= {tof-el} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-el timeres-c))
+  (= {tof-mu} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-mu timeres-c))
+  (= {tof-pi} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-pi timeres-c))
+  (= {tof-ka} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-ka timeres-c))
+  (= {tof-pr} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-pr timeres-c))
+  (= {tof-de} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-de timeres-c))
+
+  ;;; Combined: validity × TPC × TOF
   (list
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-el-ptr sig-c pinner-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mu-ptr sig-c pinner-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pi-ptr sig-c pinner-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-ka-ptr sig-c pinner-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pr-ptr sig-c pinner-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-de-ptr sig-c pinner-c)))}))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-el tof-el))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-mu tof-mu))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-pi tof-pi))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-ka tof-ka))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-pr tof-pr))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-de tof-de)))}))
 
 (print "pid_tpc.rut loaded."
   "bb0=" bb0 "bb-res=" bb-res "nsigma-max=" nsigma-max

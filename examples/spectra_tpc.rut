@@ -15,7 +15,8 @@
 ;;;
 ;;; Cuts:
 ;;;   nCls (found TPC clusters) >= 70
-;;;   |dcaXY| < 2.4 cm,  |dcaZ| < 3.2 cm
+;;;   |dcaXY| < 0.0105 + 0.035/pT^1.1 cm  (pT-parameterised, matches isGlobalTrack)
+;;;   |dcaZ|  < 2.0 cm
 ;;;
 ;;; Usage:
 ;;;   (load "examples/spectra_tpc.rut")
@@ -25,6 +26,16 @@
 ;;; aod-paths must be set before loading, e.g.:
 ;;;   (def {aod-paths} (list "/path/to/AO2D.root"))
 ;;;   (def {aod-paths} (list "/path/1.root" "/path/2.root"))
+;;;
+;;; Guard: abort with a clear message if aod-paths was not defined.
+;;; (When undefined, the symbol auto-converts to the string "aod-paths".)
+(if (== aod-paths "aod-paths") {
+  do
+  (print "ERROR: aod-paths must be defined before loading spectra_tpc.rut.")
+  (print "  Example: (def {aod-paths} (list \"/tmp/AO2D.root\"))")
+  (print "  For Run2 files also set: trk-tree extra-tree coll-tree bc-tree")
+  (def {aod-paths} {})
+} {})
 
 ;;; Tree name defaults (Run3). For Run2-converted files use:
 ;;;   O2track  O2trackextra  O2collision  O2bc
@@ -226,11 +237,14 @@
 (def {mul-fn}
   (jit-fn float (\{{float a} {float b}} {(* a b)})))
 
-;;; DCA quality mask: 1.0f if |dcaXY|<2.4 AND |dcaZ|<3.2, else 0.0f
+;;; DCA primary-track selection matching isGlobalTrack():
+;;;   |dcaXY| < 0.0105 + 0.035 / pT^1.1   (pT-parameterised, tight at low pT)
+;;;   |dcaZ|  < 2.0 cm
+;;; The flat 2.4/3.2 cm cuts are track-quality only and let through Λ→pπ secondaries.
 (def {dca-ok-fn}
-  (jit-fn float (\{{float dxy} {float dz}}
-    {(if (< (fabsf dxy) 2.4f)
-      {(if (< (fabsf dz) 3.2f) {1.0f} {0.0f})}
+  (jit-fn float (\{{float dxy} {float dz} {float pt}}
+    {(if (< (fabsf dxy) (+ 0.0105f (/ 0.0350f (powf (fabsf pt) 1.1f))))
+      {(if (< (fabsf dz) 2.0f) {1.0f} {0.0f})}
       {0.0f})})))
 
 ;;; mutable nCls threshold
@@ -356,6 +370,11 @@
   (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) its-map-branch))
   (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
   (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
+  (= {tofchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTOFChi2"))
+  (= {tofp-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTOFExpMom"))
+  (= {length-c}  (load-branch aod-path (concat tf "/" extra-tree) "fLength"))
+  (= {time-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTrackTime"))
+  (= {timeres-c} (load-branch aod-path (concat tf "/" extra-tree) "fTrackTimeRes"))
 
   ;;; collision vertex
   (= {pvxc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosX"))
@@ -390,16 +409,18 @@
   (= {p-c}      (col-zip-ptr p-ptr q1pt-c tgl-c))
   (= {m-eta}    (col-map-ptr eta-ok-ptr tgl-c))
 
-  ;;; quality mask: event sel AND eta AND nCls AND global track cuts
+  ;;; quality mask: event sel AND eta AND nCls AND DCA AND global track cuts
   (= {m-cls}   (col-map-ptr cls-ok-ptr ncls-c))
   (= {m-its}   (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c)))
   (= {m-tpcq}  (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
   (= {m-crows} (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))
+  (= {m-dca}   (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c))
   (= {mask}   (col-zip-ptr mul-ptr m-ev
                 (col-zip-ptr mul-ptr m-eta
                   (col-zip-ptr mul-ptr m-cls
-                    (col-zip-ptr mul-ptr m-its
-                      (col-zip-ptr mul-ptr m-tpcq m-crows))))))
+                    (col-zip-ptr mul-ptr m-dca
+                      (col-zip-ptr mul-ptr m-its
+                        (col-zip-ptr mul-ptr m-tpcq m-crows)))))))
 
   ;;; fill histograms
   (col-fill-h1 hpt  (col-mask mask pt-c))
@@ -408,7 +429,7 @@
   (col-fill-h1 hdz  (col-mask mask dcaz-c))
 
   ;;; per-species: compute pid masks then combine with quality mask
-  (= {pmasks} (pid-masks sig-c p-c pinner-c))
+  (= {pmasks} (pid-masks sig-c p-c pinner-c tofchi2-c tofp-c length-c time-c timeres-c))
   (= {msk-el} (col-zip-ptr mul-ptr mask (nth 0 pmasks)))
   (= {msk-mu} (col-zip-ptr mul-ptr mask (nth 1 pmasks)))
   (= {msk-pi} (col-zip-ptr mul-ptr mask (nth 2 pmasks)))
