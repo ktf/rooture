@@ -45,6 +45,37 @@
 (def {tvx-bit}   -1)      ;;; -1 = skip TVX (fTriggerMask not filled in all datasets)
 (def {pvz-cut}   10.0)
 (load examples/eventsel.rut)
+
+;;; ── Optional: fetch BB parameters from CCDB ─────────────────────────────
+;;; Set ccdb-pid-ts to any Unix timestamp in ms (or 1 to use CCDB's default).
+;;; When 0 (default), pid_tpc.rut's built-in defaults are used.
+;;; Set ccdb-pid-url to your CCDB proxy (e.g. "http://localhost:8888").
+;;; Set ccdb-pid-headers to a list of HTTP headers if auth is needed.
+;;; Example:
+;;;   (def {ccdb-pid-ts}      1)
+;;;   (def {ccdb-pid-url}     "http://localhost:8888")
+;;;   (def {ccdb-pid-headers} {"Authorization: Bearer test123"})
+;;;   (load "examples/spectra_tpc.rut")
+(default {ccdb-pid-ts}      0)
+(default {ccdb-pid-url}     "http://localhost:8888")
+(default {ccdb-pid-headers} {})
+(if (> ccdb-pid-ts 0)
+  {do
+    (print "Fetching TPC BB params from CCDB for ts=" ccdb-pid-ts)
+    (= {_bb-url} (concat ccdb-pid-url "/Analysis/PID/TPC/BetheBloch/" (str ccdb-pid-ts)))
+    (= {_bb-f}   (deref (fetch-url _bb-url ccdb-pid-headers)))
+    (= {_bb-obj} (tfile-get _bb-f "ccdb_object"))
+    ;;; mPar = {kp1 kp2 kp3 kp4 kp5 mMIP resolution}
+    ;;; pid_tpc.rut absorbs mMIP into bb0: bb0 = mMIP * kp1
+    (= {_par}    (tobj-member _bb-obj "mPar"))
+    (def {bb0}   (* (nth 5 _par) (nth 0 _par)))
+    (def {bb1}   (nth 1 _par))
+    (def {bb2}   (nth 2 _par))
+    (def {bb3}   (nth 3 _par))
+    (def {bb4}   (nth 4 _par))
+    (print "CCDB BB params: bb0=" bb0 "bb1=" bb1 "bb2=" bb2
+           "bb3=" bb3 "bb4=" bb4)}
+  {})
 (load examples/pid_tpc.rut)
 
 ;;; ── Collect {path tf-name} pairs across all input files ─────────────────
@@ -203,14 +234,39 @@
   (jit-fn float (\{{float ncls}}
     {(if (>= ncls (.GetAt min-cls-box 0)) {1.0f} {0.0f})})))
 
+;;; global track quality cuts matching isGlobalTrack()
+;;; ITS: at least 1 cluster AND ITS chi2/cluster < 36
+(def {its-ok-fn}
+  (jit-fn float (\{{float itsmap} {float itschi2}}
+    {(if (> itsmap 0.5f)
+      {(if (< itschi2 36.0f) {1.0f} {0.0f})}
+      {0.0f})})))
+
+;;; TPC chi2/cluster < 4
+(def {tpcchi2-ok-fn}
+  (jit-fn float (\{{float chi2}}
+    {(if (< chi2 4.0f) {1.0f} {0.0f})})))
+
+;;; TPC crossed rows >= 70 AND crossed/findable >= 0.8
+(def {crows-ok-fn}
+  (jit-fn float (\{{float ncrows} {float nfind}}
+    {(if (>= ncrows 70.0f)
+      {(if (> nfind 0.5f)
+        {(if (>= (/ ncrows nfind) 0.8f) {1.0f} {0.0f})}
+        {0.0f})}
+      {0.0f})})))
+
 ;;; resolve function pointers once on the main thread
-(def {pt-ptr}      (jitfn-ptr pt-fn))
-(def {p-ptr}       (jitfn-ptr p-fn))
-(def {eta-ok-ptr}  (jitfn-ptr eta-ok-fn))
-(def {sub-ptr}     (jitfn-ptr sub-fn))
-(def {mul-ptr}     (jitfn-ptr mul-fn))
-(def {dca-ok-ptr}  (jitfn-ptr dca-ok-fn))
-(def {cls-ok-ptr}  (jitfn-ptr cls-ok-fn))
+(def {pt-ptr}        (jitfn-ptr pt-fn))
+(def {p-ptr}         (jitfn-ptr p-fn))
+(def {eta-ok-ptr}    (jitfn-ptr eta-ok-fn))
+(def {sub-ptr}       (jitfn-ptr sub-fn))
+(def {mul-ptr}       (jitfn-ptr mul-fn))
+(def {dca-ok-ptr}    (jitfn-ptr dca-ok-fn))
+(def {cls-ok-ptr}    (jitfn-ptr cls-ok-fn))
+(def {its-ok-ptr}    (jitfn-ptr its-ok-fn))
+(def {tpcchi2-ok-ptr}(jitfn-ptr tpcchi2-ok-fn))
+(def {crows-ok-ptr}  (jitfn-ptr crows-ok-fn))
 
 ;;; ── Histograms — pre-created on main thread ──────────────────────────────
 
@@ -274,10 +330,15 @@
   (= {alp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
   (= {cidx-c} (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
 
-  ;;; extra: findable, (findable-found), and TPC signal
-  (= {find-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
-  (= {fmin-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
-  (= {sig-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCSignal"))
+  ;;; extra: findable, (findable-found), TPC signal, inner-wall momentum, and global track cuts
+  (= {find-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+  (= {fmin-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+  (= {fcrows-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusCrossedRows"))
+  (= {sig-c}     (load-branch aod-path (concat tf "/" extra-tree) "fTPCSignal"))
+  (= {pinner-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCInnerParam"))
+  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) "fITSClusterMap"))
+  (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
+  (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
 
   ;;; collision vertex
   (= {pvxc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosX"))
@@ -305,15 +366,23 @@
   (= {dcaz-c}  (nth 1 dca))
 
   ;;; nCls = fTPCNClsFindable - fTPCNClsFindableMinusFound
+  ;;; nCrossedRows = fTPCNClsFindable - fTPCNClsFindableMinusCrossedRows
   (= {ncls-c}   (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {ncrows-c} (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
   (= {pt-c}     (col-map-ptr pt-ptr q1pt-c))
   (= {p-c}      (col-zip-ptr p-ptr q1pt-c tgl-c))
   (= {m-eta}    (col-map-ptr eta-ok-ptr tgl-c))
 
-  ;;; quality mask: event sel AND eta AND nCls  (no DCA — matches official "tiny")
-  (= {m-cls}  (col-map-ptr cls-ok-ptr ncls-c))
+  ;;; quality mask: event sel AND eta AND nCls AND global track cuts
+  (= {m-cls}   (col-map-ptr cls-ok-ptr ncls-c))
+  (= {m-its}   (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c)))
+  (= {m-tpcq}  (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
+  (= {m-crows} (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))
   (= {mask}   (col-zip-ptr mul-ptr m-ev
-                (col-zip-ptr mul-ptr m-eta m-cls)))
+                (col-zip-ptr mul-ptr m-eta
+                  (col-zip-ptr mul-ptr m-cls
+                    (col-zip-ptr mul-ptr m-its
+                      (col-zip-ptr mul-ptr m-tpcq m-crows))))))
 
   ;;; fill histograms
   (col-fill-h1 hpt  (col-mask mask pt-c))
@@ -322,7 +391,7 @@
   (col-fill-h1 hdz  (col-mask mask dcaz-c))
 
   ;;; per-species: compute pid masks then combine with quality mask
-  (= {pmasks} (pid-masks sig-c p-c))
+  (= {pmasks} (pid-masks sig-c p-c pinner-c))
   (= {msk-el} (col-zip-ptr mul-ptr mask (nth 0 pmasks)))
   (= {msk-mu} (col-zip-ptr mul-ptr mask (nth 1 pmasks)))
   (= {msk-pi} (col-zip-ptr mul-ptr mask (nth 2 pmasks)))

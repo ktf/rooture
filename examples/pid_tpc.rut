@@ -28,7 +28,7 @@
 (default {bb3}        2.72123)
 (default {bb4}        6.08092)
 (default {bb-res}     0.07)
-(default {nsigma-max} 2.0)
+(default {nsigma-max} 3.0)
 (default {p-min-pid}  0.1)   ;;; 100 MeV/c — below this TPC PID is unreliable
 (default {sig-min}    20.0)  ;;; min TPC signal — tracks with near-zero signal have failed extraction
 
@@ -47,81 +47,87 @@
 ;;; single expressions (no do-blocks), satisfying the C++ ternary constraint.
 
 (def {pid-el-fn}
-  (jit-fn float (\{{float sig} {float ptot}}
+  (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}     (/ ptot pid-m-el))
+      (= {bg}     (/ pinner pid-m-el))
       (= {safe}   (> bg 0.05))
       (= {bg_s}   (if safe {bg}   {1.0}))
       (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
       (= {aa}     (pow beta bb3))
       (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
       (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
-      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (= {sigma}  (* bb-res exp_))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
 
 (def {pid-mu-fn}
-  (jit-fn float (\{{float sig} {float ptot}}
+  (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}     (/ ptot pid-m-mu))
+      (= {bg}     (/ pinner pid-m-mu))
       (= {safe}   (> bg 0.05))
       (= {bg_s}   (if safe {bg}   {1.0}))
       (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
       (= {aa}     (pow beta bb3))
       (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
       (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
-      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (= {sigma}  (* bb-res exp_))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
 
 (def {pid-pi-fn}
-  (jit-fn float (\{{float sig} {float ptot}}
+  (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}     (/ ptot pid-m-pi))
+      (= {bg}     (/ pinner pid-m-pi))
       (= {safe}   (> bg 0.05))
       (= {bg_s}   (if safe {bg}   {1.0}))
       (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
       (= {aa}     (pow beta bb3))
       (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
       (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
-      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (= {sigma}  (* bb-res exp_))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
 
 (def {pid-ka-fn}
-  (jit-fn float (\{{float sig} {float ptot}}
+  (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}     (/ ptot pid-m-ka))
+      (= {bg}     (/ pinner pid-m-ka))
       (= {safe}   (> bg 0.05))
       (= {bg_s}   (if safe {bg}   {1.0}))
       (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
       (= {aa}     (pow beta bb3))
       (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
       (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
-      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (= {sigma}  (* bb-res exp_))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
 
 (def {pid-pr-fn}
-  (jit-fn float (\{{float sig} {float ptot}}
+  (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}     (/ ptot pid-m-pr))
+      (= {bg}     (/ pinner pid-m-pr))
       (= {safe}   (> bg 0.05))
       (= {bg_s}   (if safe {bg}   {1.0}))
       (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
       (= {aa}     (pow beta bb3))
       (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
       (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
-      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (= {sigma}  (* bb-res exp_))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
 
 (def {pid-de-fn}
-  (jit-fn float (\{{float sig} {float ptot}}
+  (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}     (/ ptot pid-m-de))
+      (= {bg}     (/ pinner pid-m-de))
       (= {safe}   (> bg 0.05))
       (= {bg_s}   (if safe {bg}   {1.0}))
       (= {beta}   (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
       (= {aa}     (pow beta bb3))
       (= {lnt}    (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
       (= {exp_}   (if safe {(/ (* (- (- bb1 aa) lnt) bb0) aa)} {9999.0}))
-      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) (* bb-res exp_))} {9999.0}))
+      (= {sigma}  (* bb-res exp_))
+      (= {nsig}   (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
 
 ;;; ── Function pointers ────────────────────────────────────────────────────
@@ -143,20 +149,22 @@
 (def {pid-mul-ptr}   (jitfn-ptr pid-mul-fn))
 
 ;;; ── pid-masks ─────────────────────────────────────────────────────────────
-;;; (pid-masks sig-c p-c) -> list of 6 float32 masks: {el mu pi ka pr de}
+;;; (pid-masks sig-c p-c pinner-c) -> list of 6 float32 masks: {el mu pi ka pr de}
+;;; p-c      — total reconstructed momentum (used for p > p-min-pid validity cut)
+;;; pinner-c — momentum at inner TPC wall (fTPCInnerParam), used for BB evaluation
 ;;; Each mask is zero for tracks with p < p-min-pid or sig < sig-min.
-(def {pid-masks} (\{sig-c p-c}
+(def {pid-masks} (\{sig-c p-c pinner-c}
   {do
   (= {m-p}   (col-map-ptr pid-p-ok-ptr   p-c))
   (= {m-sig} (col-map-ptr pid-sig-ok-ptr sig-c))
   (= {m-ok}  (col-zip-ptr pid-mul-ptr m-p m-sig))
   (list
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-el-ptr sig-c p-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mu-ptr sig-c p-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pi-ptr sig-c p-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-ka-ptr sig-c p-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pr-ptr sig-c p-c))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-de-ptr sig-c p-c)))}))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-el-ptr sig-c pinner-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mu-ptr sig-c pinner-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pi-ptr sig-c pinner-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-ka-ptr sig-c pinner-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-pr-ptr sig-c pinner-c))
+    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-de-ptr sig-c pinner-c)))}))
 
 (print "pid_tpc.rut loaded."
   "bb0=" bb0 "bb-res=" bb-res "nsigma-max=" nsigma-max
