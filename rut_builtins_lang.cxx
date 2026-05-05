@@ -1,5 +1,6 @@
 #include "rooture.h"
 #include <cstring>
+#include <cmath>
 
 lval* builtin_head(lenv *e, lval* a) {
   /* Check Error Conditions */
@@ -1107,6 +1108,64 @@ lval* builtin_is_undefined(lenv* e, lval* a) {
   return lval_num(1);  /* not found — undefined */
 }
 
+// ---------------------------------------------------------------------------
+// Math builtins — unary and binary floating-point functions
+// ---------------------------------------------------------------------------
+static double lval_to_double(lval* v) {
+  if (v->type == LVAL_FLOAT || v->type == LVAL_FLOAT32) return v->floating;
+  return (double)v->num;
+}
+
+static lval* builtin_math1(lenv* e, lval* a, double(*fn)(double), const char* name) {
+  LASSERT_NUM(name, a, 1);
+  LASSERT(a, a->cell[0]->type == LVAL_NUM ||
+             a->cell[0]->type == LVAL_FLOAT ||
+             a->cell[0]->type == LVAL_FLOAT32,
+          "'%s' requires a number, got %s", name, ltype_name(a->cell[0]->type));
+  double result = fn(lval_to_double(a->cell[0]));
+  lval_del(a);
+  return lval_floating(result);
+}
+
+static lval* builtin_sqrt(lenv* e, lval* a)  { return builtin_math1(e, a, std::sqrt,  "sqrt"); }
+static lval* builtin_log(lenv* e, lval* a)   { return builtin_math1(e, a, std::log,   "log"); }
+static lval* builtin_log2(lenv* e, lval* a)  { return builtin_math1(e, a, std::log2,  "log2"); }
+static lval* builtin_log10(lenv* e, lval* a) { return builtin_math1(e, a, std::log10, "log10"); }
+static lval* builtin_exp(lenv* e, lval* a)   { return builtin_math1(e, a, std::exp,   "exp"); }
+static lval* builtin_sin(lenv* e, lval* a)   { return builtin_math1(e, a, std::sin,   "sin"); }
+static lval* builtin_cos(lenv* e, lval* a)   { return builtin_math1(e, a, std::cos,   "cos"); }
+static lval* builtin_tan(lenv* e, lval* a)   { return builtin_math1(e, a, std::tan,   "tan"); }
+static lval* builtin_asin(lenv* e, lval* a)  { return builtin_math1(e, a, std::asin,  "asin"); }
+static lval* builtin_acos(lenv* e, lval* a)  { return builtin_math1(e, a, std::acos,  "acos"); }
+static lval* builtin_atan(lenv* e, lval* a)  { return builtin_math1(e, a, std::atan,  "atan"); }
+static lval* builtin_fabs(lenv* e, lval* a)  { return builtin_math1(e, a, std::fabs,  "fabs"); }
+static lval* builtin_floor(lenv* e, lval* a) { return builtin_math1(e, a, std::floor, "floor"); }
+static lval* builtin_ceil(lenv* e, lval* a)  { return builtin_math1(e, a, std::ceil,  "ceil"); }
+
+static lval* builtin_pow(lenv* e, lval* a) {
+  LASSERT_NUM("pow", a, 2);
+  for (int i = 0; i < 2; i++)
+    LASSERT(a, a->cell[i]->type == LVAL_NUM ||
+               a->cell[i]->type == LVAL_FLOAT ||
+               a->cell[i]->type == LVAL_FLOAT32,
+            "'pow' requires numbers, got %s at arg %d", ltype_name(a->cell[i]->type), i);
+  double result = std::pow(lval_to_double(a->cell[0]), lval_to_double(a->cell[1]));
+  lval_del(a);
+  return lval_floating(result);
+}
+
+static lval* builtin_atan2(lenv* e, lval* a) {
+  LASSERT_NUM("atan2", a, 2);
+  for (int i = 0; i < 2; i++)
+    LASSERT(a, a->cell[i]->type == LVAL_NUM ||
+               a->cell[i]->type == LVAL_FLOAT ||
+               a->cell[i]->type == LVAL_FLOAT32,
+            "'atan2' requires numbers, got %s at arg %d", ltype_name(a->cell[i]->type), i);
+  double result = std::atan2(lval_to_double(a->cell[0]), lval_to_double(a->cell[1]));
+  lval_del(a);
+  return lval_floating(result);
+}
+
 void lenv_add_builtins_lang(lenv* e) {
   /* List Functions */
   lenv_add_builtin(e, "list", builtin_list);
@@ -1130,6 +1189,23 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "bor",  builtin_bor);
   lenv_add_builtin(e, "bxor", builtin_bxor);
   lenv_add_builtin(e, "bnot", builtin_bnot);
+  /* Floating-point math */
+  lenv_add_builtin(e, "sqrt",  builtin_sqrt);
+  lenv_add_builtin(e, "log",   builtin_log);
+  lenv_add_builtin(e, "log2",  builtin_log2);
+  lenv_add_builtin(e, "log10", builtin_log10);
+  lenv_add_builtin(e, "exp",   builtin_exp);
+  lenv_add_builtin(e, "sin",   builtin_sin);
+  lenv_add_builtin(e, "cos",   builtin_cos);
+  lenv_add_builtin(e, "tan",   builtin_tan);
+  lenv_add_builtin(e, "asin",  builtin_asin);
+  lenv_add_builtin(e, "acos",  builtin_acos);
+  lenv_add_builtin(e, "atan",  builtin_atan);
+  lenv_add_builtin(e, "atan2", builtin_atan2);
+  lenv_add_builtin(e, "fabs",  builtin_fabs);
+  lenv_add_builtin(e, "floor", builtin_floor);
+  lenv_add_builtin(e, "ceil",  builtin_ceil);
+  lenv_add_builtin(e, "pow",   builtin_pow);
   /* Conditionals */
   lenv_add_builtin(e, "cond", builtin_cond);
   lenv_add_builtin(e, "if",   builtin_if);
