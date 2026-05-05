@@ -1,0 +1,117 @@
+;;; tests/math_builtins.rut — tests for floating-point math builtins
+;;;
+;;; Run from the rooture REPL:
+;;;   (load "tests/math_builtins.rut")
+;;;
+;;; Exits with code 1 on the first failing assertion.
+
+(load stdlib.rut)
+
+;;; ── Helpers ──────────────────────────────────────────────────────────────────
+
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)
+    }
+}))
+
+;;; Floating-point near-equality within absolute epsilon
+(def {assert-near} (\{label got expected eps} {
+  if (< (fabs (- got expected)) eps)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected "  eps:" eps)
+      (exit 1)
+    }
+}))
+
+(def {eps} 1e-9)
+(def {eps6} 1e-6)
+
+;;; ── sqrt ─────────────────────────────────────────────────────────────────────
+
+(assert-eq   "sqrt 4"          (sqrt 4.0)        2.0)
+(assert-eq   "sqrt 9"          (sqrt 9.0)        3.0)
+(assert-eq   "sqrt 1"          (sqrt 1.0)        1.0)
+(assert-eq   "sqrt 0"          (sqrt 0.0)        0.0)
+(assert-near "sqrt 2"          (sqrt 2.0)        1.41421356237   eps6)
+(assert-near "sqrt int"        (sqrt 25)         5.0             eps)
+
+;;; ── pow ──────────────────────────────────────────────────────────────────────
+
+(assert-eq   "pow 2^0"         (pow 2.0 0.0)     1.0)
+(assert-eq   "pow 2^1"         (pow 2.0 1.0)     2.0)
+(assert-eq   "pow 2^10"        (pow 2.0 10.0)    1024.0)
+(assert-eq   "pow 3^3"         (pow 3.0 3.0)     27.0)
+(assert-eq   "pow 1^99"        (pow 1.0 99.0)    1.0)
+(assert-near "pow 2^0.5"       (pow 2.0 0.5)     (sqrt 2.0)      eps)
+(assert-near "pow int args"    (pow 4 2)         16.0            eps)
+
+;;; ── log / exp ────────────────────────────────────────────────────────────────
+
+(assert-eq   "log 1"           (log 1.0)         0.0)
+(assert-near "log e"           (log 2.718281828)  1.0            eps6)
+(assert-near "exp 0"           (exp 0.0)          1.0            eps)
+(assert-near "exp 1"           (exp 1.0)          2.718281828    eps6)
+(assert-near "log(exp(3))"     (log (exp 3.0))    3.0            eps6)
+(assert-near "exp(log(5))"     (exp (log 5.0))    5.0            eps6)
+
+(assert-eq   "log10 1"         (log10 1.0)       0.0)
+(assert-near "log10 10"        (log10 10.0)      1.0             eps)
+(assert-near "log10 100"       (log10 100.0)     2.0             eps)
+
+(assert-eq   "log2 1"          (log2 1.0)        0.0)
+(assert-near "log2 2"          (log2 2.0)        1.0             eps)
+(assert-near "log2 8"          (log2 8.0)        3.0             eps)
+
+;;; ── fabs / floor / ceil ──────────────────────────────────────────────────────
+
+(assert-eq   "fabs positive"   (fabs 3.5)        3.5)
+(assert-eq   "fabs negative"   (fabs -3.5)       3.5)
+(assert-eq   "fabs zero"       (fabs 0.0)        0.0)
+(assert-near "fabs int"        (fabs -7)         7.0             eps)
+
+(assert-eq   "floor 3.7"       (floor 3.7)       3.0)
+(assert-eq   "floor 3.0"       (floor 3.0)       3.0)
+(assert-eq   "floor -3.2"      (floor -3.2)      -4.0)
+(assert-eq   "ceil 3.2"        (ceil 3.2)        4.0)
+(assert-eq   "ceil 3.0"        (ceil 3.0)        3.0)
+(assert-eq   "ceil -3.7"       (ceil -3.7)       -3.0)
+
+;;; ── sin / cos / tan ──────────────────────────────────────────────────────────
+
+(def {pi} (* 4.0 (atan 1.0)))   ;;; pi = 4 * atan(1)
+
+(assert-near "sin 0"           (sin 0.0)          0.0            eps)
+(assert-near "cos 0"           (cos 0.0)          1.0            eps)
+(assert-near "tan 0"           (tan 0.0)          0.0            eps)
+(assert-near "sin pi/2"        (sin (/ pi 2.0))   1.0            eps6)
+(assert-near "cos pi/2"        (cos (/ pi 2.0))   0.0            eps6)
+(assert-near "sin pi"          (sin pi)            0.0            eps6)
+(assert-near "cos pi"          (cos pi)           -1.0            eps6)
+(assert-near "sin^2+cos^2=1"   (+ (* (sin pi) (sin pi)) (* (cos pi) (cos pi)))  1.0  eps)
+
+;;; ── asin / acos / atan / atan2 ───────────────────────────────────────────────
+
+(assert-near "asin 0"          (asin 0.0)         0.0            eps)
+(assert-near "asin 1"          (asin 1.0)         (/ pi 2.0)     eps6)
+(assert-near "acos 1"          (acos 1.0)         0.0            eps)
+(assert-near "acos 0"          (acos 0.0)         (/ pi 2.0)     eps6)
+(assert-near "atan 0"          (atan 0.0)         0.0            eps)
+(assert-near "atan 1"          (atan 1.0)         (/ pi 4.0)     eps6)
+(assert-near "atan2 (0,1)"     (atan2 0.0 1.0)    0.0            eps)
+(assert-near "atan2 (1,0)"     (atan2 1.0 0.0)    (/ pi 2.0)     eps6)
+(assert-near "atan2 (1,1)"     (atan2 1.0 1.0)    (/ pi 4.0)     eps6)
+
+;;; ── integer arguments ────────────────────────────────────────────────────────
+
+(assert-near "sqrt int 16"     (sqrt 16)          4.0            eps)
+(assert-near "log int 1"       (log 1)            0.0            eps)
+(assert-near "exp int 0"       (exp 0)            1.0            eps)
+(assert-near "fabs int -5"     (fabs -5)          5.0            eps)
+
+(print "All math-builtins tests passed.")
+(exit 0)

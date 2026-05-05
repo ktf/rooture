@@ -108,3 +108,12 @@ add_test(
 set_tests_properties(jit_fn PROPERTIES
   PASS_REGULAR_EXPRESSION "All jit-fn tests passed"
 )
+
+add_test(
+  NAME math_builtins
+  COMMAND $<TARGET_FILE:rooture> tests/math_builtins.rut
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(math_builtins PROPERTIES
+  PASS_REGULAR_EXPRESSION "All math-builtins tests passed"
+)
