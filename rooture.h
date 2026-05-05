@@ -305,6 +305,7 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset,
 void lenv_add_builtins_lang(lenv* e);
 void lenv_add_builtins_root(lenv* e);
 void lenv_add_builtins_jitfn(lenv* e);
+void rut_file_cache_clear();   // close all cached TFiles (main thread)
 void lenv_add_builtins_column(lenv* e);
 void lenv_add_builtins_net(lenv* e);
 void lenv_add_builtins(lenv* e);

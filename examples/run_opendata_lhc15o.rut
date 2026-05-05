@@ -1,0 +1,18 @@
+;;; examples/run_opendata_lhc15o.rut
+;;; Run spectra_tpc on LHC15o open data (first 5 files, run 245349).
+;;;
+;;; Usage:
+;;;   (load "examples/run_opendata_lhc15o.rut")
+
+(def {aod-paths} (list
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0002/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0003/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0004/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0005/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0006/AO2D.root"))
+(def {trk-tree}       "O2track")
+(def {extra-tree}     "O2trackextra_002")
+(def {coll-tree}      "O2collision_001")
+(def {bc-tree}        "O2bc_001")
+(def {its-map-branch} "fITSClusterSizes")
+(load "examples/spectra_tpc.rut")

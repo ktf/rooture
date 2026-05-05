@@ -27,6 +27,54 @@
 #include <cmath>
 
 // ---------------------------------------------------------------------------
+// File cache — one TFile handle per thread per path.
+// TFile::Open is dispatched to the main thread (ROOT global-state safety),
+// but the handle is stored thread-locally so concurrent workers each have
+// their own file descriptor and can call GetBulkEntries without racing.
+// ---------------------------------------------------------------------------
+static thread_local std::unordered_map<std::string, TFile*> t_file_cache;
+
+// Look up or open a thread-local file handle. Safe to call from any thread.
+static TFile* file_cache_get(const std::string& path) {
+  auto it = t_file_cache.find(path);
+  if (it != t_file_cache.end()) {
+    if (it->second && !it->second->IsZombie()) return it->second;
+    delete it->second;
+    t_file_cache.erase(it);
+  }
+  // TFile::Open touches ROOT global state — dispatch to main thread.
+  TFile* f = nullptr;
+  rut_dispatch_work([&]{
+    f = TFile::Open(path.c_str(), "READ");
+    if (f && f->IsZombie()) { delete f; f = nullptr; }
+  });
+  if (f) t_file_cache[path] = f;
+  return f;
+}
+
+// ---------------------------------------------------------------------------
+// Column cache — one shared result per (path, tree, branch).
+// Holds weak_ptr so columns are freed automatically when no lval references
+// them.  The shared_future deduplicates concurrent requests: the first caller
+// does the I/O while others wait, then all share the same buffer.
+//
+// Lifetime: a column lives as long as some lval (or pre-fetch layer) holds a
+// RutColumnPtr (shared_ptr<RutColumn>).  The cache entry survives as an
+// expired weak_ptr and is evicted on the next access for the same key.
+// ---------------------------------------------------------------------------
+static std::mutex g_col_cache_mu;
+static std::unordered_map<std::string,
+                          std::shared_future<std::weak_ptr<RutColumn>>> g_col_cache;
+
+// Close all cached files on the calling thread and clear the column cache.
+void rut_file_cache_clear() {
+  for (auto& kv : t_file_cache) { kv.second->Close(); delete kv.second; }
+  t_file_cache.clear();
+  std::lock_guard<std::mutex> lock(g_col_cache_mu);
+  g_col_cache.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Aligned allocation for column data buffers.
 // 128 bytes = Apple Silicon L1/L2 cache-line boundary; also covers AVX-512.
 // aligned_alloc requires size to be a multiple of the alignment.
@@ -126,48 +174,40 @@ static RutColumnPtr& col_of(lval* v) {
 }
 
 // ---------------------------------------------------------------------------
-// Core loader — safe to call from a future thread.
-// All ROOT API calls that touch global state (StreamerInfo registry,
-// gDirectory, class schema tables) are dispatched to the main thread.
-// Only the raw GetBulkEntries read loop runs on the calling thread.
+// Core loader — safe to call from any thread.
+// file_cache_get dispatches TFile::Open to the main thread but stores the
+// handle in thread-local storage, so every subsequent operation (Get<TTree>,
+// GetBranch, GetBulkEntries) runs on the calling thread using its own file
+// descriptor — no shared mutable state, no races.
 // ---------------------------------------------------------------------------
 static RutColumnPtr load_branch_impl(const char* path,
                                       const char* tree_path,
                                       const char* branch_name) {
-  TFile*   f     = nullptr;
-  TBranch* br    = nullptr;
-  int      dtype = -1;
-  Long64_t total = 0;
-
   std::string p(path), tp(tree_path), bn(branch_name);
-  rut_dispatch_work([&]{
-    f = TFile::Open(p.c_str(), "READ");
-    if (!f || f->IsZombie()) return;
-    TTree* tree = f->Get<TTree>(tp.c_str());
-    if (!tree) return;
-    br    = tree->GetBranch(bn.c_str());
-    if (!br) return;
-    dtype = branch_dtype(br);
-    total = br->GetEntries();
-  });
 
-  if (!br || dtype < 0) {
-    if (f) { rut_dispatch_work([f]{ f->Close(); delete f; }); }
-    return nullptr;
-  }
+  TFile* f = file_cache_get(p);
+  if (!f) return nullptr;
+
+  TTree* tree = f->Get<TTree>(tp.c_str());
+  if (!tree) return nullptr;
+
+  TBranch* br = tree->GetBranch(bn.c_str());
+  if (!br) return nullptr;
+
+  int      dtype = branch_dtype(br);
+  Long64_t total = br->GetEntries();
+  if (dtype < 0 || total <= 0) return nullptr;
 
   size_t esz = col_dtype_size(dtype);
-
-  Long64_t total_local = total;
-  void* buf = col_alloc((size_t)total_local * esz);
-  if (!buf) { rut_dispatch_work([f]{ f->Close(); delete f; }); return nullptr; }
+  void*  buf = col_alloc((size_t)total * esz);
+  if (!buf) return nullptr;
 
   auto& bulk = br->GetBulkRead();
   TBufferFile tbuf(TBuffer::kRead, 512 * 1024);
   Long64_t entry  = 0;
   size_t   cursor = 0;
 
-  while (entry < total_local) {
+  while (entry < total) {
     Int_t n = bulk.GetBulkEntries(entry, tbuf);
     if (n <= 0) break;
     memcpy((char*)buf + cursor * esz, tbuf.GetCurrent(), (size_t)n * esz);
@@ -175,16 +215,79 @@ static RutColumnPtr load_branch_impl(const char* path,
     entry  += n;
   }
 
-  // Close on the main thread — TFile::~TFile calls TProcessUUID::RemoveUUID
-  // which mutates a global THashList; concurrent calls from future threads
-  // cause a data race and SIGSEGV.
-  rut_dispatch_work([f]{ f->Close(); delete f; });
-
   auto col = std::make_shared<RutColumn>();
   col->dtype = dtype;
-  col->n     = cursor;   // actual entries read (== total if no error)
+  col->n     = cursor;
   col->data  = buf;
   return col;
+}
+
+// ---------------------------------------------------------------------------
+// Cached loader — wraps load_branch_impl with the column cache.
+// First caller for a given (path, tree, branch) does the I/O; concurrent
+// callers for the same key wait on the shared_future and get the same result.
+// ---------------------------------------------------------------------------
+static RutColumnPtr load_branch_cached(const char* path,
+                                        const char* tree_path,
+                                        const char* branch_name) {
+  std::string key = std::string(path) + "\t" + tree_path + "\t" + branch_name;
+
+  while (true) {
+    std::shared_future<std::weak_ptr<RutColumn>> fut;
+    bool i_will_load = false;
+    std::promise<std::weak_ptr<RutColumn>> my_promise;
+
+    {
+      std::lock_guard<std::mutex> lock(g_col_cache_mu);
+      auto it = g_col_cache.find(key);
+      if (it != g_col_cache.end()) {
+        if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+          // Future resolved — try to promote the weak_ptr.
+          if (auto sp = it->second.get().lock()) return sp;  // still alive
+          g_col_cache.erase(it);   // expired — evict, fall through to reload
+        } else {
+          fut = it->second;         // still loading — wait below
+        }
+      }
+      if (!fut.valid()) {
+        // Not in cache (or just evicted) — this thread will load.
+        fut = my_promise.get_future().share();
+        g_col_cache[key] = fut;
+        i_will_load = true;
+      }
+    }
+
+    if (i_will_load) {
+      try {
+        RutColumnPtr col = load_branch_impl(path, tree_path, branch_name);
+        my_promise.set_value(std::weak_ptr<RutColumn>(col));
+        return col;
+      } catch (...) {
+        { std::lock_guard<std::mutex> lock(g_col_cache_mu); g_col_cache.erase(key); }
+        my_promise.set_exception(std::current_exception());
+        throw;
+      }
+    }
+
+    // Wait for the loading thread, draining the Cling queue so the main thread
+    // can service TFile::Open dispatches from the loading thread.
+    while (fut.wait_for(std::chrono::milliseconds(1)) == std::future_status::timeout)
+      rut_drain_cling_queue();
+
+    if (auto sp = fut.get().lock()) return sp;
+
+    // Rare: loader finished but the column was freed before we could lock().
+    // Evict the stale entry and retry from the top.
+    {
+      std::lock_guard<std::mutex> lock(g_col_cache_mu);
+      auto it = g_col_cache.find(key);
+      if (it != g_col_cache.end() &&
+          it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready &&
+          !it->second.get().lock())
+        g_col_cache.erase(it);
+    }
+    // loop
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +306,7 @@ static lval* builtin_load_branch(lenv* e, lval* a) {
   std::string branch = a->cell[2]->str;
   lval_del(a);
 
-  RutColumnPtr col = load_branch_impl(path.c_str(), tree.c_str(), branch.c_str());
+  RutColumnPtr col = load_branch_cached(path.c_str(), tree.c_str(), branch.c_str());
   if (!col)
     return lval_err("load-branch: failed to load '%s' from '%s' in '%s'",
                     branch.c_str(), tree.c_str(), path.c_str());
@@ -241,7 +344,7 @@ static lval* builtin_load_branches(lenv* e, lval* a) {
   for (int i = 0; i < nb; i++) {
     auto task = std::make_shared<std::packaged_task<RutColumnPtr()>>(
       [path, tree, bn = bnames[i]]() -> RutColumnPtr {
-        return load_branch_impl(path.c_str(), tree.c_str(), bn.c_str());
+        return load_branch_cached(path.c_str(), tree.c_str(), bn.c_str());
       });
     futs.push_back(task->get_future().share());
     rut_pool_submit([task]() { (*task)(); });
@@ -463,6 +566,41 @@ static lval* builtin_col_length(lenv* /*e*/, lval* a) {
   size_t n = col_of(a->cell[0])->n;
   lval_del(a);
   return lval_num((long)n);
+}
+
+// ---------------------------------------------------------------------------
+// (col-nrows col) → Number — alias for col-length, matches the pmap idiom
+// ---------------------------------------------------------------------------
+static lval* builtin_col_nrows(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-nrows", a, 1);
+  LASSERT_TYPE("col-nrows", a, 0, LVAL_COLUMN);
+  long n = (long)col_of(a->cell[0])->n;
+  lval_del(a);
+  return lval_num(n);
+}
+
+// ---------------------------------------------------------------------------
+// (col-slice col start count) → Column — copy of rows [start, start+count).
+// Used to split a column across workers for within-TF parallelism.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_slice(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-slice", a, 3);
+  LASSERT_TYPE("col-slice", a, 0, LVAL_COLUMN);
+  LASSERT_TYPE("col-slice", a, 1, LVAL_NUM);
+  LASSERT_TYPE("col-slice", a, 2, LVAL_NUM);
+  auto& col   = col_of(a->cell[0]);
+  size_t start = (size_t)a->cell[1]->num;
+  size_t count = (size_t)a->cell[2]->num;
+  lval_del(a);
+  if (start >= col->n) count = 0;
+  else if (start + count > col->n) count = col->n - start;
+  size_t esz = col_dtype_size(col->dtype);
+  void*  buf = col_alloc(count ? count * esz : esz);
+  if (!buf) return lval_err("col-slice: out of memory");
+  if (count) memcpy(buf, (char*)col->data + start * esz, count * esz);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = col->dtype; c->n = count; c->data = buf;
+  return lval_column(std::move(c));
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,7 +1583,14 @@ static lval* builtin_col_fill_minv3_h1(lenv* /*e*/, lval* a) {
 void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "load-branch",    builtin_load_branch);
   lenv_add_builtin(e, "load-branches",  builtin_load_branches);
+  lenv_add_builtin(e, "close-cached-files", [](lenv*, lval* a) -> lval* {
+    lval_del(a);
+    rut_dispatch_work([]{ rut_file_cache_clear(); });
+    return lval_sexpr();
+  });
   lenv_add_builtin(e, "col-length",     builtin_col_length);
+  lenv_add_builtin(e, "col-nrows",      builtin_col_nrows);
+  lenv_add_builtin(e, "col-slice",      builtin_col_slice);
   lenv_add_builtin(e, "col-dtype",      builtin_col_dtype);
   lenv_add_builtin(e, "col-ref",        builtin_col_ref);
   lenv_add_builtin(e, "col->list",      builtin_col_to_list);
