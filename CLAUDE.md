@@ -210,3 +210,10 @@ When making multiple method calls on the same object, always prefer `doto` over 
   friend chains for track+trackextra, RDataFrame column definitions (eta, phi,
   pt, nCls), and the interactive 3D cluster-cut GUI example.  Invoke this skill
   whenever the user is working with AO2D.root files or ALICE O2 track data.
+
+- `plot-conventions` (in `.claude/skills/plot-conventions.md`) — canonical
+  per-species ROOT color assignments (e=red/2, μ=green/3, π=blue/4,
+  K=magenta/6, p=cyan/7, d=dark-green/8) and general ROOT style rules (line
+  widths, dashed references, axis ranges, clone-before-scale).  Invoke this
+  skill whenever creating any per-species plot — spectra, PID curves, BB
+  overlays — to ensure colors are consistent across all plots.
