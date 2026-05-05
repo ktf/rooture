@@ -90,8 +90,9 @@
     (def {bb2}   (nth 2 _par))
     (def {bb3}   (nth 3 _par))
     (def {bb4}   (nth 4 _par))
+    (def {bb-res} (/ (nth 6 _par) (nth 5 _par)))
     (print "CCDB BB params: bb0=" bb0 "bb1=" bb1 "bb2=" bb2
-           "bb3=" bb3 "bb4=" bb4)}
+           "bb3=" bb3 "bb4=" bb4 "bb-res=" bb-res)}
   {})
 (load examples/pid_tpc.rut)
 

@@ -205,3 +205,7 @@ in separate files within each skill's folder and referenced from `SKILL.md`.
 - `rooture-gui` — building TGFrame-based GUIs. Supporting file: `hello-world.rut`.
 
 - `rooture-debug-gui` — diagnosing widget sizing, label update, and layout issues.
+
+- `ccdb-proxy` — fetching calibration/PID objects from ALICE CCDB via the local
+  credential proxy (`http://localhost:8888`). Covers auth, path for TPC BB params,
+  `mPar` layout, and usage with `spectra_tpc.rut`.
