@@ -1,5 +1,28 @@
 # Skill: spectra-comparison
 
+`examples/spectra_tpc.rut` is the **primary end-to-end demonstrator** for
+rooture: it reads ALICE Run 2 AO2D data, applies global track quality cuts
+(ITS, TPC χ², crossed rows ≥ 70 and ≥ 0.8 × findable), propagates tracks to
+the primary vertex (DCA), performs TPC PID via the ALEPH Bethe-Bloch
+parameterisation (`examples/pid_tpc.rut`), and fills per-species pT spectra.
+
+## Quick setup (Run 2 AO2D files)
+
+```scheme
+(def {aod-paths} (list "/tmp/AO2D_021.root" "/tmp/AO2D_030.root"))
+(def {trk-tree}   "O2track")
+(def {extra-tree} "O2trackextra")
+(def {coll-tree}  "O2collision")
+(def {bc-tree}    "O2bc")
+(load "examples/spectra_tpc.rut")
+```
+
+The canvas `c_spectra` appears automatically.  Symbols bound after loading:
+`h-pt`, `h-p`, `h-pt-species`, `h-p-species`, `h-dcaxy`, `h-dcaz`, `h-vz`,
+`tf-pairs`, and all pid/jit-fn helpers (`pid-masks`, `bb0`–`bb4`, etc.).
+
+---
+
 How to compare `spectra_tpc.rut` output against the reference `AnalysisResults.root`.
 
 ## Reference file
@@ -83,4 +106,92 @@ Then `get_canvas name="c_cmp"` to view.
 
 - `SetRangeUser` is on `TAxis`, not `TH1`: `(. SetRangeUser (. GetXaxis h) lo hi)`
 - Clone before scaling so the originals stay intact: `(. Clone h "new_name")`
-- `dotimes` with a variable count (not a literal) can fail — use a literal or `map` over a list instead
+- `range` is **not** in stdlib — use `dotimes {i} (len tf-pairs) {...}` for index loops
+- `col-fill-h2` argument order: x-column first, then y-column
+
+---
+
+## PID plot (dE/dx vs p_inner with Bethe-Bloch curves)
+
+After loading `spectra_tpc.rut`, fill a TH2F from each timeframe and overlay
+BB curves. The math builtins `pow`, `log`, `sqrt` work in regular rooture
+lambdas (not just `jit-fn`), so BB can be computed in a `dotimes` loop.
+
+```scheme
+;;; ── Fill 2D histogram ───────────────────────────────────────────────────
+(def {h2}
+  (doto (new TH2F "h2pid" ";p_{inner} (GeV/c);TPC dE/dx (a.u.)" 400 0. 5. 400 0. 300.)
+    {SetDirectory 0}))
+
+(dotimes {i} (len tf-pairs) {
+  do
+  (= {pr}        (nth i tf-pairs))
+  (= {aod-path}  (nth 0 pr))
+  (= {tf}        (nth 1 pr))
+  (= {sig-c}     (load-branch aod-path (concat tf "/" extra-tree) "fTPCSignal"))
+  (= {pinner-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCInnerParam"))
+  (= {find-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+  (= {fmin-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+  (= {fcrows-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusCrossedRows"))
+  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) "fITSClusterMap"))
+  (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
+  (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
+  (= {tgl-c}     (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {q1pt-c}    (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {cidx-c}    (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+  (= {pvzc-c}    (load-branch aod-path (concat tf "/" coll-tree) "fPosZ"))
+  (= {evsel-cols} (compute-evsel-tf aod-path tf))
+  (= {evsel-col}  (evsel-and evsel-cols))
+  (= {m-ev}      (col-gather evsel-col cidx-c))
+  (= {ncls-c}    (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {ncrows-c}  (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
+  (= {m-eta}     (col-map-ptr eta-ok-ptr tgl-c))
+  (= {m-cls}     (col-map-ptr cls-ok-ptr ncls-c))
+  (= {m-its}     (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c)))
+  (= {m-tpcq}    (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
+  (= {m-crows}   (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))
+  (= {mask}      (col-zip-ptr mul-ptr m-ev
+                   (col-zip-ptr mul-ptr m-eta
+                     (col-zip-ptr mul-ptr m-cls
+                       (col-zip-ptr mul-ptr m-its
+                         (col-zip-ptr mul-ptr m-tpcq m-crows))))))
+  (col-fill-h2 h2 (col-mask mask pinner-c) (col-mask mask sig-c))
+})
+
+;;; ── Draw with BB curves ─────────────────────────────────────────────────
+(def {cpid} (doto (new TCanvas "cpid" "TPC PID" 900 700) {SetLogz}))
+(doto h2 {SetStats 0} {Draw "COLZ"})
+
+;;; BB curve helper — uses pow/log/sqrt builtins (available since math-builtins build)
+(def {bb-curve} (\{mass color npts} {
+  do
+  (= {gr} (doto (new TGraph npts) {SetLineColor color} {SetLineWidth 2}))
+  (= {dp} (/ 4.9 npts))   ;;; scan p from 0.1 to 5.0 GeV/c
+  (dotimes {i} npts {
+    do
+    (= {p}    (+ 0.1 (* i dp)))
+    (= {bg}   (/ p mass))
+    (= {beta} (/ bg (sqrt (+ 1.0 (* bg bg)))))
+    (= {aa}   (pow beta bb3))
+    (= {lnt}  (log (+ bb2 (pow (/ 1.0 bg) bb4))))
+    (= {ex}   (/ (* bb0 (- (- bb1 aa) lnt)) aa))
+    (.SetPoint gr i p ex)
+  })
+  gr
+}))
+
+(map (\{gr} {.Draw gr "L SAME"})
+     (list (bb-curve pid-m-el 2 200)
+           (bb-curve pid-m-mu 3 200)
+           (bb-curve pid-m-pi 4 200)
+           (bb-curve pid-m-ka 6 200)
+           (bb-curve pid-m-pr 7 200)
+           (bb-curve pid-m-de 8 200)))
+(.Update cpid)
+;;; then: get_canvas name="cpid"
+```
+
+Notes:
+- `pinner-c` = `fTPCInnerParam` — momentum at TPC inner wall, used for BB evaluation
+- `p-c` = total momentum, used only for the `p > p-min-pid` validity cut in `pid-masks`
+- `bb0`–`bb4` are already bound after `pid_tpc.rut` loads

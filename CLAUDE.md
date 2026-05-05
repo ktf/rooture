@@ -181,10 +181,14 @@ When making multiple method calls on the same object, always prefer `doto` over 
 
 ## Available skills
 
-- `spectra-comparison` (in `.claude/skills/spectra-comparison.md`) — how to compare
-  `spectra_tpc.rut` output against the reference `AnalysisResults.root`: file structure,
-  histogram symbol names, TFile navigation pitfalls, and a ready-to-paste comparison
-  snippet.  Invoke this skill whenever the user asks for a spectra comparison plot.
+- `spectra-comparison` (in `.claude/skills/spectra-comparison.md`) — the primary
+  end-to-end demonstrator workflow: quick setup for `spectra_tpc.rut` with Run 2
+  AO2D files, how to compare output against the reference `AnalysisResults.root`
+  (file structure, histogram symbol names, TFile navigation pitfalls,
+  ready-to-paste comparison snippet), and how to produce the TPC PID plot
+  (dE/dx vs p_inner 2D histogram with Bethe-Bloch curves overlaid using the
+  native `pow`/`log`/`sqrt` math builtins).  Invoke this skill whenever the
+  user asks for spectra, a spectra comparison, or a PID plot.
 
 
 
