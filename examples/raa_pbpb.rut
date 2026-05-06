@@ -1,0 +1,85 @@
+;;; examples/raa_pbpb.rut
+;;; Centrality-differential charged hadron pT spectra in Pb-Pb at 5.02 TeV.
+;;;
+;;; Prerequisites — must be set before loading:
+;;;   aod-paths, tf-pairs, trk-tree, extra-tree, coll-tree, its-map-branch
+;;;   quality-cut jit-fn pointers: eta-ok-ptr, cls-ok-ptr, its-ok-ptr,
+;;;   tpcchi2-ok-ptr, crows-ok-ptr, mul-ptr, sub-ptr, pt-ptr
+;;; (all defined by spectra_tpc.rut / run_opendata_lhc15o.rut)
+
+(def {cent-tree} "O2centrun2v0m")
+
+;;; ── Centrality class masks ────────────────────────────────────────────────
+;;; Four classes with float32 literal bounds (no constant-folding needed).
+(def {cent0-fn} (jit-fn float (\{{float c}} {(if (>= c  0.0f) {(if (< c 10.0f) {1.0f} {0.0f})} {0.0f})})))
+(def {cent1-fn} (jit-fn float (\{{float c}} {(if (>= c 10.0f) {(if (< c 30.0f) {1.0f} {0.0f})} {0.0f})})))
+(def {cent2-fn} (jit-fn float (\{{float c}} {(if (>= c 30.0f) {(if (< c 50.0f) {1.0f} {0.0f})} {0.0f})})))
+(def {cent3-fn} (jit-fn float (\{{float c}} {(if (>= c 50.0f) {(if (< c 80.0f) {1.0f} {0.0f})} {0.0f})})))
+(def {cent0-ptr} (jitfn-ptr cent0-fn))
+(def {cent1-ptr} (jitfn-ptr cent1-fn))
+(def {cent2-ptr} (jitfn-ptr cent2-fn))
+(def {cent3-ptr} (jitfn-ptr cent3-fn))
+
+;;; ── Histograms ───────────────────────────────────────────────────────────
+(def {h-pt-c0} (doto (new TH1F "hpt_c0" "0-10%;p_{T} (GeV/c);Tracks"   100 0. 10.) {SetDirectory 0}))
+(def {h-pt-c1} (doto (new TH1F "hpt_c1" "10-30%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0}))
+(def {h-pt-c2} (doto (new TH1F "hpt_c2" "30-50%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0}))
+(def {h-pt-c3} (doto (new TH1F "hpt_c3" "50-80%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0}))
+
+;;; ── Main loop ─────────────────────────────────────────────────────────────
+(dotimes {i} (len tf-pairs) {
+  do
+  (= {pr}        (nth i tf-pairs))
+  (= {aod-path}  (nth 0 pr))
+  (= {tf}        (nth 1 pr))
+  (print "TF" (+ i 1) "/" (len tf-pairs) tf)
+
+  ;;; track parameters
+  (= {tgl-c}     (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {q1pt-c}    (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {cidx-c}    (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+
+  ;;; track quality branches
+  (= {find-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+  (= {fmin-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+  (= {fcrows-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusCrossedRows"))
+  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) its-map-branch))
+  (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
+  (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
+
+  ;;; centrality per collision → per track
+  (= {cent-c}    (load-branch aod-path (concat tf "/" cent-tree) "fCentRun2V0M"))
+  (= {cent-trk}  (col-gather cent-c cidx-c))
+
+  ;;; derived columns
+  (= {ncls-c}    (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {ncrows-c}  (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
+  (= {pt-c}      (col-map-ptr pt-ptr q1pt-c))
+
+  ;;; quality mask (no DCA for now — no PV propagation needed)
+  (= {m-qual}
+    (col-zip-ptr mul-ptr (col-map-ptr eta-ok-ptr tgl-c)
+      (col-zip-ptr mul-ptr (col-map-ptr cls-ok-ptr ncls-c)
+        (col-zip-ptr mul-ptr (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
+          (col-zip-ptr mul-ptr (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
+                               (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))))))
+
+  ;;; centrality masks × quality mask
+  (= {m-c0} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent0-ptr cent-trk)))
+  (= {m-c1} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent1-ptr cent-trk)))
+  (= {m-c2} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent2-ptr cent-trk)))
+  (= {m-c3} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent3-ptr cent-trk)))
+
+  (col-fill-h1 h-pt-c0 (col-mask m-c0 pt-c))
+  (col-fill-h1 h-pt-c1 (col-mask m-c1 pt-c))
+  (col-fill-h1 h-pt-c2 (col-mask m-c2 pt-c))
+  (col-fill-h1 h-pt-c3 (col-mask m-c3 pt-c))
+})
+
+;;; ── Draw ─────────────────────────────────────────────────────────────────
+(def {c-cent} (doto (new TCanvas "c_cent" "Pb-Pb centrality spectra" 900 700) {SetLogy}))
+(doto h-pt-c0 {SetLineColor 2} {SetLineWidth 2} {Draw "HIST"})
+(doto h-pt-c1 {SetLineColor 4} {SetLineWidth 2} {Draw "HIST SAME"})
+(doto h-pt-c2 {SetLineColor 6} {SetLineWidth 2} {Draw "HIST SAME"})
+(doto h-pt-c3 {SetLineColor 8} {SetLineWidth 2} {Draw "HIST SAME"})
+(.Update c-cent)
