@@ -21,7 +21,7 @@
   (= {find-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
   (= {fmin-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
   (= {fcrows-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusCrossedRows"))
-  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) "fITSClusterMap"))
+  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) its-map-branch))
   (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
   (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
   (= {tgl-c}     (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
