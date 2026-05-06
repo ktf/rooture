@@ -1,5 +1,6 @@
 #include "rooture.h"
 #include <cstdarg>
+#include <ctime>
 
 // ---------------------------------------------------------------------------
 // Global variables
@@ -21,6 +22,52 @@ static int         g_mcp_reply_fds[2];
 static FILE*       g_mcp_out = stdout;  // real JSON-RPC output stream (saved before fd-1 redirect)
 static bool        g_capturing = false;
 static std::string g_capture_buf;
+static std::string g_screenshot_dir;  // directory to archive screenshots (git repo)
+
+// ---------------------------------------------------------------------------
+// screenshot_archive — copy PNG to screenshot dir and git-commit it
+// ---------------------------------------------------------------------------
+
+// Returns the destination path on success, empty string on failure.
+static std::string screenshot_archive(const std::string& src_png,
+                                      const std::string& slug,
+                                      const std::string& motivation,
+                                      const std::string& description)
+{
+  if (g_screenshot_dir.empty()) return "";
+
+  // Build timestamped filename: YYYYMMDD_HHMMSS_<slug>.png
+  char ts[32];
+  std::time_t now = std::time(nullptr);
+  std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&now));
+  std::string filename = std::string(ts) + "_" + slug + ".png";
+  std::string dest = g_screenshot_dir + "/" + filename;
+
+  // Copy file
+  std::ifstream in(src_png, std::ios::binary);
+  std::ofstream out(dest, std::ios::binary);
+  if (!in || !out) return "";
+  out << in.rdbuf();
+  in.close(); out.close();
+
+  // git add + commit
+  auto shell_escape = [](const std::string& s) {
+    std::string r = "'";
+    for (char c : s) { if (c == '\'') r += "'\\''"; else r += c; }
+    return r + "'";
+  };
+  std::string msg = motivation;
+  if (!description.empty()) msg += "\n\n" + description;
+  std::string cmd =
+    "git -C " + shell_escape(g_screenshot_dir) +
+    " add " + shell_escape(filename) +
+    " && git -C " + shell_escape(g_screenshot_dir) +
+    " commit -m " + shell_escape(msg) +
+    " >/dev/null 2>&1";
+  std::system(cmd.c_str());
+
+  return dest;
+}
 
 // ---------------------------------------------------------------------------
 // rut_print — writes to replxx output pipe (or stdout in non-REPL mode)
@@ -400,15 +447,23 @@ static void mcp_thread_fn() {
      {"description", "List names of all open ROOT TCanvas objects."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
     {{"name", "get_canvas"},
-     {"description", "Return a ROOT TCanvas as a PNG image."},
+     {"description", "Return a ROOT TCanvas as a PNG image. The image is also archived to the screenshot directory (if configured) and committed to git."},
      {"inputSchema", {{"type","object"},
-       {"properties", {{"name", {{"type","string"},{"description","Canvas name"}}}}},
-       {"required", {"name"}}}}},
+       {"properties", {
+         {"name", {{"type","string"},{"description","Canvas name"}}},
+         {"motivation", {{"type","string"},{"description","One-line reason for taking this screenshot (used as git commit message)."}}},
+         {"description", {{"type","string"},{"description","Optional longer description of what is visible in the screenshot (appended as commit body)."}}}
+       }},
+       {"required", {"name","motivation"}}}}},
     {{"name", "get_window"},
-     {"description", "Capture a ROOT GUI window (TGFrame / TGMainFrame) as a PNG image. Pass the rooture symbol name that holds the window object (e.g. \"win\")."},
+     {"description", "Capture a ROOT GUI window (TGFrame / TGMainFrame) as a PNG image. The image is also archived to the screenshot directory (if configured) and committed to git."},
      {"inputSchema", {{"type","object"},
-       {"properties", {{"symbol", {{"type","string"},{"description","Rooture symbol name of the TGFrame variable"}}}}},
-       {"required", {"symbol"}}}}},
+       {"properties", {
+         {"symbol", {{"type","string"},{"description","Rooture symbol name of the TGFrame variable"}}},
+         {"motivation", {{"type","string"},{"description","One-line reason for taking this screenshot (used as git commit message)."}}},
+         {"description", {{"type","string"},{"description","Optional longer description of what is visible in the screenshot (appended as commit body)."}}}
+       }},
+       {"required", {"symbol","motivation"}}}}},
     {{"name", "list_annotations"},
      {"description", "List all symbol annotations set via (annotate sym \"text\"). Returns {name annotation} pairs describing user-defined customisation points."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
@@ -477,7 +532,9 @@ static void mcp_thread_fn() {
         }}});
 
       } else if (tool == "get_canvas") {
-        std::string name = args.value("name","");
+        std::string name        = args.value("name","");
+        std::string motivation  = args.value("motivation","");
+        std::string description = args.value("description","");
         std::string tmp = "/tmp/rooture_canvas_" + name + ".png";
         // Escape name/path for the rooture string literal
         eval_expr("(save-png \"" + name + "\" \"" + tmp + "\")");
@@ -490,6 +547,7 @@ static void mcp_thread_fn() {
             {"code",-32000},{"message","Failed to save canvas '"+name+"' as PNG"}
           }}});
         } else {
+          screenshot_archive(tmp, "canvas_" + name, motivation, description);
           std::string b64 = base64_encode(png);
           send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
             {"content", json::array({{{"type","image"},{"data",b64},{"mimeType","image/png"}}})}
@@ -498,7 +556,9 @@ static void mcp_thread_fn() {
         std::remove(tmp.c_str());
 
       } else if (tool == "get_window") {
-        std::string symbol = args.value("symbol","");
+        std::string symbol      = args.value("symbol","");
+        std::string motivation  = args.value("motivation","");
+        std::string description = args.value("description","");
         std::string tmp = "/tmp/rooture_window_" + symbol + ".png";
         // Flush pending window-manager events so MapRaised takes effect
         // before we capture the screen contents.
@@ -512,6 +572,7 @@ static void mcp_thread_fn() {
             {"code",-32000},{"message","Failed to capture window '"+symbol+"' as PNG"}
           }}});
         } else {
+          screenshot_archive(tmp, "window_" + symbol, motivation, description);
           std::string b64 = base64_encode(png);
           send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
             {"content", json::array({{{"type","image"},{"data",b64},{"mimeType","image/png"}}})}
@@ -561,6 +622,8 @@ int main(int argc, char** argv) {
       g_debug = true;
     else if (strcmp(argv[i], "--mcp") == 0)
       g_mcp_mode = true;
+    else if (strcmp(argv[i], "--screenshot-dir") == 0 && i + 1 < argc)
+      g_screenshot_dir = argv[++i];
     else if (argv[i][0] != '-' && !g_script_file)
       g_script_file = argv[i];
   }
