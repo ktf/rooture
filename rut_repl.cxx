@@ -66,7 +66,9 @@ static std::string screenshot_archive(const std::string& src_png,
     " >/dev/null 2>&1";
   std::system(cmd.c_str());
 
-  return dest;
+  // Return the ID: filename stem without extension (e.g. "20260507_123456_canvas_gauss")
+  std::string stem = filename.substr(0, filename.size() - 4); // strip ".png"
+  return stem;
 }
 
 // ---------------------------------------------------------------------------
@@ -447,23 +449,49 @@ static void mcp_thread_fn() {
      {"description", "List names of all open ROOT TCanvas objects."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
     {{"name", "get_canvas"},
-     {"description", "Return a ROOT TCanvas as a PNG image. The image is also archived to the screenshot directory (if configured) and committed to git."},
+     {"description",
+       "Return a ROOT TCanvas as a PNG image. "
+       "The image is archived to the screenshot directory (if configured) and committed to git. "
+       "REQUIRED WORKFLOW: after calling this tool you MUST examine the returned image carefully, "
+       "verify whether your hypothesis stated in 'description' matches what you actually see, "
+       "and then call amend_screenshot with the returned id and your detailed observations. "
+       "Skipping amend_screenshot leaves the analysis incomplete and undocumented."},
      {"inputSchema", {{"type","object"},
        {"properties", {
          {"name", {{"type","string"},{"description","Canvas name"}}},
-         {"motivation", {{"type","string"},{"description","One-line reason for taking this screenshot (used as git commit message)."}}},
-         {"description", {{"type","string"},{"description","Optional longer description of what is visible in the screenshot (appended as commit body)."}}}
+         {"motivation", {{"type","string"},{"description","One-line reason for taking this screenshot (used as git commit subject)."}}},
+         {"description", {{"type","string"},{"description","What you expect to see — your hypothesis. This is committed with the image so it can later be compared against the actual observations recorded via amend_screenshot."}}}
        }},
-       {"required", {"name","motivation"}}}}},
+       {"required", {"name","motivation","description"}}}}},
     {{"name", "get_window"},
-     {"description", "Capture a ROOT GUI window (TGFrame / TGMainFrame) as a PNG image. The image is also archived to the screenshot directory (if configured) and committed to git."},
+     {"description",
+       "Capture a ROOT GUI window (TGFrame / TGMainFrame) as a PNG image. "
+       "The image is archived to the screenshot directory (if configured) and committed to git. "
+       "REQUIRED WORKFLOW: after calling this tool you MUST examine the returned image carefully, "
+       "verify whether your hypothesis stated in 'description' matches what you actually see, "
+       "and then call amend_screenshot with the returned id and your detailed observations. "
+       "Skipping amend_screenshot leaves the analysis incomplete and undocumented."},
      {"inputSchema", {{"type","object"},
        {"properties", {
          {"symbol", {{"type","string"},{"description","Rooture symbol name of the TGFrame variable"}}},
-         {"motivation", {{"type","string"},{"description","One-line reason for taking this screenshot (used as git commit message)."}}},
-         {"description", {{"type","string"},{"description","Optional longer description of what is visible in the screenshot (appended as commit body)."}}}
+         {"motivation", {{"type","string"},{"description","One-line reason for taking this screenshot (used as git commit subject)."}}},
+         {"description", {{"type","string"},{"description","What you expect to see — your hypothesis. This is committed with the image so it can later be compared against the actual observations recorded via amend_screenshot."}}}
        }},
-       {"required", {"symbol","motivation"}}}}},
+       {"required", {"symbol","motivation","description"}}}}},
+    {{"name", "amend_screenshot"},
+     {"description",
+       "Record your observations about a screenshot taken with get_canvas or get_window. "
+       "You MUST call this after every get_canvas/get_window call, once you have examined the image. "
+       "Write what you actually see: confirm or refute the hypothesis, note anomalies, unexpected features, "
+       "quality issues, or any follow-up actions needed. "
+       "This commits a sidecar .md file alongside the PNG in the screenshot repository, "
+       "creating a permanent record that pairs the expected result with the actual observation."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {
+         {"id",           {{"type","string"},{"description","Screenshot id returned by get_canvas or get_window."}}},
+         {"observations", {{"type","string"},{"description","What you actually see in the image. Compare against the hypothesis, note any discrepancies, quality issues, or follow-up actions."}}}
+       }},
+       {"required", {"id","observations"}}}}},
     {{"name", "list_annotations"},
      {"description", "List all symbol annotations set via (annotate sym \"text\"). Returns {name annotation} pairs describing user-defined customisation points."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
@@ -547,10 +575,15 @@ static void mcp_thread_fn() {
             {"code",-32000},{"message","Failed to save canvas '"+name+"' as PNG"}
           }}});
         } else {
-          screenshot_archive(tmp, "canvas_" + name, motivation, description);
+          std::string scr_id = screenshot_archive(tmp, "canvas_" + name, motivation, description);
+          if (scr_id.empty()) scr_id = "(none — screenshot-dir not configured)";
+          std::string id_msg = "id: " + scr_id + "\nExamine the image carefully and call amend_screenshot with this id and your observations.";
           std::string b64 = base64_encode(png);
           send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
-            {"content", json::array({{{"type","image"},{"data",b64},{"mimeType","image/png"}}})}
+            {"content", json::array({
+              {{"type","text"},{"text",id_msg}},
+              {{"type","image"},{"data",b64},{"mimeType","image/png"}}
+            })}
           }}});
         }
         std::remove(tmp.c_str());
@@ -572,13 +605,62 @@ static void mcp_thread_fn() {
             {"code",-32000},{"message","Failed to capture window '"+symbol+"' as PNG"}
           }}});
         } else {
-          screenshot_archive(tmp, "window_" + symbol, motivation, description);
+          std::string scr_id = screenshot_archive(tmp, "window_" + symbol, motivation, description);
+          if (scr_id.empty()) scr_id = "(none — screenshot-dir not configured)";
+          std::string id_msg = "id: " + scr_id + "\nExamine the image carefully and call amend_screenshot with this id and your observations.";
           std::string b64 = base64_encode(png);
           send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
-            {"content", json::array({{{"type","image"},{"data",b64},{"mimeType","image/png"}}})}
+            {"content", json::array({
+              {{"type","text"},{"text",id_msg}},
+              {{"type","image"},{"data",b64},{"mimeType","image/png"}}
+            })}
           }}});
         }
         std::remove(tmp.c_str());
+
+      } else if (tool == "amend_screenshot") {
+        std::string scr_id      = args.value("id","");
+        std::string observations = args.value("observations","");
+        if (g_screenshot_dir.empty()) {
+          send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
+            {"code",-32000},{"message","amend_screenshot: no screenshot-dir configured (start rooture with --screenshot-dir)."}
+          }}});
+        } else if (scr_id.empty() || scr_id.find("(none") == 0) {
+          send_resp({{"jsonrpc","2.0"},{"id",id},{"error",{
+            {"code",-32000},{"message","amend_screenshot: invalid id '"+scr_id+"'."}
+          }}});
+        } else {
+          // Write sidecar markdown file
+          std::string md_name = scr_id + ".md";
+          std::string md_path = g_screenshot_dir + "/" + md_name;
+          std::ofstream md(md_path);
+          md << "# Screenshot: " << scr_id << ".png\n\n"
+             << "## Observations\n\n"
+             << observations << "\n";
+          md.close();
+
+          // Commit it
+          auto shell_escape = [](const std::string& s) {
+            std::string r = "'";
+            for (char c : s) { if (c == '\'') r += "'\\''"; else r += c; }
+            return r + "'";
+          };
+          // Use first line of observations as commit subject
+          std::string first_line = observations.substr(0, observations.find('\n'));
+          if (first_line.size() > 72) first_line = first_line.substr(0, 72) + "…";
+          std::string commit_msg = "Annotate " + scr_id + ": " + first_line;
+          std::string cmd =
+            "git -C " + shell_escape(g_screenshot_dir) +
+            " add " + shell_escape(md_name) +
+            " && git -C " + shell_escape(g_screenshot_dir) +
+            " commit -m " + shell_escape(commit_msg) +
+            " >/dev/null 2>&1";
+          std::system(cmd.c_str());
+
+          send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+            {"content", json::array({{{"type","text"},{"text","Observations recorded for "+scr_id}}})}
+          }}});
+        }
 
       } else if (tool == "reload") {
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{

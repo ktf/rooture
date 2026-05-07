@@ -1,0 +1,95 @@
+;;; examples/evsel_comparison.rut
+;;; Overlay of charged-hadron pT spectra with vs. without event selection.
+;;;
+;;; Load AFTER run_opendata_lhc15o.rut, which provides:
+;;;   tf-pairs, trk-tree, extra-tree, coll-tree, its-map-branch
+;;;   all jit-fn pointers (eta-ok-ptr, cls-ok-ptr, dca-ok-ptr, …)
+;;;   propagate-to-dca, h-pt (already filled with full selection)
+;;;
+;;; Usage:
+;;;   (load "examples/run_opendata_lhc15o.rut")
+;;;   (load "examples/evsel_comparison.rut")
+
+;;; ── Histogram: track quality + DCA only, no event selection ─────────────
+(def {h-pt-noevsel}
+  (doto (new TH1F "hpt_noevsel" ";p_{T} (GeV/c);Tracks (normalised)" 100 0. 20.)
+    {SetDirectory 0}))
+
+(dotimes {i} (len tf-pairs) {
+  do
+  (= {pr}       (nth i tf-pairs))
+  (= {aod-path} (nth 0 pr))
+  (= {tf}       (nth 1 pr))
+  (print "no-evsel TF" (+ i 1) "/" (len tf-pairs) tf)
+
+  ;;; track parameters
+  (= {fx-c}   (load-branch aod-path (concat tf "/" trk-tree) "fX"))
+  (= {fy-c}   (load-branch aod-path (concat tf "/" trk-tree) "fY"))
+  (= {fz-c}   (load-branch aod-path (concat tf "/" trk-tree) "fZ"))
+  (= {snp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fSnp"))
+  (= {tgl-c}  (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {q1pt-c} (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {alp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
+  (= {cidx-c} (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+
+  ;;; track quality branches
+  (= {find-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+  (= {fmin-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+  (= {fcrows-c}  (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusCrossedRows"))
+  (= {itsmap-c}  (load-branch aod-path (concat tf "/" extra-tree) its-map-branch))
+  (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
+  (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
+
+  ;;; collision vertex (needed for DCA propagation)
+  (= {pvxc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosX"))
+  (= {pvyc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosY"))
+  (= {pvzc-c} (load-branch aod-path (concat tf "/" coll-tree) "fPosZ"))
+
+  ;;; gather PV position to per-track
+  (= {pvX-c}  (col-gather pvxc-c cidx-c))
+  (= {pvY-c}  (col-gather pvyc-c cidx-c))
+  (= {pvZ-c}  (col-gather pvzc-c cidx-c))
+
+  ;;; DCA propagation
+  (= {dca}     (propagate-to-dca fx-c fy-c fz-c snp-c tgl-c q1pt-c alp-c pvX-c pvY-c pvZ-c))
+  (= {dcaxy-c} (nth 0 dca))
+  (= {dcaz-c}  (nth 1 dca))
+
+  ;;; derived columns
+  (= {ncls-c}   (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {ncrows-c} (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
+  (= {pt-c}     (col-map-ptr pt-ptr q1pt-c))
+
+  ;;; track-quality mask only — identical to spectra_tpc.rut but without m-ev
+  (= {m-qual}
+    (col-zip-ptr mul-ptr (col-map-ptr eta-ok-ptr tgl-c)
+      (col-zip-ptr mul-ptr (col-map-ptr cls-ok-ptr ncls-c)
+        (col-zip-ptr mul-ptr (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c)
+          (col-zip-ptr mul-ptr (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
+            (col-zip-ptr mul-ptr (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
+                                 (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c))))))))
+
+  (col-fill-h1 h-pt-noevsel (col-mask m-qual pt-c))
+})
+
+;;; ── Draw comparison ──────────────────────────────────────────────────────
+;;; Use DrawNormalized so neither source histogram is modified.
+(def {c-evsel}
+  (doto (new TCanvas "c_evsel" "Event selection effect on p_{T} spectrum" 900 650)
+    {SetLogy}))
+
+(.DrawNormalized h-pt-noevsel "HIST")
+(doto h-pt-noevsel {SetLineColor 2} {SetLineWidth 2}
+  {SetTitle ";p_{T} (GeV/c);Tracks (normalised)"})
+
+(.DrawNormalized h-pt "HIST SAME")
+(doto h-pt {SetLineColor 4} {SetLineWidth 2})
+
+(def {leg} (new TLegend 0.45 0.70 0.88 0.88))
+(.SetBorderSize leg 0)
+(.AddEntry leg h-pt          "track quality + event selection" "L")
+(.AddEntry leg h-pt-noevsel  "track quality only"              "L")
+(.Draw leg)
+
+(.Update c-evsel)
+(.RaiseWindow c-evsel)

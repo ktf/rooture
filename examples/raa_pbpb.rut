@@ -2,10 +2,14 @@
 ;;; Centrality-differential charged hadron pT spectra in Pb-Pb at 5.02 TeV.
 ;;;
 ;;; Prerequisites — must be set before loading:
-;;;   aod-paths, tf-pairs, trk-tree, extra-tree, coll-tree, its-map-branch
+;;;   aod-paths, tf-pairs, trk-tree, extra-tree, coll-tree, bc-tree,
+;;;   its-map-branch, bz
 ;;;   quality-cut jit-fn pointers: eta-ok-ptr, cls-ok-ptr, its-ok-ptr,
-;;;   tpcchi2-ok-ptr, crows-ok-ptr, mul-ptr, sub-ptr, pt-ptr
-;;; (all defined by spectra_tpc.rut / run_opendata_lhc15o.rut)
+;;;   tpcchi2-ok-ptr, crows-ok-ptr, dca-ok-ptr, mul-ptr, sub-ptr, pt-ptr
+;;;   propagate-to-dca col-jit-fn
+;;;   compute-evsel-tf, evsel-and (from eventsel.rut)
+;;; All of the above are defined by spectra_tpc.rut / run_opendata_lhc15o.rut.
+;;; If loading standalone, load eventsel.rut + spectra_tpc.rut first.
 
 (def {cent-tree} "O2centrun2v0m")
 
@@ -29,15 +33,20 @@
 ;;; ── Main loop ─────────────────────────────────────────────────────────────
 (dotimes {i} (len tf-pairs) {
   do
-  (= {pr}        (nth i tf-pairs))
-  (= {aod-path}  (nth 0 pr))
-  (= {tf}        (nth 1 pr))
+  (= {pr}       (nth i tf-pairs))
+  (= {aod-path} (nth 0 pr))
+  (= {tf}       (nth 1 pr))
   (print "TF" (+ i 1) "/" (len tf-pairs) tf)
 
   ;;; track parameters
-  (= {tgl-c}     (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
-  (= {q1pt-c}    (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
-  (= {cidx-c}    (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
+  (= {fx-c}   (load-branch aod-path (concat tf "/" trk-tree) "fX"))
+  (= {fy-c}   (load-branch aod-path (concat tf "/" trk-tree) "fY"))
+  (= {fz-c}   (load-branch aod-path (concat tf "/" trk-tree) "fZ"))
+  (= {snp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fSnp"))
+  (= {tgl-c}  (load-branch aod-path (concat tf "/" trk-tree) "fTgl"))
+  (= {q1pt-c} (load-branch aod-path (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {alp-c}  (load-branch aod-path (concat tf "/" trk-tree) "fAlpha"))
+  (= {cidx-c} (load-branch aod-path (concat tf "/" trk-tree) "fIndexCollisions"))
 
   ;;; track quality branches
   (= {find-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
@@ -47,22 +56,42 @@
   (= {itschi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fITSChi2NCl"))
   (= {tpcchi2-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCChi2NCl"))
 
-  ;;; centrality per collision → per track
-  (= {cent-c}    (load-branch aod-path (concat tf "/" cent-tree) "fCentRun2V0M"))
-  (= {cent-trk}  (col-gather cent-c cidx-c))
+  ;;; collision vertex + event selection (reuses compute-evsel-tf from eventsel.rut)
+  (= {pvxc-c}     (load-branch aod-path (concat tf "/" coll-tree) "fPosX"))
+  (= {pvyc-c}     (load-branch aod-path (concat tf "/" coll-tree) "fPosY"))
+  (= {pvzc-c}     (load-branch aod-path (concat tf "/" coll-tree) "fPosZ"))
+  (= {evsel-cols} (compute-evsel-tf aod-path tf))
+  (= {evsel-col}  (evsel-and evsel-cols))
+
+  ;;; centrality per collision
+  (= {cent-c} (load-branch aod-path (concat tf "/" cent-tree) "fCentRun2V0M"))
+
+  ;;; gather collision-level quantities to per-track
+  (= {pvX-c}    (col-gather pvxc-c    cidx-c))
+  (= {pvY-c}    (col-gather pvyc-c    cidx-c))
+  (= {pvZ-c}    (col-gather pvzc-c    cidx-c))
+  (= {m-ev}     (col-gather evsel-col cidx-c))
+  (= {cent-trk} (col-gather cent-c    cidx-c))
+
+  ;;; DCA propagation (reuses propagate-to-dca from spectra_tpc.rut)
+  (= {dca}    (propagate-to-dca fx-c fy-c fz-c snp-c tgl-c q1pt-c alp-c pvX-c pvY-c pvZ-c))
+  (= {dcaxy-c}(nth 0 dca))
+  (= {dcaz-c} (nth 1 dca))
 
   ;;; derived columns
-  (= {ncls-c}    (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
-  (= {ncrows-c}  (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
-  (= {pt-c}      (col-map-ptr pt-ptr q1pt-c))
+  (= {ncls-c}   (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+  (= {ncrows-c} (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
+  (= {pt-c}     (col-map-ptr pt-ptr q1pt-c))
 
-  ;;; quality mask (no DCA for now — no PV propagation needed)
+  ;;; quality mask: event sel + eta + nCls + DCA + global track cuts
   (= {m-qual}
-    (col-zip-ptr mul-ptr (col-map-ptr eta-ok-ptr tgl-c)
-      (col-zip-ptr mul-ptr (col-map-ptr cls-ok-ptr ncls-c)
-        (col-zip-ptr mul-ptr (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
-          (col-zip-ptr mul-ptr (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
-                               (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))))))
+    (col-zip-ptr mul-ptr m-ev
+      (col-zip-ptr mul-ptr (col-map-ptr eta-ok-ptr tgl-c)
+        (col-zip-ptr mul-ptr (col-map-ptr cls-ok-ptr ncls-c)
+          (col-zip-ptr mul-ptr (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c)
+            (col-zip-ptr mul-ptr (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
+              (col-zip-ptr mul-ptr (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
+                                   (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))))))))
 
   ;;; centrality masks × quality mask
   (= {m-c0} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent0-ptr cent-trk)))

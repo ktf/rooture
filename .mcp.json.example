@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "rooture": {
+      "command": "/Users/ktf/src/rooture/rooture-env.sh",
+      "args": ["--mcp", "--screenshot-dir", "/path/to/screenshots-repo"]
+    }
+  }
+}

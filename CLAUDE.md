@@ -12,13 +12,37 @@ If the server needs to save a canvas to a PNG (for `get_canvas`), use
 
 ## MCP server: taking GUI window screenshots
 
-The MCP tool `get_window` captures any open ROOT GUI window as a PNG and returns
-it as an image.  Use this to inspect layouts and diagnose visual issues without
-leaving Claude Code.
+The MCP tools `get_window` and `get_canvas` capture ROOT GUI windows / canvases
+as PNG images, archive them to a git repository, and return the image together
+with a unique **id**.
+
+### Required screenshot workflow
+
+Every `get_canvas` / `get_window` call **must** be followed by `amend_screenshot`.
+The full sequence is:
+
+1. Call `get_canvas` or `get_window` with:
+   - `motivation` — one-line reason (git commit subject)
+   - `description` — your hypothesis: what you *expect* to see
+2. Receive the image **and** an `id` (e.g. `20260507_123456_canvas_gauss`)
+3. **Examine the image carefully** — does it match your hypothesis?
+4. Call `amend_screenshot(id, observations)` with what you actually see:
+   confirm or refute the hypothesis, note anomalies, quality issues,
+   unexpected features, or follow-up actions needed.
+
+Skipping step 4 leaves the archive incomplete. The sidecar `.md` committed by
+`amend_screenshot` is the permanent record that pairs expectation with reality.
 
 ```
-# after loading a script that creates a window bound to the symbol "win":
-get_window symbol="win"
+# Example
+get_canvas name="c_spectra"
+           motivation="Check pT spectrum shape after DCA cut"
+           description="Expect a falling power-law spectrum peaking near 0.3 GeV/c with no discontinuities."
+
+# → returns image + id: 20260507_123456_canvas_c_spectra
+
+amend_screenshot id="20260507_123456_canvas_c_spectra"
+                 observations="Spectrum matches expectation. Peak at ~0.3 GeV/c, smooth fall-off. No artefacts visible. High-pT tail (>10 GeV/c) is sparse but consistent with statistics."
 ```
 
 The underlying rooture builtin `save-window` accepts a TGFrame object and a path:
