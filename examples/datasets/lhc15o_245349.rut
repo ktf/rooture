@@ -1,0 +1,21 @@
+;;; examples/datasets/lhc15o_245349.rut
+;;; All known AO2D files for ALICE LHC15o Pb-Pb 5.02 TeV, run 245349.
+;;;
+;;; Usage:
+;;;   (load "examples/datasets/lhc15o_245349.rut")
+;;;   (def {aod-paths} (take 5  lhc15o-245349-paths))   ; first 5 files
+;;;   (def {aod-paths} (take 10 lhc15o-245349-paths))   ; first 10 files
+;;;   (def {aod-paths} lhc15o-245349-paths)              ; all files
+
+(def {lhc15o-245349-paths} (list
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0002/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0003/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0004/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0005/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0006/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0007/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0008/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0009/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0010/AO2D.root"
+  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0011/AO2D.root"
+))

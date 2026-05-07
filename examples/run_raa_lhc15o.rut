@@ -1,0 +1,15 @@
+;;; examples/run_raa_lhc15o.rut
+;;; R_CP analysis on LHC15o Pb-Pb open data (10 files, run 245349).
+;;;
+;;; Usage:
+;;;   (load "examples/run_raa_lhc15o.rut")
+
+(load "examples/datasets/lhc15o_245349.rut")
+(def {aod-paths} (take 10 lhc15o-245349-paths))
+(def {trk-tree}       "O2track")
+(def {extra-tree}     "O2trackextra_002")
+(def {coll-tree}      "O2collision_001")
+(def {bc-tree}        "O2bc_001")
+(def {its-map-branch} "fITSClusterSizes")
+(load "examples/spectra_tpc.rut")
+(load "examples/raa_pbpb.rut")
