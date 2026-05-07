@@ -4,12 +4,8 @@
 ;;; Usage:
 ;;;   (load "examples/run_opendata_lhc15o.rut")
 
-(def {aod-paths} (list
-  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0002/AO2D.root"
-  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0003/AO2D.root"
-  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0004/AO2D.root"
-  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0005/AO2D.root"
-  "root://eospublic.cern.ch///eos/opendata/alice/2015/LHC15o/000245349/0006/AO2D.root"))
+(load "examples/datasets/lhc15o_245349.rut")
+(def {aod-paths} (take 5 lhc15o-245349-paths))
 (def {trk-tree}       "O2track")
 (def {extra-tree}     "O2trackextra_002")
 (def {coll-tree}      "O2collision_001")
