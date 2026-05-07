@@ -235,9 +235,6 @@
 (def {sub-fn}
   (jit-fn float (\{{float a} {float b}} {(- a b)})))
 
-(def {mul-fn}
-  (jit-fn float (\{{float a} {float b}} {(* a b)})))
-
 ;;; DCA primary-track selection matching isGlobalTrack():
 ;;;   |dcaXY| < 0.0105 + 0.035 / pT^1.1   (pT-parameterised, tight at low pT)
 ;;;   |dcaZ|  < 2.0 cm
@@ -283,7 +280,6 @@
 (def {p-ptr}         (jitfn-ptr p-fn))
 (def {eta-ok-ptr}    (jitfn-ptr eta-ok-fn))
 (def {sub-ptr}       (jitfn-ptr sub-fn))
-(def {mul-ptr}       (jitfn-ptr mul-fn))
 (def {dca-ok-ptr}    (jitfn-ptr dca-ok-fn))
 (def {cls-ok-ptr}    (jitfn-ptr cls-ok-fn))
 (def {its-ok-ptr}    (jitfn-ptr its-ok-fn))
@@ -416,12 +412,7 @@
   (= {m-tpcq}  (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
   (= {m-crows} (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))
   (= {m-dca}   (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c))
-  (= {mask}   (col-zip-ptr mul-ptr m-ev
-                (col-zip-ptr mul-ptr m-eta
-                  (col-zip-ptr mul-ptr m-cls
-                    (col-zip-ptr mul-ptr m-dca
-                      (col-zip-ptr mul-ptr m-its
-                        (col-zip-ptr mul-ptr m-tpcq m-crows)))))))
+  (= {mask}    (col-and m-ev m-eta m-cls m-dca m-its m-tpcq m-crows))
 
   ;;; fill histograms
   (col-fill-h1 hpt  (col-mask mask pt-c))
@@ -431,12 +422,12 @@
 
   ;;; per-species: compute pid masks then combine with quality mask
   (= {pmasks} (pid-masks sig-c p-c pinner-c tofchi2-c tofp-c length-c time-c timeres-c))
-  (= {msk-el} (col-zip-ptr mul-ptr mask (nth 0 pmasks)))
-  (= {msk-mu} (col-zip-ptr mul-ptr mask (nth 1 pmasks)))
-  (= {msk-pi} (col-zip-ptr mul-ptr mask (nth 2 pmasks)))
-  (= {msk-ka} (col-zip-ptr mul-ptr mask (nth 3 pmasks)))
-  (= {msk-pr} (col-zip-ptr mul-ptr mask (nth 4 pmasks)))
-  (= {msk-de} (col-zip-ptr mul-ptr mask (nth 5 pmasks)))
+  (= {msk-el} (col-and mask (nth 0 pmasks)))
+  (= {msk-mu} (col-and mask (nth 1 pmasks)))
+  (= {msk-pi} (col-and mask (nth 2 pmasks)))
+  (= {msk-ka} (col-and mask (nth 3 pmasks)))
+  (= {msk-pr} (col-and mask (nth 4 pmasks)))
+  (= {msk-de} (col-and mask (nth 5 pmasks)))
   (col-fill-h1 (nth i (nth 0 tf-hpt-sp)) (col-mask msk-el pt-c))
   (col-fill-h1 (nth i (nth 1 tf-hpt-sp)) (col-mask msk-mu pt-c))
   (col-fill-h1 (nth i (nth 2 tf-hpt-sp)) (col-mask msk-pi pt-c))

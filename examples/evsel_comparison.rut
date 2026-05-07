@@ -62,12 +62,12 @@
 
   ;;; track-quality mask only — identical to spectra_tpc.rut but without m-ev
   (= {m-qual}
-    (col-zip-ptr mul-ptr (col-map-ptr eta-ok-ptr tgl-c)
-      (col-zip-ptr mul-ptr (col-map-ptr cls-ok-ptr ncls-c)
-        (col-zip-ptr mul-ptr (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c)
-          (col-zip-ptr mul-ptr (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
-            (col-zip-ptr mul-ptr (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
-                                 (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c))))))))
+    (col-and (col-map-ptr eta-ok-ptr tgl-c)
+             (col-map-ptr cls-ok-ptr ncls-c)
+             (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c)
+             (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
+             (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
+             (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c))))
 
   (col-fill-h1 h-pt-noevsel (col-mask m-qual pt-c))
 })

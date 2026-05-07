@@ -258,6 +258,17 @@
     (map fst (filter snd (zip l results)))
 })
 
+;;; Column masks
+
+; col-and: combine N float32 mask columns with logical AND in one expression.
+; Each column must be a float32 mask (0.0 = fail, non-zero = pass).
+; Equivalent to N-1 nested (col-zip-ptr mul-ptr ...) calls but readable.
+(def {_col-and-mul-fn}  (jit-fn float (\{{float a} {float b}} {(* a b)})))
+(def {_col-and-mul-ptr} (jitfn-ptr _col-and-mul-fn))
+(fun {col-and & cols} {
+  foldl (\ {acc c} {col-zip-ptr _col-and-mul-ptr acc c}) (fst cols) (tail cols)
+})
+
 ;;; Threading
 ; -> is a C++ builtin (builtin_arrow). Supported step forms:
 ;   {. Method extra-args...}         classic

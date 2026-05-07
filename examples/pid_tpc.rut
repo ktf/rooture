@@ -149,8 +149,6 @@
 (def {pid-p-ok-ptr}  (jitfn-ptr pid-p-ok-fn))
 (def {pid-sig-ok-fn} (jit-fn float (\{{float sig}} {(if (> sig sig-min) {1.0f} {0.0f})})))
 (def {pid-sig-ok-ptr}(jitfn-ptr pid-sig-ok-fn))
-(def {pid-mul-fn}    (jit-fn float (\{{float a} {float b}} {(* a b)})))
-(def {pid-mul-ptr}   (jitfn-ptr pid-mul-fn))
 
 ;;; ── TOF PID ──────────────────────────────────────────────────────────────
 ;;; Extends TPC PID with TOF beta measurement for tracks that have a TOF hit.
@@ -231,7 +229,7 @@
   {do
   (= {m-p}   (col-map-ptr pid-p-ok-ptr   p-c))
   (= {m-sig} (col-map-ptr pid-sig-ok-ptr sig-c))
-  (= {m-ok}  (col-zip-ptr pid-mul-ptr m-p m-sig))
+  (= {m-ok}  (col-and m-p m-sig))
 
   ;;; TPC nσ masks
   (= {tpc-el} (col-zip-ptr pid-el-ptr sig-c pinner-c))
@@ -259,12 +257,13 @@
 
   ;;; Combined: validity × TPC × TOF
   (list
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-el tof-el))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-mu tof-mu))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-pi tof-pi))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-ka tof-ka))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-pr tof-pr))
-    (col-zip-ptr pid-mul-ptr m-ok (col-zip-ptr pid-mul-ptr tpc-de tof-de)))}))
+    (col-and m-ok tpc-el tof-el)
+    (col-and m-ok tpc-mu tof-mu)
+    (col-and m-ok tpc-pi tof-pi)
+    (col-and m-ok tpc-ka tof-ka)
+    (col-and m-ok tpc-pr tof-pr)
+    (col-and m-ok tpc-de tof-de))}))
+
 
 (print "pid_tpc.rut loaded."
   "bb0=" bb0 "bb-res=" bb-res "nsigma-max=" nsigma-max

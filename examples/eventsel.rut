@@ -83,11 +83,6 @@
 (def {itsrof-border-ptr}(jitfn-ptr itsrof-border-fn))
 (def {pvz-ok-ptr}       (jitfn-ptr pvz-ok-fn))
 
-;;; ── mul-fn for combining masks ───────────────────────────────────────────
-(def {evsel-mul-fn}
-  (jit-fn float (\{{float a} {float b}} {(* a b)})))
-(def {evsel-mul-ptr} (jitfn-ptr evsel-mul-fn))
-
 ;;; ── compute-evsel-tf ─────────────────────────────────────────────────────
 ;;;
 ;;; (compute-evsel-tf aod-path tf) → {m-tvx  m-tf  m-itsrof  m-pvz  m-nopileup}
@@ -132,23 +127,12 @@
 
 ;;; ── evsel-and : combine all 5 flags into one AND mask ────────────────────
 (def {evsel-and} (\{flags} {
-  do
-  (= {m} (nth 0 flags))
-  (= {m} (col-zip-ptr evsel-mul-ptr m (nth 1 flags)))
-  (= {m} (col-zip-ptr evsel-mul-ptr m (nth 2 flags)))
-  (= {m} (col-zip-ptr evsel-mul-ptr m (nth 3 flags)))
-  (= {m} (col-zip-ptr evsel-mul-ptr m (nth 4 flags)))
-  m
+  col-and (nth 0 flags) (nth 1 flags) (nth 2 flags) (nth 3 flags) (nth 4 flags)
 }))
 
 ;;; ── evsel-sel8 : bits 0–3 (TVX + TF border + ITS ROF + no-pileup) ───────
 (def {evsel-sel8} (\{flags} {
-  do
-  (= {m} (nth 0 flags))
-  (= {m} (col-zip-ptr evsel-mul-ptr m (nth 1 flags)))
-  (= {m} (col-zip-ptr evsel-mul-ptr m (nth 2 flags)))
-  (= {m} (col-zip-ptr evsel-mul-ptr m (nth 4 flags)))
-  m
+  col-and (nth 0 flags) (nth 1 flags) (nth 2 flags) (nth 4 flags)
 }))
 
 (print "eventsel.rut loaded."

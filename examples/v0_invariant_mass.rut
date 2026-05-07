@@ -219,7 +219,6 @@
   {(if (> q 0.07) {(if (< (fabsf a) 0.7) {1.} {0.})} {0.})})))
 
 (def {cos-oa-cut-fn} (jit-fn float (\{{float c}} {(if (< c 0.99) {1.} {0.})})))
-(def {mul-fn} (jit-fn float (\{{float a} {float b}} {(* a b)})))
 
 (def {px-ptr}          (jitfn-ptr px-fn))
 (def {py-ptr}          (jitfn-ptr py-fn))
@@ -235,7 +234,6 @@
 (def {alam-arm-ptr}    (jitfn-ptr alam-arm-fn))
 (def {k0s-arm-ptr}     (jitfn-ptr k0s-arm-fn))
 (def {cos-oa-cut-ptr}  (jitfn-ptr cos-oa-cut-fn))
-(def {mul-ptr}         (jitfn-ptr mul-fn))
 (def {dcapv-cut-ptr}   (jitfn-ptr dcapv-cut-fn))
 (def {k0s-ct-cut-ptr}  (jitfn-ptr k0s-ct-cut-fn))
 (def {lam-ct-cut-ptr}  (jitfn-ptr lam-ct-cut-fn))
@@ -339,11 +337,9 @@
   ;;; (DCA = L·sinθ) so large-L Λ candidates fail even when well-pointing.
   ;;; The CPA cut already handles pointing quality.
   (= {topo-mask}
-    (col-zip-ptr mul-ptr
-      (col-zip-ptr mul-ptr
-        (col-map-ptr dca-cut-ptr    dca-dau)
-        (col-map-ptr radius-cut-ptr radius))
-      (col-map-ptr cpa-cut-ptr cpa)))
+    (col-and (col-map-ptr dca-cut-ptr    dca-dau)
+             (col-map-ptr radius-cut-ptr radius)
+             (col-map-ptr cpa-cut-ptr    cpa)))
 
   ;;; Armenteros-Podolanski variables (fused col-jit-fn kernel, O2)
   (= {arm}       (arm-jit-fn pos-px pos-py pos-pz neg-px neg-py neg-pz v0-px v0-py v0-pz))
@@ -356,11 +352,11 @@
   ;;; combinatorics. The ct cut removes almost all candidates in this small
   ;;; dataset (31 TFs), leaving too few for meaningful peaks.
   (= {vtype-f}   (col-cast-f32 vtype-c))
-  (= {k0s-base}  (col-zip-ptr mul-ptr topo-mask (col-map-ptr k0s-type-ptr vtype-f)))
-  (= {lam-base}  (col-zip-ptr mul-ptr topo-mask (col-map-ptr lam-type-ptr vtype-f)))
-  (= {k0s-mask}  (col-zip-ptr mul-ptr k0s-base  (col-zip-ptr k0s-arm-ptr  arm-alpha arm-qt)))
-  (= {lam-mask}  (col-zip-ptr mul-ptr lam-base  (col-zip-ptr lam-arm-ptr  arm-alpha arm-qt)))
-  (= {alam-mask} (col-zip-ptr mul-ptr lam-base  (col-zip-ptr alam-arm-ptr arm-alpha arm-qt)))
+  (= {k0s-base}  (col-and topo-mask (col-map-ptr k0s-type-ptr vtype-f)))
+  (= {lam-base}  (col-and topo-mask (col-map-ptr lam-type-ptr vtype-f)))
+  (= {k0s-mask}  (col-and k0s-base  (col-zip-ptr k0s-arm-ptr  arm-alpha arm-qt)))
+  (= {lam-mask}  (col-and lam-base  (col-zip-ptr lam-arm-ptr  arm-alpha arm-qt)))
+  (= {alam-mask} (col-and lam-base  (col-zip-ptr alam-arm-ptr arm-alpha arm-qt)))
 
   ;;; Armenteros scatter plot (topo-masked candidates only)
   (col-fill-h2 harm (col-mask topo-mask arm-alpha) (col-mask topo-mask arm-qt))

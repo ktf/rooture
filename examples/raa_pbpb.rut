@@ -5,7 +5,7 @@
 ;;;   aod-paths, tf-pairs, trk-tree, extra-tree, coll-tree, bc-tree,
 ;;;   its-map-branch, bz
 ;;;   quality-cut jit-fn pointers: eta-ok-ptr, cls-ok-ptr, its-ok-ptr,
-;;;   tpcchi2-ok-ptr, crows-ok-ptr, dca-ok-ptr, mul-ptr, sub-ptr, pt-ptr
+;;;   tpcchi2-ok-ptr, crows-ok-ptr, dca-ok-ptr, sub-ptr, pt-ptr
 ;;;   propagate-to-dca col-jit-fn
 ;;;   compute-evsel-tf, evsel-and (from eventsel.rut)
 ;;; All of the above are defined by spectra_tpc.rut / run_opendata_lhc15o.rut.
@@ -85,19 +85,19 @@
 
   ;;; quality mask: event sel + eta + nCls + DCA + global track cuts
   (= {m-qual}
-    (col-zip-ptr mul-ptr m-ev
-      (col-zip-ptr mul-ptr (col-map-ptr eta-ok-ptr tgl-c)
-        (col-zip-ptr mul-ptr (col-map-ptr cls-ok-ptr ncls-c)
-          (col-zip-ptr mul-ptr (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c)
-            (col-zip-ptr mul-ptr (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
-              (col-zip-ptr mul-ptr (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
-                                   (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))))))))
+    (col-and m-ev
+             (col-map-ptr eta-ok-ptr tgl-c)
+             (col-map-ptr cls-ok-ptr ncls-c)
+             (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c)
+             (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c))
+             (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c))
+             (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c))))
 
   ;;; centrality masks × quality mask
-  (= {m-c0} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent0-ptr cent-trk)))
-  (= {m-c1} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent1-ptr cent-trk)))
-  (= {m-c2} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent2-ptr cent-trk)))
-  (= {m-c3} (col-zip-ptr mul-ptr m-qual (col-map-ptr cent3-ptr cent-trk)))
+  (= {m-c0} (col-and m-qual (col-map-ptr cent0-ptr cent-trk)))
+  (= {m-c1} (col-and m-qual (col-map-ptr cent1-ptr cent-trk)))
+  (= {m-c2} (col-and m-qual (col-map-ptr cent2-ptr cent-trk)))
+  (= {m-c3} (col-and m-qual (col-map-ptr cent3-ptr cent-trk)))
 
   (col-fill-h1 h-pt-c0 (col-mask m-c0 pt-c))
   (col-fill-h1 h-pt-c1 (col-mask m-c1 pt-c))
