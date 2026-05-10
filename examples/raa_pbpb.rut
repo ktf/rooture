@@ -2,7 +2,7 @@
 ;;; Centrality-differential charged hadron pT spectra in Pb-Pb at 5.02 TeV.
 ;;;
 ;;; Prerequisites — must be set before loading:
-;;;   aod-paths, tf-pairs, trk-tree, extra-tree, coll-tree, bc-tree,
+;;;   aod-paths, trk-tree, extra-tree, coll-tree, bc-tree,
 ;;;   its-map-branch, bz
 ;;;   quality-cut jit-fn pointers: eta-ok-ptr, cls-ok-ptr, its-ok-ptr,
 ;;;   tpcchi2-ok-ptr, crows-ok-ptr, dca-ok-ptr, sub-ptr, pt-ptr
@@ -15,14 +15,10 @@
 
 ;;; ── Centrality class masks ────────────────────────────────────────────────
 ;;; Four classes with float32 literal bounds (no constant-folding needed).
-(def {cent0-fn} (jit-fn float (\{{float c}} {(if (>= c  0.0f) {(if (< c 10.0f) {1.0f} {0.0f})} {0.0f})})))
-(def {cent1-fn} (jit-fn float (\{{float c}} {(if (>= c 10.0f) {(if (< c 30.0f) {1.0f} {0.0f})} {0.0f})})))
-(def {cent2-fn} (jit-fn float (\{{float c}} {(if (>= c 30.0f) {(if (< c 50.0f) {1.0f} {0.0f})} {0.0f})})))
-(def {cent3-fn} (jit-fn float (\{{float c}} {(if (>= c 50.0f) {(if (< c 80.0f) {1.0f} {0.0f})} {0.0f})})))
-(def {cent0-ptr} (jitfn-ptr cent0-fn))
-(def {cent1-ptr} (jitfn-ptr cent1-fn))
-(def {cent2-ptr} (jitfn-ptr cent2-fn))
-(def {cent3-ptr} (jitfn-ptr cent3-fn))
+(def {cent0-ptr} (jitfn! "cent0"  float (\{{float c}} {(if (>= c  0.0f) {(if (< c 10.0f) {1.0f} {0.0f})} {0.0f})})))
+(def {cent1-ptr} (jitfn! "cent1"  float (\{{float c}} {(if (>= c 10.0f) {(if (< c 30.0f) {1.0f} {0.0f})} {0.0f})})))
+(def {cent2-ptr} (jitfn! "cent2"  float (\{{float c}} {(if (>= c 30.0f) {(if (< c 50.0f) {1.0f} {0.0f})} {0.0f})})))
+(def {cent3-ptr} (jitfn! "cent3"  float (\{{float c}} {(if (>= c 50.0f) {(if (< c 80.0f) {1.0f} {0.0f})} {0.0f})})))
 
 ;;; ── N_coll (ALICE Glauber, Pb-Pb 5.02 TeV, V0M, approximate) ────────────
 (def {ncoll-c0} 1502.0)   ; 0-10%
@@ -31,8 +27,7 @@
 (def {ncoll-c3}   75.6)   ; 50-80% (peripheral reference)
 
 ;;; Helper: map any float column to 1.0 (event counting)
-(def {ones-fn}  (jit-fn float (\{{float x}} {1.0f})))
-(def {ones-ptr} (jitfn-ptr ones-fn))
+(def {ones-ptr} (jitfn! "ones" float (\{{float x}} {1.0f})))
 
 ;;; ── Histograms ───────────────────────────────────────────────────────────
 (def {h-pt-c0} (doto (new TH1F "hpt_c0" "0-10%;p_{T} (GeV/c);Tracks"   100 0. 10.) {SetDirectory 0}))
@@ -46,13 +41,40 @@
 (def {h-nev-c2} (doto (new TH1F "hnev_c2" "" 1 0. 2.) {SetDirectory 0}))
 (def {h-nev-c3} (doto (new TH1F "hnev_c3" "" 1 0. 2.) {SetDirectory 0}))
 
-;;; ── Main loop ─────────────────────────────────────────────────────────────
-(dotimes {i} (len tf-pairs) {
+;;; ── Live spectra canvas — shown before loop, updated every 10 TFs ─────────
+(def {c-cent} (doto (new TCanvas "c_cent" "Pb-Pb centrality spectra" 900 700) {SetLogy}))
+(doto h-pt-c0 {SetTitle ";p_{T} (GeV/c);Tracks (accumulating)"}
+              {SetStats 0} {SetLineColor 2} {SetLineWidth 2} {Draw "HIST"})
+(doto h-pt-c1 {SetLineColor 4} {SetLineWidth 2} {Draw "HIST SAME"})
+(doto h-pt-c2 {SetLineColor 6} {SetLineWidth 2} {Draw "HIST SAME"})
+(doto h-pt-c3 {SetLineColor 8} {SetLineWidth 2} {Draw "HIST SAME"})
+(def {leg-cent} (doto (new TLegend 0.55 0.65 0.88 0.88) {SetBorderSize 0}))
+(.AddEntry leg-cent h-pt-c0 "0-10%"  "L")
+(.AddEntry leg-cent h-pt-c1 "10-30%" "L")
+(.AddEntry leg-cent h-pt-c2 "30-50%" "L")
+(.AddEntry leg-cent h-pt-c3 "50-80%" "L")
+(.Draw leg-cent)
+(.Update c-cent)
+
+;;; ── Main loop — per-file, TFs discovered on the fly ──────────────────────
+(def {tf-seq} 0)   ;;; global TF counter for live-update modulo
+(dotimes {fi} (len aod-paths) {
   do
-  (= {pr}       (nth i tf-pairs))
-  (= {aod-path} (nth 0 pr))
-  (= {tf}       (nth 1 pr))
-  (print "TF" (+ i 1) "/" (len tf-pairs) tf)
+  (= {aod-path} (nth fi aod-paths))
+  (print "File" (+ fi 1) "/" (len aod-paths) aod-path)
+  (= {fh} (::Open TFile aod-path))
+  (if (== fh 0) {print "WARNING: skipping" aod-path} {
+    if (.IsZombie fh) {print "WARNING: zombie" aod-path} {
+      do
+      (= {fkeys} (.GetListOfKeys fh))
+      (dotimes {ki} (.GetEntries fkeys) {
+        do
+        (= {fk} (.At fkeys ki))
+        (if (== (.GetClassName fk) "TDirectoryFile") {
+          do
+          (= {tf} (.GetName fk))
+          (print "  TF" tf)
+          (= {tf-seq} (+ tf-seq 1))
 
   ;;; track parameters
   (= {fx-c}   (load-branch aod-path (concat tf "/" trk-tree) "fX"))
@@ -126,6 +148,17 @@
   (col-fill-h1 h-pt-c1 (col-mask m-c1 pt-c))
   (col-fill-h1 h-pt-c2 (col-mask m-c2 pt-c))
   (col-fill-h1 h-pt-c3 (col-mask m-c3 pt-c))
+
+          ;;; live update every TF
+          (.SetTitle c-cent (concat "Pb-Pb | File " (str (+ fi 1)) "/" (str (len aod-paths)) " | TF " (str tf-seq)))
+          (.Update c-cent)
+          (.RaiseWindow c-cent)
+          (.ProcessEvents gSystem)
+        } {})
+      })
+      (close-cached-files)
+    }}
+  )
 })
 
 ;;; ── R_CP ─────────────────────────────────────────────────────────────────
@@ -135,54 +168,49 @@
 (def {nev-c3} (.GetBinContent h-nev-c3 1))
 (print "Events — 0-10%:" nev-c0 " 10-30%:" nev-c1 " 30-50%:" nev-c2 " 50-80%:" nev-c3)
 
-;;; R_CP(cent) = (Ncoll_periph/Ncoll_cent) × (N_cent/Nev_cent) / (N_periph/Nev_periph)
-;;;            = (Ncoll_periph/Ncoll_cent) × (Nev_periph/Nev_cent) × h_cent / h_periph
-(def {h-rcp-c0} (.Clone h-pt-c0 "h_rcp_c0"))
-(.Divide h-rcp-c0 h-pt-c3)
-(.Scale  h-rcp-c0 (* (/ nev-c3 nev-c0) (/ ncoll-c3 ncoll-c0)))
-(.SetTitle h-rcp-c0 "R_{CP} (50-80% reference);p_{T} (GeV/c);R_{CP}")
+(if (> (* nev-c0 nev-c1 nev-c2 nev-c3) 0.) {
+  do
 
-(def {h-rcp-c1} (.Clone h-pt-c1 "h_rcp_c1"))
-(.Divide h-rcp-c1 h-pt-c3)
-(.Scale  h-rcp-c1 (* (/ nev-c3 nev-c1) (/ ncoll-c3 ncoll-c1)))
+  ;;; R_CP(cent) = (Ncoll_periph/Ncoll_cent) × (N_cent/Nev_cent) / (N_periph/Nev_periph)
+  ;;;            = (Ncoll_periph/Ncoll_cent) × (Nev_periph/Nev_cent) × h_cent / h_periph
+  (def {h-rcp-c0} (.Clone h-pt-c0 "h_rcp_c0"))
+  (.Divide h-rcp-c0 h-pt-c3)
+  (.Scale  h-rcp-c0 (* (/ nev-c3 nev-c0) (/ ncoll-c3 ncoll-c0)))
+  (.SetTitle h-rcp-c0 "R_{CP} (50-80% reference);p_{T} (GeV/c);R_{CP}")
 
-(def {h-rcp-c2} (.Clone h-pt-c2 "h_rcp_c2"))
-(.Divide h-rcp-c2 h-pt-c3)
-(.Scale  h-rcp-c2 (* (/ nev-c3 nev-c2) (/ ncoll-c3 ncoll-c2)))
+  (def {h-rcp-c1} (.Clone h-pt-c1 "h_rcp_c1"))
+  (.Divide h-rcp-c1 h-pt-c3)
+  (.Scale  h-rcp-c1 (* (/ nev-c3 nev-c1) (/ ncoll-c3 ncoll-c1)))
 
-;;; reference line at unity (x range matches R_CP display window)
-(def {rcp-line} (doto (new TLine 0. 1. 6. 1.) {SetLineStyle 2} {SetLineColor 1}))
+  (def {h-rcp-c2} (.Clone h-pt-c2 "h_rcp_c2"))
+  (.Divide h-rcp-c2 h-pt-c3)
+  (.Scale  h-rcp-c2 (* (/ nev-c3 nev-c2) (/ ncoll-c3 ncoll-c2)))
 
-;;; ── Draw spectra (per-event normalised) ──────────────────────────────────
-(.Scale h-pt-c0 (/ 1.0 nev-c0))
-(.Scale h-pt-c1 (/ 1.0 nev-c1))
-(.Scale h-pt-c2 (/ 1.0 nev-c2))
-(.Scale h-pt-c3 (/ 1.0 nev-c3))
-(def {c-cent} (doto (new TCanvas "c_cent" "Pb-Pb centrality spectra" 900 700) {SetLogy}))
-(doto h-pt-c0 {SetTitle ";p_{T} (GeV/c);(1/N_{ev}) dN/dp_{T}"}
-              {SetStats 0} {SetLineColor 2} {SetLineWidth 2} {Draw "HIST"})
-(doto h-pt-c1 {SetLineColor 4} {SetLineWidth 2} {Draw "HIST SAME"})
-(doto h-pt-c2 {SetLineColor 6} {SetLineWidth 2} {Draw "HIST SAME"})
-(doto h-pt-c3 {SetLineColor 8} {SetLineWidth 2} {Draw "HIST SAME"})
-(def {leg-cent} (doto (new TLegend 0.55 0.65 0.88 0.88) {SetBorderSize 0}))
-(.AddEntry leg-cent h-pt-c0 "0-10%"  "L")
-(.AddEntry leg-cent h-pt-c1 "10-30%" "L")
-(.AddEntry leg-cent h-pt-c2 "30-50%" "L")
-(.AddEntry leg-cent h-pt-c3 "50-80%" "L")
-(.Draw leg-cent)
-(.Update c-cent)
+  ;;; reference line at unity
+  (def {rcp-line} (doto (new TLine 0. 1. 9. 1.) {SetLineStyle 2} {SetLineColor 1}))
 
-;;; ── Draw R_CP ────────────────────────────────────────────────────────────
-(def {c-rcp} (new TCanvas "c_rcp" "R_{CP} Pb-Pb 5.02 TeV" 900 700))
-(doto h-rcp-c0 {SetStats 0} {SetLineColor 2} {SetLineWidth 2}
-               {SetMinimum 0.} {SetMaximum 1.1} {Draw "HIST"})
-(.SetRangeUser (.GetXaxis h-rcp-c0) 0. 6.)
-(doto h-rcp-c1 {SetLineColor 4} {SetLineWidth 2} {Draw "HIST SAME"})
-(doto h-rcp-c2 {SetLineColor 6} {SetLineWidth 2} {Draw "HIST SAME"})
-(.Draw rcp-line "SAME")
-(def {leg-rcp} (doto (new TLegend 0.55 0.70 0.88 0.88) {SetBorderSize 0}))
-(.AddEntry leg-rcp h-rcp-c0 "0-10% / 50-80%"  "L")
-(.AddEntry leg-rcp h-rcp-c1 "10-30% / 50-80%" "L")
-(.AddEntry leg-rcp h-rcp-c2 "30-50% / 50-80%" "L")
-(.Draw leg-rcp)
-(.Update c-rcp)
+  ;;; Finalize spectra canvas (per-event normalised)
+  (.Scale h-pt-c0 (/ 1.0 nev-c0))
+  (.Scale h-pt-c1 (/ 1.0 nev-c1))
+  (.Scale h-pt-c2 (/ 1.0 nev-c2))
+  (.Scale h-pt-c3 (/ 1.0 nev-c3))
+  (doto h-pt-c0 {SetTitle ";p_{T} (GeV/c);(1/N_{ev}) dN/dp_{T}"})
+  (.Update c-cent)
+
+  ;;; Draw R_CP
+  (def {c-rcp} (new TCanvas "c_rcp" "R_{CP} Pb-Pb 5.02 TeV" 900 700))
+  (doto h-rcp-c0 {SetStats 0} {SetLineColor 2} {SetLineWidth 2}
+                 {SetMinimum 0.} {SetMaximum 1.1} {Draw "HIST"})
+  (.SetRangeUser (.GetXaxis h-rcp-c0) 0. 9.)
+  (doto h-rcp-c1 {SetLineColor 4} {SetLineWidth 2} {Draw "HIST SAME"})
+  (doto h-rcp-c2 {SetLineColor 6} {SetLineWidth 2} {Draw "HIST SAME"})
+  (.Draw rcp-line "SAME")
+  (def {leg-rcp} (doto (new TLegend 0.55 0.70 0.88 0.88) {SetBorderSize 0}))
+  (.AddEntry leg-rcp h-rcp-c0 "0-10% / 50-80%"  "L")
+  (.AddEntry leg-rcp h-rcp-c1 "10-30% / 50-80%" "L")
+  (.AddEntry leg-rcp h-rcp-c2 "30-50% / 50-80%" "L")
+  (.Draw leg-rcp)
+  (.Update c-rcp)
+} {
+  print "WARNING: no events in one or more centrality classes — skipping R_CP (check EOS access)"
+})

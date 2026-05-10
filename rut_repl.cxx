@@ -1,6 +1,8 @@
 #include "rooture.h"
 #include <cstdarg>
 #include <ctime>
+#include <execinfo.h>
+#include <signal.h>
 
 // ---------------------------------------------------------------------------
 // Global variables
@@ -23,6 +25,7 @@ static FILE*       g_mcp_out = stdout;  // real JSON-RPC output stream (saved be
 static bool        g_capturing = false;
 static std::string g_capture_buf;
 static std::string g_screenshot_dir;  // directory to archive screenshots (git repo)
+static time_t      g_start_time = 0; // set at start of main() for crash-loop detection
 
 // ---------------------------------------------------------------------------
 // screenshot_archive — copy PNG to screenshot dir and git-commit it
@@ -492,6 +495,15 @@ static void mcp_thread_fn() {
          {"observations", {{"type","string"},{"description","What you actually see in the image. Compare against the hypothesis, note any discrepancies, quality issues, or follow-up actions."}}}
        }},
        {"required", {"id","observations"}}}}},
+    {{"name", "get_symbol"},
+     {"description",
+       "Return the current S-expression value of a named symbol in the rooture environment. "
+       "Lambdas are shown as (\\{args} body), numbers and strings as literals, "
+       "lists as Q-expressions, ROOT objects as <ClassName>, columns as <Column: len=N>. "
+       "Useful for inspecting live bindings without reading source files."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {{"name", {{"type","string"},{"description","Symbol name to inspect"}}}}},
+       {"required", {"name"}}}}},
     {{"name", "list_annotations"},
      {"description", "List all symbol annotations set via (annotate sym \"text\"). Returns {name annotation} pairs describing user-defined customisation points."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
@@ -543,6 +555,13 @@ static void mcp_thread_fn() {
 
       } else if (tool == "list_symbols") {
         std::string result = eval_expr("(symbols)");
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",result}}})}
+        }}});
+
+      } else if (tool == "get_symbol") {
+        std::string name = args.value("name","");
+        std::string result = eval_expr(name);
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
           {"content", json::array({{{"type","text"},{"text",result}}})}
         }}});
@@ -678,6 +697,7 @@ static void mcp_thread_fn() {
         // Signal the new process that it is a hot-reload so it sends
         // notifications/tools/list_changed without waiting for initialize.
         setenv("ROOTURE_MCP_RELOAD", "1", 1);
+        unsetenv("ROOTURE_CRASH_COUNT");  // reset crash counter on manual reload
         execv(g_argv[0], g_argv);
         perror("execv");
         std::exit(1);
@@ -696,7 +716,86 @@ static void mcp_thread_fn() {
   write(g_pipe_fds[1], &eof, sizeof(eof));
 }
 
+// ---------------------------------------------------------------------------
+// crash_handler — backtrace + auto-reload with crash-loop protection
+// ---------------------------------------------------------------------------
+
+static void crash_handler(int sig, siginfo_t*, void*) {
+  // Use only async-signal-safe operations.
+#define CRASH_WRITE(s) write(STDERR_FILENO, s, sizeof(s)-1)
+
+  CRASH_WRITE("\n=== ROOTURE CRASH (");
+  const char* sn = sig == SIGSEGV ? "SIGSEGV" :
+                   sig == SIGABRT ? "SIGABRT" :
+                   sig == SIGBUS  ? "SIGBUS"  :
+                   sig == SIGFPE  ? "SIGFPE"  :
+                   sig == SIGILL  ? "SIGILL"  : "SIG";
+  write(STDERR_FILENO, sn, strlen(sn));
+  CRASH_WRITE(") ===\n");
+
+  void* frames[64];
+  int n = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, n, STDERR_FILENO);
+
+  // Anti-loop: count consecutive fast crashes via env var.
+  // If we ran ≥ 30 s before crashing, treat it as a fresh start (reset counter).
+  int crash_count = 1;
+  const char* cc = getenv("ROOTURE_CRASH_COUNT");
+  if (cc) {
+    int v = 0;
+    for (const char* p = cc; *p >= '0' && *p <= '9'; p++)
+      v = v * 10 + (*p - '0');
+    crash_count = v + 1;
+  }
+  if (time(nullptr) - g_start_time >= 30) crash_count = 1;
+
+  if (crash_count >= 3) {
+    CRASH_WRITE("=== Too many consecutive crashes — giving up. ===\n");
+    _exit(1);
+  }
+
+  // Encode crash_count as decimal string.
+  char cbuf[8] = {};
+  int v = crash_count, ci = 0;
+  do { cbuf[ci++] = '0' + (v % 10); v /= 10; } while (v);
+  for (int a = 0, b = ci-1; a < b; a++, b--) { char t = cbuf[a]; cbuf[a] = cbuf[b]; cbuf[b] = t; }
+
+  CRASH_WRITE("=== Auto-reloading (attempt ");
+  write(STDERR_FILENO, cbuf, ci);
+  CRASH_WRITE("/3)... ===\n");
+
+  setenv("ROOTURE_CRASH_COUNT", cbuf, 1);
+  setenv("ROOTURE_MCP_RELOAD",  "1",  1);
+
+  // Restore fd 1 to the real MCP stream so the new process can redirect it again.
+  if (g_mcp_mode && g_mcp_out)
+    dup2(fileno(g_mcp_out), STDOUT_FILENO);
+
+  // Close fd ≥ 3 so the new image starts with a clean fd table.
+  int maxfd = (int)sysconf(_SC_OPEN_MAX);
+  if (maxfd < 0 || maxfd > 4096) maxfd = 4096;
+  for (int fd = 3; fd < maxfd; fd++) close(fd);
+
+  execv(g_argv[0], g_argv);
+  CRASH_WRITE("execv failed\n");
+  _exit(1);
+}
+
+static void install_crash_handler() {
+  struct sigaction sa{};
+  sa.sa_sigaction = crash_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+  // SIGABRT intentionally excluded: ROOT uses it internally (TUnixSystem)
+  // and intercepting it breaks ROOT's own error-recovery paths.
+  sigaction(SIGSEGV, &sa, nullptr);
+  sigaction(SIGBUS,  &sa, nullptr);
+  sigaction(SIGFPE,  &sa, nullptr);
+  sigaction(SIGILL,  &sa, nullptr);
+}
+
 int main(int argc, char** argv) {
+  g_start_time = time(nullptr);
   g_argv = argv;  // save before TApplication may shuffle argv
   const char* g_script_file = nullptr;
   for (int i = 1; i < argc; i++) {
@@ -785,6 +884,9 @@ int main(int argc, char** argv) {
 
   /* Bootstrap TApplication so ROOT graphics/gSystem work */
   TApplication app("rooture", &argc, argv);
+
+  /* Install crash handler in MCP mode only — not in interactive REPL */
+  if (g_mcp_mode) install_crash_handler();
 
   /* Thread pool for (future ...) — sized to logical CPU count */
   rut_pool_create(std::max(1u, std::thread::hardware_concurrency()));

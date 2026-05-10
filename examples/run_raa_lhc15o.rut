@@ -5,7 +5,9 @@
 ;;;   (load "examples/run_raa_lhc15o.rut")
 
 (load "examples/datasets/lhc15o_245349.rut")
-(def {aod-paths} (take 50 lhc15o-245349-paths))
+(load stdlib.rut)
+(def {aod-paths} (take 500 lhc15o-245349-paths))
+(def {raa-mode} 1)
 (def {trk-tree}       "O2track")
 (def {extra-tree}     "O2trackextra_002")
 (def {coll-tree}      "O2collision_001")

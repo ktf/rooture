@@ -64,6 +64,43 @@ symbol being unset (rooture auto-converts undefined symbols to strings):
 (def {bc-tree}    "O2bc")
 ```
 
+### Dataset files
+
+Pre-made dataset lists live in `examples/datasets/`.  Each file defines a
+named list of AO2D xrootd paths, e.g. `lhc15o-245349-paths`.  Set `aod-paths`
+from one of these before loading any analysis script:
+
+```scheme
+(load "examples/datasets/lhc15o_245349.rut")   ; defines lhc15o-245349-paths (1438 files)
+(def {aod-paths} (take 5 lhc15o-245349-paths))  ; use first N files
+```
+
+`spectra_tpc.rut` guards that `aod-paths` is set before it runs; if the guard
+triggers, `tf-pairs` will be empty.  Always set `aod-paths` **before** loading
+`spectra_tpc.rut` (or any analysis script that loads it).
+
+**Recovering a stale session**: after an MCP reconnect, symbols like `aod-paths`
+and `tf-pairs` may appear in the environment but be empty (`len = 0`) because the
+previous session had a partial load.  Rebuild manually:
+
+```scheme
+(def {aod-paths} (take 5 lhc15o-245349-paths))
+(def {tf-pairs} (do
+  (= {acc} {})
+  (dotimes {pi} (len aod-paths) {
+    do
+    (= {path} (nth pi aod-paths))
+    (= {keys} (.GetListOfKeys (::Open TFile path)))
+    (dotimes {i} (.GetEntries keys) {
+      do
+      (= {k} (.At keys i))
+      (if (== (.GetClassName k) "TDirectoryFile")
+        {= {acc} (join acc (list (list path (.GetName k))))}
+        {})})})
+  acc))
+(print "Timeframes:" (len tf-pairs))
+```
+
 ### Enumerating timeframes
 
 Each AO2D.root file has one `TDirectoryFile` per time frame named `DF_<timestamp>`.
@@ -519,6 +556,7 @@ event selection + η cut + pT spectrum, one pmap loop, merge and draw.
 | Spurious low-pT proton peak | Loose flat DCA cut passes Λ→pπ secondaries | Use pT-parameterized cut: `\|dcaXY\| < 0.0105 + 0.035/pT^1.1` |
 | SIGSEGV in pmap | `new` or method call triggering Cling JIT in worker thread | Move all ROOT object creation before pmap |
 | "Got String, expected Object" | Undefined symbol auto-converted to string (e.g. `aod-paths` not set) | Guard with `(if (== sym "sym") ...)` or ensure def runs first |
+| `tf-pairs` or `aod-paths` empty after MCP reconnect | Session restored with stale empty symbols from a partially-loaded previous session | Re-`def` `aod-paths` from the dataset file and re-run the `tf-pairs` scan block (see Dataset files section above) |
 | Wrong TOF nσ (e.g. always 0 or always fail) | `tof-c` in wrong units (ps instead of ns) | Use `tof-c = 29.9792458` cm/ns; fTrackTime is in nanoseconds |
 | `m-dca` defined but not in mask | Forgot to include `m-dca` in the mask chain | Verify every quality mask is AND'd into the final mask |
 | SIGSEGV from concurrent TTree load | `TTree::Streamer` touches global StreamerInfo registry | Fixed in rut_column.cxx — tree metadata dispatched to main thread |

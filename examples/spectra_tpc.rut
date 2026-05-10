@@ -22,6 +22,8 @@
 ;;;   (load "examples/spectra_tpc.rut")
 
 (load stdlib.rut)
+(load examples/jit_progress.rut)
+(default {raa-mode} 0)   ;;; set to 1 before loading to skip tf-scan + spectra analysis
 
 ;;; aod-paths must be set before loading, e.g.:
 ;;;   (def {aod-paths} (list "/path/to/AO2D.root"))
@@ -97,23 +99,39 @@
 (load examples/pid_tpc.rut)
 
 ;;; ── Collect {path tf-name} pairs across all input files ─────────────────
-(def {tf-pairs} (do
-  (= {acc} {})
-  (dotimes {pi} (len aod-paths) {
-    do
-    (= {path} (nth pi aod-paths))
-    (print "Opening file" (+ pi 1) "/" (len aod-paths) ":" path)
-    (= {keys} (.GetListOfKeys (::Open TFile path)))
-    (dotimes {i} (.GetEntries keys) {
-      do
-      (= {k} (.At keys i))
-      (if (== (.GetClassName k) "TDirectoryFile")
-        {= {acc} (join acc (list (list path (.GetName k))))}
-        {})
-    })
-  })
-  acc))
-(print "Timeframes:" (len tf-pairs) "across" (len aod-paths) "file(s)")
+;;; Skipped in raa-mode=1 (raa_pbpb.rut scans files inline, one at a time).
+(if (== raa-mode 0)
+  {do
+    (.SetValue gEnv "XNet.RequestTimeout" 30)
+    (.SetValue gEnv "XNet.ConnectTimeout" 10)
+    (def {tf-pairs} (do
+      (= {acc} {})
+      (dotimes {pi} (len aod-paths) {
+        do
+        (= {path} (nth pi aod-paths))
+        (print "Opening file" (+ pi 1) "/" (len aod-paths) ":" path)
+        (= {f} (::Open TFile path))
+        (if (== f 0)
+          {print "WARNING: could not open" path "(skipping)"}
+          {if (.IsZombie f)
+            {print "WARNING: zombie file" path "(skipping)"}
+            {do
+              (= {keys} (.GetListOfKeys f))
+              (dotimes {i} (.GetEntries keys) {
+                do
+                (= {k} (.At keys i))
+                (if (== (.GetClassName k) "TDirectoryFile")
+                  {= {acc} (join acc (list (list path (.GetName k))))}
+                  {})
+              })}})
+      })
+      acc))
+    (print "Timeframes:" (len tf-pairs) "across" (len aod-paths) "file(s)")
+  }
+  {do
+    (.SetValue gEnv "XNet.RequestTimeout" 30)
+    (.SetValue gEnv "XNet.ConnectTimeout" 10)
+    (def {tf-pairs} {})})
 
 ;;; ── propagate-to-dca ─────────────────────────────────────────────────────
 ;;;
@@ -217,30 +235,30 @@
 
 ;;; ── Auxiliary jit-fns ────────────────────────────────────────────────────
 
-(def {pt-fn}
-  (jit-fn float (\{{float s1pt}}
+(def {pt-ptr}
+  (jitfn! "pt" float (\{{float s1pt}}
     {(if (== s1pt 0.0f) {0.0f} {(/ 1.0f (fabsf s1pt))})})))
 
 ;;; total momentum p = sqrt(1 + tgl²) / |q/pT|
-(def {p-fn}
-  (jit-fn float (\{{float s1pt} {float tgl}}
+(def {p-ptr}
+  (jitfn! "p" float (\{{float s1pt} {float tgl}}
     {(if (== s1pt 0.0f) {0.0f}
       {(/ (sqrtf (+ 1.0f (* tgl tgl))) (fabsf s1pt))})})))
 
 ;;; η = asinh(tgl); mask: |η| < 0.8
-(def {eta-ok-fn}
-  (jit-fn float (\{{float tgl}}
+(def {eta-ok-ptr}
+  (jitfn! "eta-ok" float (\{{float tgl}}
     {(if (< (fabsf (asinhf tgl)) 0.8f) {1.0f} {0.0f})})))
 
-(def {sub-fn}
-  (jit-fn float (\{{float a} {float b}} {(- a b)})))
+(def {sub-ptr}
+  (jitfn! "sub" float (\{{float a} {float b}} {(- a b)})))
 
 ;;; DCA primary-track selection matching isGlobalTrack():
 ;;;   |dcaXY| < 0.0105 + 0.035 / pT^1.1   (pT-parameterised, tight at low pT)
 ;;;   |dcaZ|  < 2.0 cm
 ;;; The flat 2.4/3.2 cm cuts are track-quality only and let through Λ→pπ secondaries.
-(def {dca-ok-fn}
-  (jit-fn float (\{{float dxy} {float dz} {float pt}}
+(def {dca-ok-ptr}
+  (jitfn! "dca-ok" float (\{{float dxy} {float dz} {float pt}}
     {(if (< (fabsf dxy) (+ 0.0105f (/ 0.0350f (powf (fabsf pt) 1.1f))))
       {(if (< (fabsf dz) 2.0f) {1.0f} {0.0f})}
       {0.0f})})))
@@ -249,42 +267,34 @@
 (def {min-cls-box} (new TArrayI 1))
 (.SetAt min-cls-box 70 0)
 
-(def {cls-ok-fn}
-  (jit-fn float (\{{float ncls}}
+(def {cls-ok-ptr}
+  (jitfn! "cls-ok" float (\{{float ncls}}
     {(if (>= ncls (.GetAt min-cls-box 0)) {1.0f} {0.0f})})))
 
 ;;; global track quality cuts matching isGlobalTrack()
 ;;; ITS: at least 1 cluster AND ITS chi2/cluster < 36
-(def {its-ok-fn}
-  (jit-fn float (\{{float itsmap} {float itschi2}}
+(def {its-ok-ptr}
+  (jitfn! "its-ok" float (\{{float itsmap} {float itschi2}}
     {(if (> itsmap 0.5f)
       {(if (< itschi2 36.0f) {1.0f} {0.0f})}
       {0.0f})})))
 
 ;;; TPC chi2/cluster < 4
-(def {tpcchi2-ok-fn}
-  (jit-fn float (\{{float chi2}}
+(def {tpcchi2-ok-ptr}
+  (jitfn! "tpcchi2-ok" float (\{{float chi2}}
     {(if (< chi2 4.0f) {1.0f} {0.0f})})))
 
 ;;; TPC crossed rows >= 70 AND crossed/findable >= 0.8
-(def {crows-ok-fn}
-  (jit-fn float (\{{float ncrows} {float nfind}}
+(def {crows-ok-ptr}
+  (jitfn! "crows-ok" float (\{{float ncrows} {float nfind}}
     {(if (>= ncrows 70.0f)
       {(if (> nfind 0.5f)
         {(if (>= (/ ncrows nfind) 0.8f) {1.0f} {0.0f})}
         {0.0f})}
       {0.0f})})))
 
-;;; resolve function pointers once on the main thread
-(def {pt-ptr}        (jitfn-ptr pt-fn))
-(def {p-ptr}         (jitfn-ptr p-fn))
-(def {eta-ok-ptr}    (jitfn-ptr eta-ok-fn))
-(def {sub-ptr}       (jitfn-ptr sub-fn))
-(def {dca-ok-ptr}    (jitfn-ptr dca-ok-fn))
-(def {cls-ok-ptr}    (jitfn-ptr cls-ok-fn))
-(def {its-ok-ptr}    (jitfn-ptr its-ok-fn))
-(def {tpcchi2-ok-ptr}(jitfn-ptr tpcchi2-ok-fn))
-(def {crows-ok-ptr}  (jitfn-ptr crows-ok-fn))
+;;; ── Spectra analysis — skipped in raa-mode=1 ─────────────────────────────
+(if (== raa-mode 1) {} {do
 
 ;;; ── Histograms — pre-created on main thread ──────────────────────────────
 
@@ -294,6 +304,10 @@
 (def {tf-hdxy} (map (\ {pr} {doto (new TH1F (concat "dxy_" (nth 1 pr)) "" 100 -5. 5.) {SetDirectory 0}}) tf-pairs))
 (def {tf-hdz}  (map (\ {pr} {doto (new TH1F (concat "dz_"  (nth 1 pr)) "" 100 -5. 5.) {SetDirectory 0}}) tf-pairs))
 (def {tf-hvz}  (map (\ {pr} {doto (new TH1F (concat "vz_"  (nth 1 pr)) "" 100 -20. 20.) {SetDirectory 0}}) tf-pairs))
+
+;;; Per-TF stopwatches for timing (pre-created on main thread; safe in pmap)
+(def {tf-sws-tot}  (map (\ {_} {new TStopwatch}) tf-pairs))
+(def {tf-sws-read} (map (\ {_} {new TStopwatch}) tf-pairs))
 
 ;;; Global merged histograms
 (def {h-pt}
@@ -347,6 +361,10 @@
   (= {hdz}  (nth i tf-hdz))
   (= {hvz}  (nth i tf-hvz))
   (print "  TF" (+ i 1) "/" (len tf-pairs) tf)
+  (= {sw-tot}  (nth i tf-sws-tot))
+  (= {sw-read} (nth i tf-sws-read))
+  (.Start sw-tot)
+  (.Start sw-read)
 
   ;;; track parameters in local alpha frame
   (= {fx-c}   (load-branch aod-path (concat tf "/" trk-tree) "fX"))
@@ -381,6 +399,7 @@
   ;;; per-collision event selection mask (TVX + TF border + ITS ROF + pvZ + no-pileup)
   (= {evsel-cols} (compute-evsel-tf aod-path tf))
   (= {evsel-col}  (evsel-and evsel-cols))
+  (.Stop sw-read)   ;;; read phase ends here
 
   ;;; vertex Z: fill only selected collisions (after event selection, matches official)
   (col-fill-h1 hvz (col-mask evsel-col pvzc-c))
@@ -440,6 +459,9 @@
   (col-fill-h1 (nth i (nth 3 tf-hp-sp))  (col-mask msk-ka p-c))
   (col-fill-h1 (nth i (nth 4 tf-hp-sp))  (col-mask msk-pr p-c))
   (col-fill-h1 (nth i (nth 5 tf-hp-sp))  (col-mask msk-de p-c))
+
+  (.Stop sw-tot)
+  (close-cached-files)   ;;; free TFile handles to cap per-thread memory usage
 }) (do
   (= {acc} {})
   (dotimes {i} (len tf-pairs) {= {acc} (join acc (list i))})
@@ -463,6 +485,12 @@
 (def {wall-s} (.RealTime sw))
 (print "Selected tracks:" n-sel "  wall time:" wall-s "s")
 
+;;; ── Per-TF timing histograms ─────────────────────────────────────────────
+(def {h-tf-time}   (doto (new TH1F "h_tf_time"   ";Wall time per TF (s);TFs" 60 0. 30.) {SetDirectory 0}))
+(def {h-read-time} (doto (new TH1F "h_read_time"  ";Read time per TF (s);TFs" 60 0. 30.) {SetDirectory 0}))
+(map (\ {sw} {.Fill h-tf-time   (.RealTime sw)}) tf-sws-tot)
+(map (\ {sw} {.Fill h-read-time (.RealTime sw)}) tf-sws-read)
+
 ;;; ── Draw ─────────────────────────────────────────────────────────────────
 ;;; pad 1: pT spectrum (log y)
 (.cd p1)
@@ -480,3 +508,14 @@
 (.cd p5)
 (doto h-dcaz {SetLineColor 2} {Draw})
 (.Update c) (.RaiseWindow c)
+
+;;; ── Timing canvas ────────────────────────────────────────────────────────
+(def {c-timing} (new TCanvas "c_timing" "Per-TF timing" 900 400))
+(.Divide c-timing 2 1)
+(.cd c-timing 1)
+(doto h-tf-time   {SetLineColor 4} {SetLineWidth 2} {Draw "HIST"})
+(.cd c-timing 2)
+(doto h-read-time {SetLineColor 2} {SetLineWidth 2} {Draw "HIST"})
+(.Update c-timing)
+
+}) ;;; end (if raa-mode == 1)

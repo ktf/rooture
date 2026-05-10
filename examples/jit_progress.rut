@@ -1,0 +1,45 @@
+;;; examples/jit_progress.rut
+;;; Progress canvas for jit-fn compilation.
+;;;
+;;; Defines jitfn! — a drop-in replacement for the two-step
+;;;   (def {foo-fn}  (jit-fn rettype lambda))
+;;;   (def {foo-ptr} (jitfn-ptr foo-fn))
+;;; pattern.  Call as:
+;;;   (def {foo-ptr} (jitfn! "foo" rettype lambda))
+;;; jitfn! compiles the function, records its wall time, updates the
+;;; live progress canvas, and returns the resolved function pointer.
+;;;
+;;; Guard: safe to load multiple times; canvas is created only once.
+
+(if (== jitfn! "jitfn!") {
+  do
+  (def {jit-n} 0)
+
+  (def {h-jit}
+    (doto (new TH1F "h_jit" "JIT compilation;Function;Time (s)" 30 0.5 30.5)
+          {SetDirectory 0} {SetStats 0} {SetFillColor 38} {SetMinimum 0.}))
+
+  (def {c-jit} (new TCanvas "c_jit" "JIT compilation progress" 800 350))
+  (doto h-jit {Draw "HBAR"})
+  (.Update c-jit)
+
+  (def {jitfn!} (\{name ret-type lam} {
+    do
+    (= {sw} (new TStopwatch))
+    (.Start sw)
+    (= {fn} (jit-fn ret-type lam))
+    (.Stop sw)
+    (= {t} (.RealTime sw))
+    (def {jit-n} (+ jit-n 1))
+    (.SetBinContent h-jit jit-n t)
+    (.SetBinLabel (.GetXaxis h-jit) jit-n name)
+    (.SetRange (.GetXaxis h-jit) 1 jit-n)
+    (.cd c-jit)
+    (.Draw h-jit "HBAR")
+    (.Update c-jit)
+    (.RaiseWindow c-jit)
+    (.ProcessEvents gSystem)
+    (print "jit" name t "s")
+    (jitfn-ptr fn)
+  }))
+} {})

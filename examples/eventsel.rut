@@ -47,12 +47,17 @@
 (default {bc-tree}   "O2bc_001")
 (default {coll-tree} "O2collision_001")
 
+;;; Fallback: provide a no-op jitfn! if jit_progress.rut was not loaded first.
+(if (== jitfn! "jitfn!") {
+  def {jitfn!} (\{name rt lam} {jitfn-ptr (jit-fn rt lam)})
+} {})
+
 ;;; ── TF border jit-fn ─────────────────────────────────────────────────────
 ;;; (globalBC - bcSOR) % nBCsPerTF must be in (300, nBCsPerTF-4000)
 ;;; bcSOR and nBCsPerTF are constant-folded from env at jit-fn compile time.
 ;;; Returns 1.0 (pass) when bcSOR == 0 (unknown — skip check).
-(def {tf-border-fn}
-  (jit-fn float (\{{ULong64_t gbc}}
+(def {tf-border-ptr}
+  (jitfn! "tf-border" float (\{{ULong64_t gbc}}
     {(if (== bcSOR 0)
       {1.0f}
       {(do
@@ -64,8 +69,8 @@
 ;;; bcInROF = (globalBC + 3564 - rofOffset) % rofLength
 ;;; Must be in (10, rofLength-20).
 ;;; Returns 1.0 when bcSOR == 0 (unknown — skip check).
-(def {itsrof-border-fn}
-  (jit-fn float (\{{ULong64_t gbc}}
+(def {itsrof-border-ptr}
+  (jitfn! "itsrof-border" float (\{{ULong64_t gbc}}
     {(if (== bcSOR 0)
       {1.0f}
       {(do
@@ -74,14 +79,9 @@
           {1.0f} {0.0f}))})})))
 
 ;;; ── pvZ cut jit-fn ───────────────────────────────────────────────────────
-(def {pvz-ok-fn}
-  (jit-fn float (\{{float pvz}}
+(def {pvz-ok-ptr}
+  (jitfn! "pvz-ok" float (\{{float pvz}}
     {(if (< (fabsf pvz) pvz-cut) {1.0f} {0.0f})})))
-
-;;; ── resolve function pointers once ───────────────────────────────────────
-(def {tf-border-ptr}    (jitfn-ptr tf-border-fn))
-(def {itsrof-border-ptr}(jitfn-ptr itsrof-border-fn))
-(def {pvz-ok-ptr}       (jitfn-ptr pvz-ok-fn))
 
 ;;; ── compute-evsel-tf ─────────────────────────────────────────────────────
 ;;;

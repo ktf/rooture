@@ -1,0 +1,114 @@
+;;; examples/pid_plot.rut
+;;; TPC dE/dx vs momentum (2D histogram) with Bethe-Bloch overlay.
+;;;
+;;; Prerequisites — load before this file:
+;;;   run_opendata_lhc15o.rut (or any run_*.rut that sets tf-pairs, trk-tree, extra-tree)
+;;;   spectra_tpc.rut defines: sub-ptr, eta-ok-ptr, cls-ok-ptr,
+;;;                             pid-sig-ok-ptr, pid-p-ok-ptr
+;;;   pid_tpc.rut defines:     bb0..bb4, pid-m-el..pid-m-de
+;;;
+;;; Usage:
+;;;   (load "examples/pid_plot.rut")
+
+;;; ── Data 2D histogram ────────────────────────────────────────────────────
+(def {h-pid}
+  (doto (new TH2F "h_pid" "TPC dE/dx;p_{inner} (GeV/c);TPC signal (a.u.)"
+             500 0. 5. 500 0. 500.)
+        {SetDirectory 0}))
+
+;;; ── Bethe-Bloch TF1 curves ────────────────────────────────────────────────
+;;; Formula: bb0*(bb1 - beta^bb3 - ln(bb2+(1/bg)^bb4)) / beta^bb3
+;;; where bg=x/[5], beta=bg/sqrt(1+bg^2)
+;;; Parameters: [0]=bb0 [1]=bb1 [2]=bb2 [3]=bb3 [4]=bb4 [5]=mass (GeV/c^2)
+(def {bb-form}
+  "[0]*([1]-pow(x/[5]/sqrt(1+pow(x/[5],2)),[3])-log([2]+pow([5]/x,[4])))/pow(x/[5]/sqrt(1+pow(x/[5],2)),[3])")
+
+(def {tf-el} (doto (new TF1 "tf_el" bb-form 0.05 5.)
+  {SetParameter 0 bb0} {SetParameter 1 bb1} {SetParameter 2 bb2}
+  {SetParameter 3 bb3} {SetParameter 4 bb4} {SetParameter 5 pid-m-el}
+  {SetLineColor  2} {SetLineWidth 2} {SetNpx 500}))
+(def {tf-mu} (doto (new TF1 "tf_mu" bb-form 0.05 5.)
+  {SetParameter 0 bb0} {SetParameter 1 bb1} {SetParameter 2 bb2}
+  {SetParameter 3 bb3} {SetParameter 4 bb4} {SetParameter 5 pid-m-mu}
+  {SetLineColor  8} {SetLineWidth 2} {SetNpx 500}))
+(def {tf-pi} (doto (new TF1 "tf_pi" bb-form 0.05 5.)
+  {SetParameter 0 bb0} {SetParameter 1 bb1} {SetParameter 2 bb2}
+  {SetParameter 3 bb3} {SetParameter 4 bb4} {SetParameter 5 pid-m-pi}
+  {SetLineColor  4} {SetLineWidth 2} {SetNpx 500}))
+(def {tf-ka} (doto (new TF1 "tf_ka" bb-form 0.1 5.)
+  {SetParameter 0 bb0} {SetParameter 1 bb1} {SetParameter 2 bb2}
+  {SetParameter 3 bb3} {SetParameter 4 bb4} {SetParameter 5 pid-m-ka}
+  {SetLineColor  6} {SetLineWidth 2} {SetNpx 500}))
+(def {tf-pr} (doto (new TF1 "tf_pr" bb-form 0.1 5.)
+  {SetParameter 0 bb0} {SetParameter 1 bb1} {SetParameter 2 bb2}
+  {SetParameter 3 bb3} {SetParameter 4 bb4} {SetParameter 5 pid-m-pr}
+  {SetLineColor 46} {SetLineWidth 2} {SetNpx 500}))
+(def {tf-de} (doto (new TF1 "tf_de" bb-form 0.15 5.)
+  {SetParameter 0 bb0} {SetParameter 1 bb1} {SetParameter 2 bb2}
+  {SetParameter 3 bb3} {SetParameter 4 bb4} {SetParameter 5 pid-m-de}
+  {SetLineColor  1} {SetLineWidth 2} {SetNpx 500}))
+
+;;; ── Legend ────────────────────────────────────────────────────────────────
+(def {leg-pid} (doto (new TLegend 0.68 0.62 0.88 0.88) {SetBorderSize 0}))
+(.AddEntry leg-pid tf-el "e"    "L")
+(.AddEntry leg-pid tf-mu "#mu"  "L")
+(.AddEntry leg-pid tf-pi "#pi"  "L")
+(.AddEntry leg-pid tf-ka "K"    "L")
+(.AddEntry leg-pid tf-pr "p"    "L")
+(.AddEntry leg-pid tf-de "d"    "L")
+
+;;; ── Canvas: show empty histogram + BB curves before filling ───────────────
+(def {c-pid} (doto (new TCanvas "c_pid" "TPC PID" 1000 700) {SetLogz}))
+(doto h-pid {SetStats 0} {Draw "COLZ"})
+(.Draw tf-el "SAME")
+(.Draw tf-mu "SAME")
+(.Draw tf-pi "SAME")
+(.Draw tf-ka "SAME")
+(.Draw tf-pr "SAME")
+(.Draw tf-de "SAME")
+(.Draw leg-pid)
+(.Update c-pid)
+
+;;; ── Fill loop ─────────────────────────────────────────────────────────────
+(dotimes {i} (len tf-pairs) {
+  do
+  (= {pr}       (nth i tf-pairs))
+  (= {aod-path} (nth 0 pr))
+  (= {tf}       (nth 1 pr))
+  (print "TF" (+ i 1) "/" (len tf-pairs) tf)
+
+  ;;; branches needed for quality cuts and PID signal
+  (= {tgl-c}    (load-branch aod-path (concat tf "/" trk-tree)   "fTgl"))
+  (= {find-c}   (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindable"))
+  (= {fmin-c}   (load-branch aod-path (concat tf "/" extra-tree) "fTPCNClsFindableMinusFound"))
+  (= {sig-c}    (load-branch aod-path (concat tf "/" extra-tree) "fTPCSignal"))
+  (= {pinner-c} (load-branch aod-path (concat tf "/" extra-tree) "fTPCInnerParam"))
+
+  ;;; nCls found = findable − (findable − found)
+  (= {ncls-c} (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
+
+  ;;; quality mask: |η| < 0.8 + nCls + TPC signal validity (removes failed-extraction tracks)
+  (= {m-qual} (col-and (col-map-ptr eta-ok-ptr tgl-c)
+                        (col-map-ptr cls-ok-ptr ncls-c)
+                        (col-map-ptr pid-sig-ok-ptr (col-cast-f32 sig-c))
+                        (col-map-ptr pid-p-ok-ptr   (col-cast-f32 pinner-c))))
+
+  ;;; masked float32 columns
+  (= {pin-f} (col-mask m-qual (col-cast-f32 pinner-c)))
+  (= {sig-f} (col-mask m-qual (col-cast-f32 sig-c)))
+
+  ;;; fill data 2D histogram
+  (col-fill-h2 h-pid pin-f sig-f)
+  (close-cached-files)
+
+  ;;; live update every 10 TFs
+  (if (= (% (+ i 1) 10) 0) {
+    do
+    (.Update c-pid)
+    (.ProcessEvents gSystem)
+  } {})
+})
+
+;;; ── Final update ──────────────────────────────────────────────────────────
+(.Update c-pid)
+(print "pid_plot.rut done.")
