@@ -30,10 +30,10 @@
 (def {ones-ptr} (jitfn! "ones" float (\{{float x}} {1.0f})))
 
 ;;; ── Histograms ───────────────────────────────────────────────────────────
-(def {h-pt-c0} (doto (new TH1F "hpt_c0" "0-10%;p_{T} (GeV/c);Tracks"   100 0. 10.) {SetDirectory 0}))
-(def {h-pt-c1} (doto (new TH1F "hpt_c1" "10-30%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0}))
-(def {h-pt-c2} (doto (new TH1F "hpt_c2" "30-50%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0}))
-(def {h-pt-c3} (doto (new TH1F "hpt_c3" "50-80%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0}))
+(def {h-pt-c0} (doto (new TH1F "hpt_c0" "0-10%;p_{T} (GeV/c);Tracks"   100 0. 10.) {SetDirectory 0} {Sumw2}))
+(def {h-pt-c1} (doto (new TH1F "hpt_c1" "10-30%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0} {Sumw2}))
+(def {h-pt-c2} (doto (new TH1F "hpt_c2" "30-50%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0} {Sumw2}))
+(def {h-pt-c3} (doto (new TH1F "hpt_c3" "50-80%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0} {Sumw2}))
 
 ;;; Event counters: 1-bin histograms [0,2], fill with 1.0 per passing collision
 (def {h-nev-c0} (doto (new TH1F "hnev_c0" "" 1 0. 2.) {SetDirectory 0}))
@@ -190,11 +190,11 @@
   (def {rcp-line} (doto (new TLine 0. 1. 9. 1.) {SetLineStyle 2} {SetLineColor 1}))
 
   ;;; Finalize spectra canvas (per-event normalised)
-  (.Scale h-pt-c0 (/ 1.0 nev-c0))
-  (.Scale h-pt-c1 (/ 1.0 nev-c1))
-  (.Scale h-pt-c2 (/ 1.0 nev-c2))
-  (.Scale h-pt-c3 (/ 1.0 nev-c3))
-  (doto h-pt-c0 {SetTitle ";p_{T} (GeV/c);(1/N_{ev}) dN/dp_{T}"})
+  (.Scale h-pt-c0 (/ 1.0 nev-c0) "width")
+  (.Scale h-pt-c1 (/ 1.0 nev-c1) "width")
+  (.Scale h-pt-c2 (/ 1.0 nev-c2) "width")
+  (.Scale h-pt-c3 (/ 1.0 nev-c3) "width")
+  (doto h-pt-c0 {SetTitle ";p_{T} (GeV/c);(1/N_{ev}) dN/dp_{T} (GeV/c)^{-1}"})
   (.Update c-cent)
 
   ;;; Draw R_CP
