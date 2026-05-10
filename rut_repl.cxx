@@ -26,6 +26,11 @@ static FILE*       g_mcp_out = stdout;  // real JSON-RPC output stream (saved be
 static bool        g_capturing = false;
 static std::string g_capture_buf;
 static std::string g_screenshot_dir;  // directory to archive screenshots (git repo)
+
+// Async task map: task_id → {done, output}
+static std::mutex                              g_task_mu;
+static std::map<std::string, std::pair<bool,std::string>> g_task_map;
+static std::atomic<int>                        g_task_counter{0};
 static time_t      g_start_time = 0; // set at start of main() for crash-loop detection
 
 // ---------------------------------------------------------------------------
@@ -115,9 +120,29 @@ public:
   PipeHandler(lenv* e) : TFileHandler(g_pipe_fds[0], 1), fEnv(e) {}
 
   Bool_t Notify() override {
+    // Protocol: [uint8_t mode] [uint32_t len] [expr bytes]
+    //   mode=0: REPL message (no reply; len=0 means EOF/terminate)
+    //   mode=1: MCP sync eval (reply sent on g_mcp_reply_fds)
+    //   mode=2: MCP async eval ([uint32_t id_len][task_id][uint32_t len][expr])
+    uint8_t mode = 0;
+    if (read(g_pipe_fds[0], &mode, 1) != 1) return kTRUE;
+
+    std::string task_id;
+    if (mode == 2) {
+      uint32_t id_len = 0;
+      if (read(g_pipe_fds[0], &id_len, sizeof(id_len)) != sizeof(id_len)) return kTRUE;
+      task_id.resize(id_len);
+      size_t got = 0;
+      while (got < id_len) {
+        ssize_t n = read(g_pipe_fds[0], task_id.data() + got, id_len - got);
+        if (n <= 0) break;
+        got += n;
+      }
+    }
+
     uint32_t len = 0;
     if (read(g_pipe_fds[0], &len, sizeof(len)) != sizeof(len)) return kTRUE;
-    if (len == 0) { gApplication->Terminate(0); return kTRUE; }
+    if (len == 0 && mode == 0) { gApplication->Terminate(0); return kTRUE; }
 
     std::string expr(len, '\0');
     size_t got = 0;
@@ -128,11 +153,11 @@ public:
     }
 
     mpc_result_t r;
-    const char* src = g_mcp_mode ? "<mcp>" : "<stdin>";
+    const char* src = (mode >= 1) ? "<mcp>" : "<stdin>";
 
     int saved_stderr_fd = -1;
     int stderr_pipe[2] = {-1, -1};
-    if (g_mcp_mode) {
+    if (mode >= 1) {
       g_capturing = true;
       g_capture_buf.clear();
       // Redirect stderr to capture Cling diagnostics
@@ -164,7 +189,7 @@ public:
       mpc_err_delete(r.error);
     }
 
-    if (g_mcp_mode) {
+    if (mode >= 1) {
       g_capturing = false;
 
       // Restore stderr and collect any Cling diagnostics
@@ -186,9 +211,16 @@ public:
         }
       }
 
-      uint32_t rlen = (uint32_t)g_capture_buf.size();
-      write(g_mcp_reply_fds[1], &rlen, sizeof(rlen));
-      if (rlen > 0) write(g_mcp_reply_fds[1], g_capture_buf.data(), rlen);
+      if (mode == 1) {
+        // MCP sync: send reply on reply pipe
+        uint32_t rlen = (uint32_t)g_capture_buf.size();
+        write(g_mcp_reply_fds[1], &rlen, sizeof(rlen));
+        if (rlen > 0) write(g_mcp_reply_fds[1], g_capture_buf.data(), rlen);
+      } else {
+        // MCP async: store result in task map
+        std::lock_guard<std::mutex> lock(g_task_mu);
+        g_task_map[task_id] = {true, g_capture_buf};
+      }
     }
 
     TIter next(gROOT->GetListOfCanvases());
@@ -341,6 +373,8 @@ static void input_thread_fn() {
   if (home) { hist_file = std::string(home) + "/.rooture_history"; rx.history_load(hist_file); }
 
   auto send_expr = [](const std::string& expr) {
+    uint8_t mode = 0;  // REPL sync, no reply
+    write(g_pipe_fds[1], &mode, 1);
     uint32_t len = (uint32_t)expr.size();
     write(g_pipe_fds[1], &len, sizeof(len));
     write(g_pipe_fds[1], expr.data(), len);
@@ -354,8 +388,8 @@ static void input_thread_fn() {
     const char* input = rx.input(prompt);
     if (!input) {
       // EOF (Ctrl+D)
-      uint32_t eof = 0;
-      write(g_pipe_fds[1], &eof, sizeof(eof));
+      uint8_t mode = 0; write(g_pipe_fds[1], &mode, 1);
+      uint32_t eof = 0; write(g_pipe_fds[1], &eof, sizeof(eof));
       break;
     }
 
@@ -415,6 +449,8 @@ static void mcp_thread_fn() {
 
   // Helper: send eval expression to main thread, block until result arrives.
   auto eval_expr = [](const std::string& expr) -> std::string {
+    uint8_t mode = 1;  // MCP sync
+    write(g_pipe_fds[1], &mode, 1);
     uint32_t len = (uint32_t)expr.size();
     write(g_pipe_fds[1], &len, sizeof(len));
     write(g_pipe_fds[1], expr.data(), len);
@@ -505,6 +541,25 @@ static void mcp_thread_fn() {
      {"inputSchema", {{"type","object"},
        {"properties", {{"name", {{"type","string"},{"description","Symbol name to inspect"}}}}},
        {"required", {"name"}}}}},
+    {{"name", "eval_async"},
+     {"description",
+       "Evaluate a rooture expression asynchronously. Returns a task ID immediately without waiting. "
+       "Use task_result to poll for completion. "
+       "Ideal for long-running analyses (e.g. loading raa_pbpb.rut) — while the analysis runs on the "
+       "main thread, use get_symbol to inspect progress variables (e.g. tf-seq, n-done) and "
+       "task_result to check when it finishes."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {{"expr", {{"type","string"},{"description","Expression to evaluate"}}}}},
+       {"required", {"expr"}}}}},
+    {{"name", "task_result"},
+     {"description",
+       "Poll the result of an eval_async task. "
+       "Returns {\"status\":\"pending\"} while the task is still running, "
+       "{\"status\":\"done\",\"output\":\"...\"} when complete, "
+       "or {\"status\":\"not_found\"} for an unknown task ID."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {{"id", {{"type","string"},{"description","Task ID returned by eval_async"}}}}},
+       {"required", {"id"}}}}},
     {{"name", "list_annotations"},
      {"description", "List all symbol annotations set via (annotate sym \"text\"). Returns {name annotation} pairs describing user-defined customisation points."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
@@ -547,7 +602,45 @@ static void mcp_thread_fn() {
       std::string tool = req["params"].value("name","");
       json args = req["params"].value("arguments", json::object());
 
-      if (tool == "eval") {
+      if (tool == "eval_async") {
+        std::string expr = args.value("expr","");
+        std::string task_id = "task_" + std::to_string(++g_task_counter);
+        {
+          std::lock_guard<std::mutex> lock(g_task_mu);
+          g_task_map[task_id] = {false, ""};
+        }
+        uint8_t amode = 2;
+        write(g_pipe_fds[1], &amode, 1);
+        uint32_t id_len = (uint32_t)task_id.size();
+        write(g_pipe_fds[1], &id_len, sizeof(id_len));
+        write(g_pipe_fds[1], task_id.data(), id_len);
+        uint32_t expr_len = (uint32_t)expr.size();
+        write(g_pipe_fds[1], &expr_len, sizeof(expr_len));
+        write(g_pipe_fds[1], expr.data(), expr_len);
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",task_id}}})}
+        }}});
+
+      } else if (tool == "task_result") {
+        std::string task_id = args.value("id","");
+        std::string result;
+        {
+          std::lock_guard<std::mutex> lock(g_task_mu);
+          auto it = g_task_map.find(task_id);
+          if (it == g_task_map.end()) {
+            result = "{\"status\":\"not_found\"}";
+          } else if (!it->second.first) {
+            result = "{\"status\":\"pending\"}";
+          } else {
+            json r = {{"status","done"},{"output",it->second.second}};
+            result = r.dump();
+          }
+        }
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",result}}})}
+        }}});
+
+      } else if (tool == "eval") {
         std::string expr = args.value("expr","");
         std::string result = eval_expr(expr);
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
@@ -733,8 +826,8 @@ static void mcp_thread_fn() {
   }
 
   // EOF on stdin — signal main thread to exit.
-  uint32_t eof = 0;
-  write(g_pipe_fds[1], &eof, sizeof(eof));
+  uint8_t mode = 0; write(g_pipe_fds[1], &mode, 1);
+  uint32_t eof = 0; write(g_pipe_fds[1], &eof, sizeof(eof));
 }
 
 // ---------------------------------------------------------------------------
