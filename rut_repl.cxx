@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 
 bool g_debug = false;
+lenv* g_global_env = nullptr;
 
 static int             g_pipe_fds[2];
 static replxx::Replxx* g_rx = nullptr;
@@ -561,7 +562,27 @@ static void mcp_thread_fn() {
 
       } else if (tool == "get_symbol") {
         std::string name = args.value("name","");
-        std::string result = eval_expr(name);
+        std::string result;
+        {
+          // Non-blocking read-only lookup: shared_lock allows concurrent reads,
+          // blocks only while lenv_put holds the unique_lock for a write.
+          // We do NOT call lenv_get (it has a write side-effect for unknown syms).
+          std::shared_lock<std::shared_mutex> lock(g_env_rwlock);
+          bool found = false;
+          // g_global_env is the root (par==NULL); only global bindings are visible.
+          lenv* env = g_global_env;
+          while (env && !found) {
+            for (int i = 0; i < env->count; i++) {
+              if (strcmp(env->syms[i], name.c_str()) == 0) {
+                result = lval_sprint(env->vals[i]);
+                found = true;
+                break;
+              }
+            }
+            env = env->par;
+          }
+          if (!found) result = "(symbol not found: " + name + ")";
+        }
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
           {"content", json::array({{{"type","text"},{"text",result}}})}
         }}});
@@ -873,6 +894,7 @@ int main(int argc, char** argv) {
   /* The environment */
   lenv* e = lenv_new();
   lenv_add_builtins(e);
+  g_global_env = e;
 
   /* Set up the communication pipe between input thread and main thread */
   if (pipe(g_pipe_fds) != 0) { perror("pipe"); return 1; }

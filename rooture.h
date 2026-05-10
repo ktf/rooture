@@ -37,6 +37,7 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <functional>
 #include <future>
 #include <queue>
@@ -115,6 +116,8 @@ extern mpc_parser_t* Lispy;
 // Global variables (defined in their respective .cxx files)
 // ---------------------------------------------------------------------------
 extern bool g_debug;       // rut_repl.cxx
+extern lenv* g_global_env; // rut_repl.cxx — root environment (for non-blocking get_symbol)
+extern std::shared_mutex g_env_rwlock; // rut_lang.cxx — guards lenv writes
 extern int  g_cb_pipe[2];    // rut_root.cxx — callback pipe (int ids)
 extern int  g_cling_pipe[2]; // rut_root.cxx — wakes event loop when future posts Cling work
 
@@ -238,8 +241,9 @@ extern ColJitFnDispatch g_coljitfn_dispatch;
 lval* lval_atom(lval* init);
 lval* lval_future_new(RutFuturePtr rf);
 lval* lval_promise_new();
-void  lval_print(lval* v);
-void  lval_println(lval* v);
+void        lval_print(lval* v);
+void        lval_println(lval* v);
+std::string lval_sprint(lval* v); // serialize lval to string without printing (MCP-thread-safe)
 lenv* lenv_snapshot(lenv* e);
 
 std::string executable_dir();

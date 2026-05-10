@@ -18,6 +18,10 @@ mpc_parser_t* Lispy;
 // Thread identity: true on threads spawned by (future ...).
 thread_local bool g_in_future = false;
 
+// Read-write lock protecting all lenv writes.
+// MCP get_symbol acquires shared_lock; lenv_put acquires unique_lock.
+std::shared_mutex g_env_rwlock;
+
 // ---------------------------------------------------------------------------
 // Atom — thread-safe mutable reference (Clojure-style)
 // ---------------------------------------------------------------------------
@@ -85,6 +89,7 @@ lval* lenv_get(lenv* e, lval* k) {
 }
 
 void lenv_put(lenv* e, lval* k, lval* v) {
+  std::unique_lock<std::shared_mutex> lock(g_env_rwlock);
 
   /* Iterate over all items in environment */
   /* This is to see if variable already exists */
@@ -500,6 +505,108 @@ void lval_print(lval* v) {
 }
 
 void lval_println(lval* v) { lval_print(v); rut_print("\n"); }
+
+// ---------------------------------------------------------------------------
+// lval_sprint — serialize lval to std::string (safe to call from MCP thread)
+// Does NOT call ROOT Print() or rut_print; uses only C++ struct traversal.
+// ---------------------------------------------------------------------------
+static void lval_sprint_impl(lval* v, std::string& out);
+
+static void lval_expr_sprint(lval* v, char open, char close, std::string& out) {
+  out += open;
+  for (int i = 0; i < v->count; i++) {
+    lval_sprint_impl(v->cell[i], out);
+    if (i != v->count-1) out += ' ';
+  }
+  out += close;
+}
+
+static void lval_sprint_impl(lval* v, std::string& out) {
+  char buf[128];
+  switch (v->type) {
+    case LVAL_NUM:     snprintf(buf, sizeof(buf), "%li", v->num); out += buf; break;
+    case LVAL_FLOAT:   snprintf(buf, sizeof(buf), "%f", v->floating); out += buf; break;
+    case LVAL_FLOAT32: snprintf(buf, sizeof(buf), "%gf", (float)v->floating); out += buf; break;
+    case LVAL_ERR:     out += "Error: "; out += v->err; break;
+    case LVAL_SYM:     out += v->sym; break;
+    case LVAL_STR: {
+      char* escaped = strdup(v->str);
+      escaped = (char*)mpcf_escape(escaped);
+      out += '"'; out += escaped; out += '"';
+      free(escaped);
+      break;
+    }
+    case LVAL_FUN:
+      if (v->builtin) {
+        out += "<builtin>";
+      } else {
+        out += "(\\ ";
+        lval_sprint_impl(v->formals, out);
+        out += ' ';
+        lval_sprint_impl(v->body, out);
+        out += ')';
+      }
+      break;
+    case LVAL_TOBJ:
+      snprintf(buf, sizeof(buf), "<%s @%p>",
+               v->cls ? v->cls->GetName() : "object", v->obj);
+      out += buf;
+      break;
+    case LVAL_TMETHOD:
+      out += "<tmethodcall "; out += v->method->GetMethodName();
+      out += '('; out += v->methodArgs; out += ")>";
+      break;
+    case LVAL_SEXPR: lval_expr_sprint(v, '(', ')', out); break;
+    case LVAL_QEXPR: lval_expr_sprint(v, '{', '}', out); break;
+    case LVAL_JITFN:
+      snprintf(buf, sizeof(buf), "<jit-fn %s/%ld>", v->sym, v->num);
+      out += buf; break;
+    case LVAL_COLJITFN:
+      snprintf(buf, sizeof(buf), "<col-jit-fn %s/%ld\xe2\x86\x92%d>", v->sym, v->num, v->count);
+      out += buf; break;
+    case LVAL_COLUMN: {
+      auto& cp = *(RutColumnPtr*)v->obj;
+      snprintf(buf, sizeof(buf), "<column: %zu entries [%s]>", cp->n,
+               cp->dtype == COL_FLOAT32 ? "f32" :
+               cp->dtype == COL_FLOAT64 ? "f64" :
+               cp->dtype == COL_INT32   ? "i32" :
+               cp->dtype == COL_UINT8   ? "u8"  : "?");
+      out += buf; break;
+    }
+    case LVAL_ATOM: {
+      RutAtomPtr& ap = *(RutAtomPtr*)v->obj;
+      std::lock_guard<std::mutex> alock(ap->mu);
+      out += "<atom ";
+      lval_sprint_impl(ap->val, out);
+      out += '>';
+      break;
+    }
+    case LVAL_FUTURE: {
+      RutFuturePtr& fp = *(RutFuturePtr*)v->obj;
+      std::lock_guard<std::mutex> flock(fp->mu);
+      out += fp->realized ? "<future: realized>" : "<future: pending>";
+      break;
+    }
+    case LVAL_PROMISE: {
+      RutFuturePtr& fp = *(RutFuturePtr*)v->obj;
+      std::lock_guard<std::mutex> flock(fp->mu);
+      if (fp->realized) {
+        out += "<promise: ";
+        lval_sprint_impl(fp->result, out);
+        out += '>';
+      } else {
+        out += "<promise: pending>";
+      }
+      break;
+    }
+  }
+}
+
+std::string lval_sprint(lval* v) {
+  std::string out;
+  lval_sprint_impl(v, out);
+  return out;
+}
 
 lval* lval_read_str(mpc_ast_t* t) {
   /* Cut off the final quote character */
