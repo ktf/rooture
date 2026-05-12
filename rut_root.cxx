@@ -1241,6 +1241,21 @@ lval* builtin_save_window(lenv* e, lval* a) {
   return res;
 }
 
+// (flush-display) — flush Cocoa/X11 graphics buffer to screen.
+// Equivalent to the gVirtualX->Update(2/1) calls in PipeHandler after each eval.
+// Useful inside long analysis loops run via eval_async to force live canvas redraws.
+// Safe to call from future threads: dispatches to main thread via rut_dispatch_work.
+lval* builtin_flush_display(lenv* e, lval* a) {
+  if (g_in_future) {
+    lval* res = nullptr;
+    rut_dispatch_work([&]{ res = builtin_flush_display(e, lval_sexpr()); });
+    lval_del(a); return res;
+  }
+  if (gVirtualX) { gVirtualX->Update(2); gVirtualX->Update(1); }
+  lval_del(a);
+  return lval_sexpr();
+}
+
 // (save-png "CanvasName" "/path/to/out.png") — saves a canvas to a PNG file.
 lval* builtin_save_png(lenv* e, lval* a) {
   LASSERT(a, a->count == 2, "'save-png' requires 2 arguments: <canvas-name> <path>.");
@@ -1356,6 +1371,7 @@ void lenv_add_builtins_root(lenv* e) {
   /* Inspection / output */
   lenv_add_builtin(e, "symbols",     builtin_symbols);
   lenv_add_builtin(e, "canvases",    builtin_canvases);
+  lenv_add_builtin(e, "flush-display", builtin_flush_display);
   lenv_add_builtin(e, "save-png",    builtin_save_png);
   lenv_add_builtin(e, "save-window", builtin_save_window);
   /* Global ROOT objects */

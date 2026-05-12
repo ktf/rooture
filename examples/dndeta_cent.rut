@@ -1,0 +1,161 @@
+;;; examples/dndeta_cent.rut
+;;; Charged-particle pseudorapidity density dN/dη vs centrality
+;;; for Pb-Pb at 5.02 TeV (LHC15o OpenData).
+;;;
+;;; Prerequisites — define before loading:
+;;;   aod-paths   — list of AO2D file paths
+;;;   trk-tree    — track tree name  (e.g. "O2track_001")
+;;;   coll-tree   — collision tree   (e.g. "O2collision_001")
+;;;   bc-tree     — BC tree          (e.g. "O2bc_001")
+;;;   compute-evsel-tf, evsel-and  (from eventsel.rut)
+;;;   jitfn!                       (from jit_progress.rut or fallback)
+;;;
+;;; Centrality jit-fns (cent0-ptr … cent3-ptr) and cent-tree are defined
+;;; here; if raa_pbpb.rut was loaded first they are already present —
+;;; this script redefines them safely (same values).
+;;;
+;;; Minimal track quality: pT > 0.15 GeV/c and |η| < 0.8.
+;;; No DCA propagation needed — loop is fast.
+
+;;; ── Centrality setup (safe to reload) ───────────────────────────────────
+(default {cent-tree} "O2centrun2v0m")
+
+(def {dndeta-cent0-ptr} (jitfn! "dndeta-cent0" float (\{{float c}} {(if (band (>= c  0.0f) (< c 10.0f)) {1.0f} {0.0f})})))
+(def {dndeta-cent1-ptr} (jitfn! "dndeta-cent1" float (\{{float c}} {(if (band (>= c 10.0f) (< c 30.0f)) {1.0f} {0.0f})})))
+(def {dndeta-cent2-ptr} (jitfn! "dndeta-cent2" float (\{{float c}} {(if (band (>= c 30.0f) (< c 50.0f)) {1.0f} {0.0f})})))
+(def {dndeta-cent3-ptr} (jitfn! "dndeta-cent3" float (\{{float c}} {(if (band (>= c 50.0f) (< c 80.0f)) {1.0f} {0.0f})})))
+
+;;; ── Track-level jit-fns ──────────────────────────────────────────────────
+;;; η = asinh(tgl)  — exact, no trig needed
+(def {dndeta-eta-ptr}  (jitfn! "dndeta-eta"  float (\{{float tgl}}  {asinhf tgl})))
+;;; pT > 0.15 GeV/c  ↔  |1/pT| < 1/0.15 = 6.6667
+(def {dndeta-ptok-ptr} (jitfn! "dndeta-ptok" float (\{{float q1pt}} {(if (< (fabsf q1pt) 6.6667f) {1.0f} {0.0f})})))
+;;; ones column for event counting
+(def {dndeta-ones-ptr} (jitfn! "dndeta-ones" float (\{{float x}}   {1.0f})))
+
+;;; ── Histograms ───────────────────────────────────────────────────────────
+;;; 16 bins × 0.1 in [-0.8, 0.8]
+(def {h-dndeta-c0} (doto (new TH1F "hdndeta_c0" "0-10%;#eta;dN/d#eta"  16 -0.8 0.8) {SetDirectory 0} {Sumw2}))
+(def {h-dndeta-c1} (doto (new TH1F "hdndeta_c1" "10-30%;#eta;dN/d#eta" 16 -0.8 0.8) {SetDirectory 0} {Sumw2}))
+(def {h-dndeta-c2} (doto (new TH1F "hdndeta_c2" "30-50%;#eta;dN/d#eta" 16 -0.8 0.8) {SetDirectory 0} {Sumw2}))
+(def {h-dndeta-c3} (doto (new TH1F "hdndeta_c3" "50-80%;#eta;dN/d#eta" 16 -0.8 0.8) {SetDirectory 0} {Sumw2}))
+
+;;; 1-bin event counters [0,2]
+(def {h-nev-dndeta-c0} (doto (new TH1F "hnev_dndeta_c0" "" 1 0. 2.) {SetDirectory 0}))
+(def {h-nev-dndeta-c1} (doto (new TH1F "hnev_dndeta_c1" "" 1 0. 2.) {SetDirectory 0}))
+(def {h-nev-dndeta-c2} (doto (new TH1F "hnev_dndeta_c2" "" 1 0. 2.) {SetDirectory 0}))
+(def {h-nev-dndeta-c3} (doto (new TH1F "hnev_dndeta_c3" "" 1 0. 2.) {SetDirectory 0}))
+
+;;; ── Live canvas ──────────────────────────────────────────────────────────
+(def {c-dndeta} (new TCanvas "c_dndeta" "dN/d#eta — Pb-Pb 5.02 TeV (accumulating)" 900 600))
+(doto h-dndeta-c0 {SetStats 0} {SetLineColor 2} {SetLineWidth 2} {Draw "HIST"})
+(doto h-dndeta-c1 {SetLineColor 4} {SetLineWidth 2} {Draw "HIST SAME"})
+(doto h-dndeta-c2 {SetLineColor 6} {SetLineWidth 2} {Draw "HIST SAME"})
+(doto h-dndeta-c3 {SetLineColor 8} {SetLineWidth 2} {Draw "HIST SAME"})
+(def {leg-dndeta} (doto (new TLegend 0.65 0.65 0.88 0.88) {SetBorderSize 0}))
+(.AddEntry leg-dndeta h-dndeta-c0 "0-10%"  "L")
+(.AddEntry leg-dndeta h-dndeta-c1 "10-30%" "L")
+(.AddEntry leg-dndeta h-dndeta-c2 "30-50%" "L")
+(.AddEntry leg-dndeta h-dndeta-c3 "50-80%" "L")
+(.Draw leg-dndeta)
+(.Update c-dndeta)
+
+;;; ── Main loop ────────────────────────────────────────────────────────────
+(def {tf-seq-dndeta} 0)
+(dotimes {fi} (len aod-paths) {
+  do
+  (= {ap} (nth fi aod-paths))
+  (print "dN/dη | file" (+ fi 1) "/" (len aod-paths) ap)
+  (= {fh} (::Open TFile ap))
+  (if (== fh 0) {print "WARNING: skipping" ap} {
+    if (.IsZombie fh) {print "WARNING: zombie" ap} {
+      do
+      (= {fkeys} (.GetListOfKeys fh))
+      (dotimes {ki} (.GetEntries fkeys) {
+        do
+        (= {fk} (.At fkeys ki))
+        (if (== (.GetClassName fk) "TDirectoryFile") {
+          do
+          (= {tf} (.GetName fk))
+          (= {tf-seq-dndeta} (+ tf-seq-dndeta 1))
+
+          ;;; minimal track branches
+          (= {tgl-c}  (load-branch ap (concat tf "/" trk-tree) "fTgl"))
+          (= {q1pt-c} (load-branch ap (concat tf "/" trk-tree) "fSigned1Pt"))
+          (= {cidx-c} (load-branch ap (concat tf "/" trk-tree) "fIndexCollisions"))
+
+          ;;; event selection + centrality (collision-level)
+          (= {evsel-cols} (compute-evsel-tf ap tf))
+          (= {evsel-col}  (evsel-and evsel-cols))
+          (= {cent-c}     (load-branch ap (concat tf "/" cent-tree) "fCentRun2V0M"))
+
+          ;;; count selected events per centrality class
+          (= {ones-col} (col-map-ptr dndeta-ones-ptr cent-c))
+          (col-fill-h1 h-nev-dndeta-c0 (col-mask (col-and evsel-col (col-map-ptr dndeta-cent0-ptr cent-c)) ones-col))
+          (col-fill-h1 h-nev-dndeta-c1 (col-mask (col-and evsel-col (col-map-ptr dndeta-cent1-ptr cent-c)) ones-col))
+          (col-fill-h1 h-nev-dndeta-c2 (col-mask (col-and evsel-col (col-map-ptr dndeta-cent2-ptr cent-c)) ones-col))
+          (col-fill-h1 h-nev-dndeta-c3 (col-mask (col-and evsel-col (col-map-ptr dndeta-cent3-ptr cent-c)) ones-col))
+
+          ;;; gather collision quantities to per-track
+          (= {evsel-trk} (col-gather evsel-col cidx-c))
+          (= {cent-trk}  (col-gather cent-c    cidx-c))
+
+          ;;; η and pT-ok columns
+          (= {eta-c}  (col-map-ptr dndeta-eta-ptr  tgl-c))
+          (= {ptok-c} (col-map-ptr dndeta-ptok-ptr q1pt-c))
+
+          ;;; quality mask: event selection + pT > 0.15 GeV/c
+          (= {m-qual} (col-and evsel-trk ptok-c))
+
+          ;;; fill η per centrality class
+          (col-fill-h1 h-dndeta-c0 (col-mask (col-and m-qual (col-map-ptr dndeta-cent0-ptr cent-trk)) eta-c))
+          (col-fill-h1 h-dndeta-c1 (col-mask (col-and m-qual (col-map-ptr dndeta-cent1-ptr cent-trk)) eta-c))
+          (col-fill-h1 h-dndeta-c2 (col-mask (col-and m-qual (col-map-ptr dndeta-cent2-ptr cent-trk)) eta-c))
+          (col-fill-h1 h-dndeta-c3 (col-mask (col-and m-qual (col-map-ptr dndeta-cent3-ptr cent-trk)) eta-c))
+
+          ;;; live canvas update
+          (.SetTitle c-dndeta (concat "dN/d#eta | TF " (str tf-seq-dndeta)))
+          (.Update c-dndeta)
+          (.RaiseWindow c-dndeta)
+          (.ProcessEvents gSystem)
+          (flush-display)
+        } {})
+      })
+      (close-cached-files)
+    }
+  })
+})
+
+;;; ── Normalize: (1/N_ev) dN/dη, bin-width corrected ──────────────────────
+(def {nev-dndeta-c0} (.GetBinContent h-nev-dndeta-c0 1))
+(def {nev-dndeta-c1} (.GetBinContent h-nev-dndeta-c1 1))
+(def {nev-dndeta-c2} (.GetBinContent h-nev-dndeta-c2 1))
+(def {nev-dndeta-c3} (.GetBinContent h-nev-dndeta-c3 1))
+(print "Events — 0-10%:" nev-dndeta-c0
+       "10-30%:" nev-dndeta-c1
+       "30-50%:" nev-dndeta-c2
+       "50-80%:" nev-dndeta-c3)
+
+(if (> (* nev-dndeta-c0 nev-dndeta-c1 nev-dndeta-c2 nev-dndeta-c3) 0.) {
+  do
+  (.Scale h-dndeta-c0 (/ 1.0 nev-dndeta-c0) "width")
+  (.Scale h-dndeta-c1 (/ 1.0 nev-dndeta-c1) "width")
+  (.Scale h-dndeta-c2 (/ 1.0 nev-dndeta-c2) "width")
+  (.Scale h-dndeta-c3 (/ 1.0 nev-dndeta-c3) "width")
+
+  ;;; redraw final normalized plot
+  (doto h-dndeta-c0 {SetTitle ";#eta;dN/d#eta"} {SetMinimum 0.} {Draw "HIST E"})
+  (doto h-dndeta-c1 {Draw "HIST E SAME"})
+  (doto h-dndeta-c2 {Draw "HIST E SAME"})
+  (doto h-dndeta-c3 {Draw "HIST E SAME"})
+  (.Draw leg-dndeta)
+  (.Update c-dndeta)
+  (.RaiseWindow c-dndeta)
+
+  (print "dN/dη at η≈0 — 0-10%:"  (.GetBinContent h-dndeta-c0 8)
+                       "10-30%:" (.GetBinContent h-dndeta-c1 8)
+                       "30-50%:" (.GetBinContent h-dndeta-c2 8)
+                       "50-80%:" (.GetBinContent h-dndeta-c3 8))
+} {
+  print "WARNING: no events in one or more centrality classes"
+})

@@ -509,20 +509,42 @@ void lval_println(lval* v) { lval_print(v); rut_print("\n"); }
 // ---------------------------------------------------------------------------
 // lval_sprint — serialize lval to std::string (safe to call from MCP thread)
 // Does NOT call ROOT Print() or rut_print; uses only C++ struct traversal.
+// Large lists are truncated: first 4 items shown, then "... (N more)".
+// Total output is capped at ~2000 chars to prevent huge allocations.
 // ---------------------------------------------------------------------------
-static void lval_sprint_impl(lval* v, std::string& out);
 
-static void lval_expr_sprint(lval* v, char open, char close, std::string& out) {
+// Max items to show before truncating a list/qexpr.
+static constexpr int SPRINT_MAX_ITEMS = 4;
+// Hard cap on total output length.
+static constexpr int SPRINT_MAX_CHARS = 2000;
+
+static void lval_sprint_impl(lval* v, std::string& out, int& budget);
+
+static void lval_expr_sprint(lval* v, char open, char close,
+                              std::string& out, int& budget) {
   out += open;
-  for (int i = 0; i < v->count; i++) {
-    lval_sprint_impl(v->cell[i], out);
+  int show = v->count;
+  bool truncated = false;
+  if (v->count > SPRINT_MAX_ITEMS) {
+    show = SPRINT_MAX_ITEMS;
+    truncated = true;
+  }
+  for (int i = 0; i < show && budget > 0; i++) {
+    lval_sprint_impl(v->cell[i], out, budget);
     if (i != v->count-1) out += ' ';
+  }
+  if (truncated && budget > 0) {
+    char buf[48];
+    snprintf(buf, sizeof(buf), "... (%d more)", v->count - show);
+    out += buf;
   }
   out += close;
 }
 
-static void lval_sprint_impl(lval* v, std::string& out) {
+static void lval_sprint_impl(lval* v, std::string& out, int& budget) {
+  if (budget <= 0) { out += "..."; return; }
   char buf[128];
+  int before = (int)out.size();
   switch (v->type) {
     case LVAL_NUM:     snprintf(buf, sizeof(buf), "%li", v->num); out += buf; break;
     case LVAL_FLOAT:   snprintf(buf, sizeof(buf), "%f", v->floating); out += buf; break;
@@ -541,9 +563,9 @@ static void lval_sprint_impl(lval* v, std::string& out) {
         out += "<builtin>";
       } else {
         out += "(\\ ";
-        lval_sprint_impl(v->formals, out);
+        lval_sprint_impl(v->formals, out, budget);
         out += ' ';
-        lval_sprint_impl(v->body, out);
+        lval_sprint_impl(v->body, out, budget);
         out += ')';
       }
       break;
@@ -556,8 +578,8 @@ static void lval_sprint_impl(lval* v, std::string& out) {
       out += "<tmethodcall "; out += v->method->GetMethodName();
       out += '('; out += v->methodArgs; out += ")>";
       break;
-    case LVAL_SEXPR: lval_expr_sprint(v, '(', ')', out); break;
-    case LVAL_QEXPR: lval_expr_sprint(v, '{', '}', out); break;
+    case LVAL_SEXPR: lval_expr_sprint(v, '(', ')', out, budget); break;
+    case LVAL_QEXPR: lval_expr_sprint(v, '{', '}', out, budget); break;
     case LVAL_JITFN:
       snprintf(buf, sizeof(buf), "<jit-fn %s/%ld>", v->sym, v->num);
       out += buf; break;
@@ -577,7 +599,7 @@ static void lval_sprint_impl(lval* v, std::string& out) {
       RutAtomPtr& ap = *(RutAtomPtr*)v->obj;
       std::lock_guard<std::mutex> alock(ap->mu);
       out += "<atom ";
-      lval_sprint_impl(ap->val, out);
+      lval_sprint_impl(ap->val, out, budget);
       out += '>';
       break;
     }
@@ -592,7 +614,7 @@ static void lval_sprint_impl(lval* v, std::string& out) {
       std::lock_guard<std::mutex> flock(fp->mu);
       if (fp->realized) {
         out += "<promise: ";
-        lval_sprint_impl(fp->result, out);
+        lval_sprint_impl(fp->result, out, budget);
         out += '>';
       } else {
         out += "<promise: pending>";
@@ -600,11 +622,13 @@ static void lval_sprint_impl(lval* v, std::string& out) {
       break;
     }
   }
+  budget -= (int)out.size() - before;
 }
 
 std::string lval_sprint(lval* v) {
   std::string out;
-  lval_sprint_impl(v, out);
+  int budget = SPRINT_MAX_CHARS;
+  lval_sprint_impl(v, out, budget);
   return out;
 }
 
