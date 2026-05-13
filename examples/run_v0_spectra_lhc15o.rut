@@ -1,0 +1,14 @@
+;;; examples/run_v0_spectra_lhc15o.rut
+;;; V0 pT spectra (K0s, Λ/Λ̄) on LHC15o Pb-Pb 5.02 TeV open data.
+;;;
+;;; Usage:
+;;;   (load "examples/run_v0_spectra_lhc15o.rut")
+
+(load "examples/datasets/lhc15o_245349.rut")
+(load stdlib.rut)
+(def {aod-paths} (take 10 lhc15o-245349-paths))
+(def {trk-tree} "O2track")
+(def {v0-tree}  "O2v0_002")
+(def {col-tree} "O2collision_001")
+(def {bz}       0.5)
+(load "examples/v0_spectra.rut")

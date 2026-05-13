@@ -1189,23 +1189,23 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "bor",  builtin_bor);
   lenv_add_builtin(e, "bxor", builtin_bxor);
   lenv_add_builtin(e, "bnot", builtin_bnot);
-  /* Floating-point math */
-  lenv_add_builtin(e, "sqrt",  builtin_sqrt);
-  lenv_add_builtin(e, "log",   builtin_log);
-  lenv_add_builtin(e, "log2",  builtin_log2);
-  lenv_add_builtin(e, "log10", builtin_log10);
-  lenv_add_builtin(e, "exp",   builtin_exp);
-  lenv_add_builtin(e, "sin",   builtin_sin);
-  lenv_add_builtin(e, "cos",   builtin_cos);
-  lenv_add_builtin(e, "tan",   builtin_tan);
-  lenv_add_builtin(e, "asin",  builtin_asin);
-  lenv_add_builtin(e, "acos",  builtin_acos);
-  lenv_add_builtin(e, "atan",  builtin_atan);
-  lenv_add_builtin(e, "atan2", builtin_atan2);
-  lenv_add_builtin(e, "fabs",  builtin_fabs);
-  lenv_add_builtin(e, "floor", builtin_floor);
-  lenv_add_builtin(e, "ceil",  builtin_ceil);
-  lenv_add_builtin(e, "pow",   builtin_pow);
+  /* Floating-point math — unprefixed and f-suffixed aliases (match JIT names) */
+  lenv_add_builtin(e, "sqrt",   builtin_sqrt);  lenv_add_builtin(e, "sqrtf",  builtin_sqrt);
+  lenv_add_builtin(e, "log",    builtin_log);   lenv_add_builtin(e, "logf",   builtin_log);
+  lenv_add_builtin(e, "log2",   builtin_log2);  lenv_add_builtin(e, "log2f",  builtin_log2);
+  lenv_add_builtin(e, "log10",  builtin_log10); lenv_add_builtin(e, "log10f", builtin_log10);
+  lenv_add_builtin(e, "exp",    builtin_exp);   lenv_add_builtin(e, "expf",   builtin_exp);
+  lenv_add_builtin(e, "sin",    builtin_sin);   lenv_add_builtin(e, "sinf",   builtin_sin);
+  lenv_add_builtin(e, "cos",    builtin_cos);   lenv_add_builtin(e, "cosf",   builtin_cos);
+  lenv_add_builtin(e, "tan",    builtin_tan);   lenv_add_builtin(e, "tanf",   builtin_tan);
+  lenv_add_builtin(e, "asin",   builtin_asin);  lenv_add_builtin(e, "asinf",  builtin_asin);
+  lenv_add_builtin(e, "acos",   builtin_acos);  lenv_add_builtin(e, "acosf",  builtin_acos);
+  lenv_add_builtin(e, "atan",   builtin_atan);  lenv_add_builtin(e, "atanf",  builtin_atan);
+  lenv_add_builtin(e, "atan2",  builtin_atan2); lenv_add_builtin(e, "atan2f", builtin_atan2);
+  lenv_add_builtin(e, "fabs",   builtin_fabs);  lenv_add_builtin(e, "fabsf",  builtin_fabs);
+  lenv_add_builtin(e, "floor",  builtin_floor); lenv_add_builtin(e, "floorf", builtin_floor);
+  lenv_add_builtin(e, "ceil",   builtin_ceil);  lenv_add_builtin(e, "ceilf",  builtin_ceil);
+  lenv_add_builtin(e, "pow",    builtin_pow);   lenv_add_builtin(e, "powf",   builtin_pow);
   /* Conditionals */
   lenv_add_builtin(e, "cond", builtin_cond);
   lenv_add_builtin(e, "if",   builtin_if);

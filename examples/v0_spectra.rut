@@ -1,0 +1,742 @@
+;;; examples/v0_spectra.rut
+;;; K0s → π+π- and Λ/Λ̄ → pπ∓ raw pT spectra from V0 candidates,
+;;; in 4 centrality classes (0-10%, 10-30%, 30-50%, 50-80%).
+;;;
+;;; Prerequisites — define before loading:
+;;;   aod-paths      — list of AO2D file paths
+;;;   trk-tree       — track tree name   (e.g. "O2track" for LHC15o)
+;;;   v0-tree        — V0 tree name      (e.g. "O2v0_002")
+;;;   col-tree       — collision tree    (e.g. "O2collision_001")
+;;;   bz             — solenoid field [T] (e.g. 0.5)
+;;;
+;;; Optional (define before loading to override defaults):
+;;;   v0s-cent-tree    — centrality tree (default "O2centrun2v0m")
+;;;   v0s-output-file  — output path    (default "AnalysisResults.root")
+;;;
+;;; Output symbols:
+;;;   h2-k0s-c{0-3}, h2-lam-c{0-3}  — merged TH2F(pT, mass) per centrality class
+;;;   v0s-gr-k0s-by-cent             — list of 4 TGraphErrors for K0s
+;;;   v0s-gr-lam-by-cent             — list of 4 TGraphErrors for Λ/Λ̄
+;;;   c-v0spec                       — canvas
+
+;;; ── Step 1: collect all {aod-path tf-name} pairs ────────────────────────
+(def {v0spec-tf-pairs}
+  (do
+    (= {acc} {})
+    (dotimes {fi} (len aod-paths) {
+      do
+      (= {ap} (nth fi aod-paths))
+      (= {fh} (::Open TFile ap))
+      (if (== fh 0) {
+        print "WARNING: cannot open" ap
+      } {
+        if (.IsZombie fh) {
+          print "WARNING: zombie" ap
+        } {
+          do
+          (= {fkeys} (.GetListOfKeys fh))
+          (dotimes {ki} (.GetEntries fkeys) {
+            do
+            (= {fk} (.At fkeys ki))
+            (if (== (.GetClassName fk) "TDirectoryFile") {
+              = {acc} (join acc (list (list ap (.GetName fk))))
+            } {})
+          })
+          (.Close fh)
+        }
+      })
+    })
+    acc))
+
+(print "V0 spectra | files:" (len aod-paths) "| TF pairs:" (len v0spec-tf-pairs))
+
+;;; ── Step 2: JIT functions ─────────────────────────────────────────────────
+;;; Mass hypotheses (GeV/c²)
+(def {v0s-m-pi} 0.13957f)
+(def {v0s-m-pr} 0.93827f)
+
+;;; Centrality tree (override before loading if needed)
+(default {v0s-cent-tree} "O2centrun2v0m")
+
+;;; Centrality class selection functions (1.=pass, 0.=fail)
+(def {v0s-cent0-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c  0.0f) (< c 10.0f)) {1.0f} {0.0f})}))))
+(def {v0s-cent1-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 10.0f) (< c 30.0f)) {1.0f} {0.0f})}))))
+(def {v0s-cent2-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 30.0f) (< c 50.0f)) {1.0f} {0.0f})}))))
+(def {v0s-cent3-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 50.0f) (< c 80.0f)) {1.0f} {0.0f})}))))
+
+;;; List of the 4 centrality function pointers (used in pmap loop)
+(def {v0s-cent-ptrs} (list v0s-cent0-ptr v0s-cent1-ptr v0s-cent2-ptr v0s-cent3-ptr))
+
+;;; Function pointers for col-map-ptr / col-zip-ptr
+;;; Daughter momentum components from track parameters
+(def {v0s-px-ptr} (jitfn-ptr (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (fabsf s1pt))})
+     (cosf (+ alpha (asinf snp))))}))))
+(def {v0s-py-ptr} (jitfn-ptr (jit-fn float (\{{float s1pt} {float alpha} {float snp}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (fabsf s1pt))})
+     (sinf (+ alpha (asinf snp))))}))))
+(def {v0s-pz-ptr} (jitfn-ptr (jit-fn float (\{{float s1pt} {float tgl}}
+  {(* (if (== s1pt 0.) {0.} {(/ 1. (fabsf s1pt))}) tgl)}))))
+
+;;; V0 momentum sum
+(def {v0s-add-ptr} (jitfn-ptr (jit-fn float (\{{float a} {float b}} {(+ a b)}))))
+
+;;; V0 transverse momentum: pT = sqrt(px² + py²)
+(def {v0s-pt-ptr} (jitfn-ptr (jit-fn float (\{{float px} {float py}}
+  {sqrtf (+ (* px px) (* py py))}))))
+
+;;; V0 decay geometry kernel (fused; captures bz)
+(def {v0s-dca-fn}
+  (col-jit-fn {float float float float}
+    (\{{col sp} {col ap} {col np} {col tp} {col xp} {col yp} {col zp}
+       {col sn} {col an} {col nn} {col tn} {col xn} {col yn} {col zn}}
+      {do
+        (= {crp0} (* sp bz 0.003f))
+        (= {crp}  (if (< (fabsf crp0) 1e-9f) {(if (>= crp0 0.) {1e-9f} {-1e-9f})} {crp0}))
+        (= {crn0} (* sn bz 0.003f))
+        (= {crn}  (if (< (fabsf crn0) 1e-9f) {(if (>= crn0 0.) {1e-9f} {-1e-9f})} {crn0}))
+        (= {Rp}   (/ 1. (fabsf crp)))
+        (= {Rn}   (/ 1. (fabsf crn)))
+        (= {cap} (cosf ap))  (= {sap} (sinf ap))
+        (= {can} (cosf an))  (= {san} (sinf an))
+        (= {xgp} (- (* xp cap) (* yp sap)))  (= {ygp} (+ (* xp sap) (* yp cap)))
+        (= {xgn} (- (* xn can) (* yn san)))  (= {ygn} (+ (* xn san) (* yn can)))
+        (= {snp2p} (* np np))
+        (= {c1p}  (sqrtf (if (> (- 1. snp2p) 0.) {(- 1. snp2p)} {0.})))
+        (= {snp2n} (* nn nn))
+        (= {c1n}  (sqrtf (if (> (- 1. snp2n) 0.) {(- 1. snp2n)} {0.})))
+        (= {cphp} (- (* cap c1p) (* sap np)))  (= {sphp} (+ (* sap c1p) (* cap np)))
+        (= {cphn} (- (* can c1n) (* san nn)))  (= {sphn} (+ (* san c1n) (* can nn)))
+        (= {cxp} (+ xgp (/ sphp crp)))  (= {cyp} (- ygp (/ cphp crp)))
+        (= {cxn} (+ xgn (/ sphn crn)))  (= {cyn} (- ygn (/ cphn crn)))
+        (= {dcx} (- cxn cxp))  (= {dcy} (- cyn cyp))
+        (= {d}   (sqrtf (+ (* dcx dcx) (* dcy dcy))))
+        (= {invd} (if (> d 1e-6) {(/ 1. d)} {0.}))
+        (= {t}    (* 0.5 (+ d (* (- (* Rp Rp) (* Rn Rn)) invd))))
+        (= {h2}   (- (* Rp Rp) (* t t)))
+        (= {mx}   (+ cxp (* t dcx invd)))
+        (= {my}   (+ cyp (* t dcy invd)))
+        (= {h}    (sqrtf (if (> h2 0.) {h2} {0.})))
+        (= {px1}  (+ mx (* (* -1. dcy) (* h invd))))
+        (= {py1}  (+ my (* dcx (* h invd))))
+        (= {px2}  (- mx (* (* -1. dcy) (* h invd))))
+        (= {py2}  (- my (* dcx (* h invd))))
+        (= {dot1} (+ (* (- px1 xgp) cphp) (* (- py1 ygp) sphp)))
+        (= {dot2} (+ (* (- px2 xgp) cphp) (* (- py2 ygp) sphp)))
+        (= {vx_i} (if (>= dot1 dot2) {px1} {px2}))
+        (= {vy_i} (if (>= dot1 dot2) {py1} {py2}))
+        (= {vx_ni} (* 0.5 (+ (+ cxp (* Rp dcx invd)) (- cxn (* Rn dcx invd)))))
+        (= {vy_ni} (* 0.5 (+ (+ cyp (* Rp dcy invd)) (- cyn (* Rn dcy invd)))))
+        (= {vx} (if (< d 1e-6) {(* 0.5 (+ xgp xgn))} {(if (<= h2 0.) {vx_ni} {vx_i})}))
+        (= {vy} (if (< d 1e-6) {(* 0.5 (+ ygp ygn))} {(if (<= h2 0.) {vy_ni} {vy_i})}))
+        (= {dthp0} (- (atan2f (- vy cyp) (- vx cxp)) (atan2f (- ygp cyp) (- xgp cxp))))
+        (= {dthp1} (if (< crp 0.) {(if (< dthp0 0.) {(+ dthp0 6.2831853f)} {dthp0})}
+                                   {(if (> dthp0 0.) {(- dthp0 6.2831853f)} {dthp0})}))
+        (= {dthp}  (if (< crp 0.) {(if (> dthp1 3.14159265f) {(- dthp1 6.2831853f)} {dthp1})}
+                                   {(if (< dthp1 -3.14159265f) {(+ dthp1 6.2831853f)} {dthp1})}))
+        (= {vzp}   (+ zp (* Rp (fabsf dthp) tp)))
+        (= {dthn0} (- (atan2f (- vy cyn) (- vx cxn)) (atan2f (- ygn cyn) (- xgn cxn))))
+        (= {dthn1} (if (< crn 0.) {(if (< dthn0 0.) {(+ dthn0 6.2831853f)} {dthn0})}
+                                   {(if (> dthn0 0.) {(- dthn0 6.2831853f)} {dthn0})}))
+        (= {dthn}  (if (< crn 0.) {(if (> dthn1 3.14159265f) {(- dthn1 6.2831853f)} {dthn1})}
+                                   {(if (< dthn1 -3.14159265f) {(+ dthn1 6.2831853f)} {dthn1})}))
+        (= {vzn}   (+ zn (* Rn (fabsf dthn) tn)))
+        (= {vz}    (* 0.5 (+ vzp vzn)))
+        (= {dxp}  (- vx cxp))  (= {dyp}  (- vy cyp))
+        (= {ddp}  (sqrtf (+ (* dxp dxp) (* dyp dyp))))
+        (= {cpxp} (if (< ddp 1e-8) {(+ cxp Rp)} {(+ cxp (* Rp (/ dxp ddp)))}))
+        (= {cpyp} (if (< ddp 1e-8) {cyp}         {(+ cyp (* Rp (/ dyp ddp)))}))
+        (= {dxn}  (- vx cxn))  (= {dyn}  (- vy cyn))
+        (= {ddn}  (sqrtf (+ (* dxn dxn) (* dyn dyn))))
+        (= {cpxn} (if (< ddn 1e-8) {(+ cxn Rn)} {(+ cxn (* Rn (/ dxn ddn)))}))
+        (= {cpyn} (if (< ddn 1e-8) {cyn}         {(+ cyn (* Rn (/ dyn ddn)))}))
+        (= {dxy2} (+ (* (- cpxp cpxn) (- cpxp cpxn)) (* (- cpyp cpyn) (- cpyp cpyn))))
+        (= {dca}  (sqrtf (+ dxy2 (* (- vzp vzn) (- vzp vzn)))))
+        {vx vy vz dca}})))
+
+;;; Topological + event selection functions (1.=pass, 0.=fail)
+(def {v0s-dca-cut-ptr}    (jitfn-ptr (jit-fn float (\{{float d}} {(if (< d 0.5)   {1.} {0.})}))))
+(def {v0s-radius-cut-ptr} (jitfn-ptr (jit-fn float (\{{float r}} {(if (> r 5.0)   {1.} {0.})}))))
+(def {v0s-cpa-cut-ptr}    (jitfn-ptr (jit-fn float (\{{float c}} {(if (> c 0.997) {1.} {0.})}))))
+(def {v0s-radius-ptr}     (jitfn-ptr (jit-fn float (\{{float x} {float y}}
+  {sqrtf (+ (* x x) (* y y))}))))
+;;; |vz| < 10 cm event selection
+(def {v0s-vz-cut-ptr} (jitfn-ptr (jit-fn float (\{{float vz}} {(if (< (fabsf vz) 10.) {1.} {0.})}))))
+;;; constant 1 — for event counting
+(def {v0s-ones-ptr}   (jitfn-ptr (jit-fn float (\{{float x}} {1.0f}))))
+
+;;; Armenteros-Podolanski variables (fused col-jit-fn)
+(def {v0s-arm-fn}
+  (col-jit-fn {float float}
+    (\{{col ppx} {col ppy} {col ppz}
+       {col npx} {col npy} {col npz}
+       {col vpx} {col vpy} {col vpz}}
+      {do
+        (= {vp}  (sqrtf (+ (* vpx vpx) (+ (* vpy vpy) (* vpz vpz)))))
+        (= {pLp} (if (== vp 0.) {0.} {(/ (+ (* ppx vpx) (+ (* ppy vpy) (* ppz vpz))) vp)}))
+        (= {pLn} (if (== vp 0.) {0.} {(/ (+ (* npx vpx) (+ (* npy vpy) (* npz vpz))) vp)}))
+        (= {den} (+ pLp pLn))
+        (= {p2}  (+ (* ppx ppx) (+ (* ppy ppy) (* ppz ppz))))
+        (= {qt2} (- p2 (* pLp pLp)))
+        {(if (< (fabsf den) 1e-8f) {0.} {(/ (- pLp pLn) den)})
+         (sqrtf (if (> qt2 0.) {qt2} {0.}))}})))
+
+;;; Armenteros species selection
+(def {v0s-lam-arm-ptr}  (jitfn-ptr (jit-fn float (\{{float a} {float q}}
+  {(if (> a 0.4) {(if (< q 0.12) {1.} {0.})} {0.})}))))
+(def {v0s-alam-arm-ptr} (jitfn-ptr (jit-fn float (\{{float a} {float q}}
+  {(if (< a -0.4) {(if (< q 0.12) {1.} {0.})} {0.})}))))
+(def {v0s-k0s-arm-ptr}  (jitfn-ptr (jit-fn float (\{{float a} {float q}}
+  {(if (> q 0.07) {(if (< (fabsf a) 0.7) {1.} {0.})} {0.})}))))
+
+;;; Invariant mass columns
+;;; K0s → π+π-  (both daughters assigned pion mass)
+(def {v0s-minv-k0s-fn}
+  (col-jit-fn float
+    (\{{col ppx} {col ppy} {col ppz}
+       {col npx} {col npy} {col npz}}
+      {do
+        (= {mp2} (* v0s-m-pi v0s-m-pi))
+        (= {E1}  (sqrtf (+ (* ppx ppx) (+ (* ppy ppy) (+ (* ppz ppz) mp2)))))
+        (= {E2}  (sqrtf (+ (* npx npx) (+ (* npy npy) (+ (* npz npz) mp2)))))
+        (= {Etot} (+ E1 E2))
+        (= {psx}  (+ ppx npx))  (= {psy} (+ ppy npy))  (= {psz} (+ ppz npz))
+        (= {m2}  (- (* Etot Etot) (+ (* psx psx) (+ (* psy psy) (* psz psz)))))
+        (if (> m2 0.) {sqrtf m2} {0.})})))
+
+;;; Λ/Λ̄ → pπ∓  (first arg = proton, second = pion)
+;;; Re-used for Λ̄ by swapping pos/neg daughter columns at call site.
+(def {v0s-minv-lam-fn}
+  (col-jit-fn float
+    (\{{col ppx} {col ppy} {col ppz}
+       {col npx} {col npy} {col npz}}
+      {do
+        (= {Ep}  (sqrtf (+ (* ppx ppx) (+ (* ppy ppy) (+ (* ppz ppz) (* v0s-m-pr v0s-m-pr))))))
+        (= {Epi} (sqrtf (+ (* npx npx) (+ (* npy npy) (+ (* npz npz) (* v0s-m-pi v0s-m-pi))))))
+        (= {Etot} (+ Ep Epi))
+        (= {psx}  (+ ppx npx))  (= {psy} (+ ppy npy))  (= {psz} (+ ppz npz))
+        (= {m2}  (- (* Etot Etot) (+ (* psx psx) (+ (* psy psy) (* psz psz)))))
+        (if (> m2 0.) {sqrtf m2} {0.})})))
+
+(print "V0 spectra | JIT functions compiled.")
+
+;;; ── Step 3: TH2F histograms + parallel fill ──────────────────────────────
+;;; X axis = pT (GeV/c),  Y axis = invariant mass (GeV/c²)
+;;; Pre-create one TH2F per TF per centrality class before pmap (Cling-safe rule).
+(def {v0s-npt-k0s} 15)  (def {v0s-ptlo-k0s} 0.5)  (def {v0s-pthi-k0s} 8.0)
+(def {v0s-npt-lam} 14)  (def {v0s-ptlo-lam} 1.0)  (def {v0s-pthi-lam} 8.0)
+
+;;; Build index list 0 .. N-1 for pmap (stdlib has no range)
+(def {v0s-tf-idx}
+  (do
+    (= {acc} {})
+    (dotimes {i} (len v0spec-tf-pairs) {= {acc} (join acc (list i))})
+    acc))
+
+;;; ── Per-centrality TH2F (4 classes × 2 species) ──────────────────────────
+(def {v0s-tf-h2k0s-c0}
+  (map (\ {i} {doto (new TH2F (concat "h2k0s_c0_" (str i)) ""
+                              v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-h2k0s-c1}
+  (map (\ {i} {doto (new TH2F (concat "h2k0s_c1_" (str i)) ""
+                              v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-h2k0s-c2}
+  (map (\ {i} {doto (new TH2F (concat "h2k0s_c2_" (str i)) ""
+                              v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-h2k0s-c3}
+  (map (\ {i} {doto (new TH2F (concat "h2k0s_c3_" (str i)) ""
+                              v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565)
+               {SetDirectory 0}}) v0s-tf-idx))
+
+(def {v0s-tf-h2lam-c0}
+  (map (\ {i} {doto (new TH2F (concat "h2lam_c0_" (str i)) ""
+                              v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-h2lam-c1}
+  (map (\ {i} {doto (new TH2F (concat "h2lam_c1_" (str i)) ""
+                              v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-h2lam-c2}
+  (map (\ {i} {doto (new TH2F (concat "h2lam_c2_" (str i)) ""
+                              v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-h2lam-c3}
+  (map (\ {i} {doto (new TH2F (concat "h2lam_c3_" (str i)) ""
+                              v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16)
+               {SetDirectory 0}}) v0s-tf-idx))
+
+;;; ── Per-centrality event counters (1-bin TH1F) ───────────────────────────
+(def {v0s-tf-hnevt-c0}
+  (map (\ {i} {doto (new TH1F (concat "hnevt_c0_" (str i)) "" 1 0. 2.) {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-hnevt-c1}
+  (map (\ {i} {doto (new TH1F (concat "hnevt_c1_" (str i)) "" 1 0. 2.) {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-hnevt-c2}
+  (map (\ {i} {doto (new TH1F (concat "hnevt_c2_" (str i)) "" 1 0. 2.) {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-hnevt-c3}
+  (map (\ {i} {doto (new TH1F (concat "hnevt_c3_" (str i)) "" 1 0. 2.) {SetDirectory 0}}) v0s-tf-idx))
+
+;;; ── Inclusive histograms (kept for reference / debugging) ─────────────────
+(def {v0s-tf-h2k0s}
+  (map (\ {i} {doto (new TH2F (concat "h2k0s_" (str i)) ""
+                              v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-h2lam}
+  (map (\ {i} {doto (new TH2F (concat "h2lam_" (str i)) ""
+                              v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16)
+               {SetDirectory 0}}) v0s-tf-idx))
+(def {v0s-tf-hnevt}
+  (map (\ {i} {doto (new TH1F (concat "hnevt_" (str i)) "" 1 0. 2.) {SetDirectory 0}}) v0s-tf-idx))
+
+(def {v0s-sw} (doto (new TStopwatch) {Start}))
+
+(pmap (\ {i} {
+  do
+  (= {pair}  (nth i v0spec-tf-pairs))
+  (= {ap}    (nth 0 pair))
+  (= {tf}    (nth 1 pair))
+
+  ;;; per-centrality histograms for this TF
+  (= {hk0s-c0} (nth i v0s-tf-h2k0s-c0))  (= {hk0s-c1} (nth i v0s-tf-h2k0s-c1))
+  (= {hk0s-c2} (nth i v0s-tf-h2k0s-c2))  (= {hk0s-c3} (nth i v0s-tf-h2k0s-c3))
+  (= {hlam-c0} (nth i v0s-tf-h2lam-c0))  (= {hlam-c1} (nth i v0s-tf-h2lam-c1))
+  (= {hlam-c2} (nth i v0s-tf-h2lam-c2))  (= {hlam-c3} (nth i v0s-tf-h2lam-c3))
+  (= {hnevt-c0} (nth i v0s-tf-hnevt-c0)) (= {hnevt-c1} (nth i v0s-tf-hnevt-c1))
+  (= {hnevt-c2} (nth i v0s-tf-hnevt-c2)) (= {hnevt-c3} (nth i v0s-tf-hnevt-c3))
+
+  ;;; inclusive histograms
+  (= {hk0s}  (nth i v0s-tf-h2k0s))
+  (= {hlam}  (nth i v0s-tf-h2lam))
+  (= {hnevt} (nth i v0s-tf-hnevt))
+
+  ;;; V0 index branches
+  (= {pos-idx}   (load-branch ap (concat tf "/" v0-tree) "fIndexTracks_Pos"))
+  (= {neg-idx}   (load-branch ap (concat tf "/" v0-tree) "fIndexTracks_Neg"))
+  (= {v0-colidx} (load-branch ap (concat tf "/" v0-tree) "fIndexCollisions"))
+
+  ;;; Track parameter branches
+  (= {s1pt-c}  (load-branch ap (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {alpha-c} (load-branch ap (concat tf "/" trk-tree) "fAlpha"))
+  (= {snp-c}   (load-branch ap (concat tf "/" trk-tree) "fSnp"))
+  (= {tgl-c}   (load-branch ap (concat tf "/" trk-tree) "fTgl"))
+  (= {x-c}     (load-branch ap (concat tf "/" trk-tree) "fX"))
+  (= {y-c}     (load-branch ap (concat tf "/" trk-tree) "fY"))
+  (= {z-c}     (load-branch ap (concat tf "/" trk-tree) "fZ"))
+
+  ;;; Primary vertex per collision
+  (= {pv-x-c} (load-branch ap (concat tf "/" col-tree) "fPosX"))
+  (= {pv-y-c} (load-branch ap (concat tf "/" col-tree) "fPosY"))
+  (= {pv-z-c} (load-branch ap (concat tf "/" col-tree) "fPosZ"))
+
+  ;;; Centrality per collision
+  (= {cent-c} (load-branch ap (concat tf "/" v0s-cent-tree) "fCentRun2V0M"))
+
+  ;;; Event selection: |vz| < 10 cm
+  (= {vz-ok-col} (col-map-ptr v0s-vz-cut-ptr pv-z-c))
+  (= {ones-col}  (col-map-ptr v0s-ones-ptr   pv-z-c))
+
+  ;;; Count selected events per centrality class
+  (col-fill-h1 hnevt (col-mask vz-ok-col ones-col))
+  (col-fill-h1 hnevt-c0 (col-mask (col-and vz-ok-col (col-map-ptr v0s-cent0-ptr cent-c)) ones-col))
+  (col-fill-h1 hnevt-c1 (col-mask (col-and vz-ok-col (col-map-ptr v0s-cent1-ptr cent-c)) ones-col))
+  (col-fill-h1 hnevt-c2 (col-mask (col-and vz-ok-col (col-map-ptr v0s-cent2-ptr cent-c)) ones-col))
+  (col-fill-h1 hnevt-c3 (col-mask (col-and vz-ok-col (col-map-ptr v0s-cent3-ptr cent-c)) ones-col))
+
+  ;;; Gather PV and centrality for each V0
+  (= {pv-x}    (col-gather pv-x-c    v0-colidx))
+  (= {pv-y}    (col-gather pv-y-c    v0-colidx))
+  (= {pv-z}    (col-gather pv-z-c    v0-colidx))
+  (= {vz-ok-v0} (col-gather vz-ok-col v0-colidx))
+  (= {cent-v0}  (col-gather cent-c    v0-colidx))
+
+  ;;; Gather daughter track parameters
+  (= {pos-s1pt}  (col-gather s1pt-c  pos-idx))
+  (= {pos-alpha} (col-gather alpha-c pos-idx))
+  (= {pos-snp}   (col-gather snp-c   pos-idx))
+  (= {pos-tgl}   (col-gather tgl-c   pos-idx))
+  (= {pos-x}     (col-gather x-c     pos-idx))
+  (= {pos-y}     (col-gather y-c     pos-idx))
+  (= {pos-z}     (col-gather z-c     pos-idx))
+  (= {neg-s1pt}  (col-gather s1pt-c  neg-idx))
+  (= {neg-alpha} (col-gather alpha-c neg-idx))
+  (= {neg-snp}   (col-gather snp-c   neg-idx))
+  (= {neg-tgl}   (col-gather tgl-c   neg-idx))
+  (= {neg-x}     (col-gather x-c     neg-idx))
+  (= {neg-y}     (col-gather y-c     neg-idx))
+  (= {neg-z}     (col-gather z-c     neg-idx))
+
+  ;;; V0 decay geometry (fused kernel)
+  (= {v0geo}   (v0s-dca-fn
+    pos-s1pt pos-alpha pos-snp pos-tgl pos-x pos-y pos-z
+    neg-s1pt neg-alpha neg-snp neg-tgl neg-x neg-y neg-z))
+  (= {vtx-x}   (nth 0 v0geo))
+  (= {vtx-y}   (nth 1 v0geo))
+  (= {vtx-z}   (nth 2 v0geo))
+  (= {dca-dau} (nth 3 v0geo))
+
+  ;;; Daughter momenta and V0 momentum sum
+  (= {pos-px} (col-zip-ptr v0s-px-ptr pos-s1pt pos-alpha pos-snp))
+  (= {pos-py} (col-zip-ptr v0s-py-ptr pos-s1pt pos-alpha pos-snp))
+  (= {pos-pz} (col-zip-ptr v0s-pz-ptr pos-s1pt pos-tgl))
+  (= {neg-px} (col-zip-ptr v0s-px-ptr neg-s1pt neg-alpha neg-snp))
+  (= {neg-py} (col-zip-ptr v0s-py-ptr neg-s1pt neg-alpha neg-snp))
+  (= {neg-pz} (col-zip-ptr v0s-pz-ptr neg-s1pt neg-tgl))
+  (= {v0-px}  (col-zip-ptr v0s-add-ptr pos-px neg-px))
+  (= {v0-py}  (col-zip-ptr v0s-add-ptr pos-py neg-py))
+  (= {v0-pz}  (col-zip-ptr v0s-add-ptr pos-pz neg-pz))
+
+  ;;; CPA, radius, topology mask (includes vz event selection)
+  (= {cpa}       (col-cpa vtx-x vtx-y vtx-z pv-x pv-y pv-z v0-px v0-py v0-pz))
+  (= {radius}    (col-zip-ptr v0s-radius-ptr vtx-x vtx-y))
+  (= {topo-mask} (col-and vz-ok-v0
+                          (col-map-ptr v0s-dca-cut-ptr    dca-dau)
+                          (col-map-ptr v0s-radius-cut-ptr radius)
+                          (col-map-ptr v0s-cpa-cut-ptr    cpa)))
+
+  ;;; Armenteros variables
+  (= {arm}       (v0s-arm-fn pos-px pos-py pos-pz neg-px neg-py neg-pz v0-px v0-py v0-pz))
+  (= {arm-alpha} (nth 0 arm))
+  (= {arm-qt}    (nth 1 arm))
+
+  ;;; Species masks: topology × Armenteros
+  ;;; (fV0Type = 255 for all entries in LHC15o — type filter omitted)
+  (= {k0s-mask}  (col-and topo-mask (col-zip-ptr v0s-k0s-arm-ptr  arm-alpha arm-qt)))
+  (= {lam-mask}  (col-and topo-mask (col-zip-ptr v0s-lam-arm-ptr  arm-alpha arm-qt)))
+  (= {alam-mask} (col-and topo-mask (col-zip-ptr v0s-alam-arm-ptr arm-alpha arm-qt)))
+
+  ;;; V0 pT and invariant mass columns
+  (= {v0-pt}     (col-zip-ptr v0s-pt-ptr v0-px v0-py))
+  (= {mass-k0s}  (v0s-minv-k0s-fn pos-px pos-py pos-pz neg-px neg-py neg-pz))
+  (= {mass-lam}  (v0s-minv-lam-fn pos-px pos-py pos-pz neg-px neg-py neg-pz))
+  (= {mass-alam} (v0s-minv-lam-fn neg-px neg-py neg-pz pos-px pos-py pos-pz))
+
+  ;;; Per-centrality V0 masks
+  (= {cm0-v0} (col-map-ptr v0s-cent0-ptr cent-v0))
+  (= {cm1-v0} (col-map-ptr v0s-cent1-ptr cent-v0))
+  (= {cm2-v0} (col-map-ptr v0s-cent2-ptr cent-v0))
+  (= {cm3-v0} (col-map-ptr v0s-cent3-ptr cent-v0))
+
+  ;;; Combined species × centrality masks
+  (= {k0s-c0} (col-and k0s-mask cm0-v0))  (= {k0s-c1} (col-and k0s-mask cm1-v0))
+  (= {k0s-c2} (col-and k0s-mask cm2-v0))  (= {k0s-c3} (col-and k0s-mask cm3-v0))
+  (= {lam-c0} (col-and lam-mask  cm0-v0)) (= {lam-c1} (col-and lam-mask  cm1-v0))
+  (= {lam-c2} (col-and lam-mask  cm2-v0)) (= {lam-c3} (col-and lam-mask  cm3-v0))
+  (= {alm-c0} (col-and alam-mask cm0-v0)) (= {alm-c1} (col-and alam-mask cm1-v0))
+  (= {alm-c2} (col-and alam-mask cm2-v0)) (= {alm-c3} (col-and alam-mask cm3-v0))
+
+  ;;; Fill inclusive TH2F
+  (col-fill-h2 hk0s (col-mask k0s-mask  v0-pt) (col-mask k0s-mask  mass-k0s))
+  (col-fill-h2 hlam (col-mask lam-mask  v0-pt) (col-mask lam-mask  mass-lam))
+  (col-fill-h2 hlam (col-mask alam-mask v0-pt) (col-mask alam-mask mass-alam))
+
+  ;;; Fill per-centrality TH2F
+  (col-fill-h2 hk0s-c0 (col-mask k0s-c0 v0-pt) (col-mask k0s-c0 mass-k0s))
+  (col-fill-h2 hk0s-c1 (col-mask k0s-c1 v0-pt) (col-mask k0s-c1 mass-k0s))
+  (col-fill-h2 hk0s-c2 (col-mask k0s-c2 v0-pt) (col-mask k0s-c2 mass-k0s))
+  (col-fill-h2 hk0s-c3 (col-mask k0s-c3 v0-pt) (col-mask k0s-c3 mass-k0s))
+  (col-fill-h2 hlam-c0 (col-mask lam-c0 v0-pt) (col-mask lam-c0 mass-lam))
+  (col-fill-h2 hlam-c0 (col-mask alm-c0 v0-pt) (col-mask alm-c0 mass-alam))
+  (col-fill-h2 hlam-c1 (col-mask lam-c1 v0-pt) (col-mask lam-c1 mass-lam))
+  (col-fill-h2 hlam-c1 (col-mask alm-c1 v0-pt) (col-mask alm-c1 mass-alam))
+  (col-fill-h2 hlam-c2 (col-mask lam-c2 v0-pt) (col-mask lam-c2 mass-lam))
+  (col-fill-h2 hlam-c2 (col-mask alm-c2 v0-pt) (col-mask alm-c2 mass-alam))
+  (col-fill-h2 hlam-c3 (col-mask lam-c3 v0-pt) (col-mask lam-c3 mass-lam))
+  (col-fill-h2 hlam-c3 (col-mask alm-c3 v0-pt) (col-mask alm-c3 mass-alam))
+}) v0s-tf-idx)
+
+(.Stop v0s-sw)
+(print "V0 spectra | fill done in" (.RealTime v0s-sw) "s")
+
+;;; ── Merge per-TF histograms ──────────────────────────────────────────────
+;;; Inclusive
+(def {h2-k0s}
+  (doto (new TH2F "h2k0s_all" "K^{0}_{S};p_{T} (GeV/c);m_{#pi#pi} (GeV/c^{2})"
+             v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565) {SetDirectory 0}))
+(def {h2-lam}
+  (doto (new TH2F "h2lam_all" "#Lambda/#bar{#Lambda};p_{T} (GeV/c);m_{p#pi} (GeV/c^{2})"
+             v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16) {SetDirectory 0}))
+(map (\ {h} {.Add h2-k0s h}) v0s-tf-h2k0s)
+(map (\ {h} {.Add h2-lam  h}) v0s-tf-h2lam)
+
+(def {h-nevt} (doto (new TH1F "hnevt_all" "" 1 0. 2.) {SetDirectory 0}))
+(map (\ {h} {.Add h-nevt h}) v0s-tf-hnevt)
+(def {v0s-nev} (.GetBinContent h-nevt 1))
+
+;;; Per-centrality K0s
+(def {h2-k0s-c0}
+  (doto (new TH2F "h2k0s_c0" "K^{0}_{S} 0-10%;p_{T} (GeV/c);m_{#pi#pi} (GeV/c^{2})"
+             v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565) {SetDirectory 0}))
+(def {h2-k0s-c1}
+  (doto (new TH2F "h2k0s_c1" "K^{0}_{S} 10-30%;p_{T} (GeV/c);m_{#pi#pi} (GeV/c^{2})"
+             v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565) {SetDirectory 0}))
+(def {h2-k0s-c2}
+  (doto (new TH2F "h2k0s_c2" "K^{0}_{S} 30-50%;p_{T} (GeV/c);m_{#pi#pi} (GeV/c^{2})"
+             v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565) {SetDirectory 0}))
+(def {h2-k0s-c3}
+  (doto (new TH2F "h2k0s_c3" "K^{0}_{S} 50-80%;p_{T} (GeV/c);m_{#pi#pi} (GeV/c^{2})"
+             v0s-npt-k0s v0s-ptlo-k0s v0s-pthi-k0s 200 0.43 0.565) {SetDirectory 0}))
+(map (\ {h} {.Add h2-k0s-c0 h}) v0s-tf-h2k0s-c0)
+(map (\ {h} {.Add h2-k0s-c1 h}) v0s-tf-h2k0s-c1)
+(map (\ {h} {.Add h2-k0s-c2 h}) v0s-tf-h2k0s-c2)
+(map (\ {h} {.Add h2-k0s-c3 h}) v0s-tf-h2k0s-c3)
+
+;;; Per-centrality Λ/Λ̄
+(def {h2-lam-c0}
+  (doto (new TH2F "h2lam_c0" "#Lambda/#bar{#Lambda} 0-10%;p_{T} (GeV/c);m_{p#pi} (GeV/c^{2})"
+             v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16) {SetDirectory 0}))
+(def {h2-lam-c1}
+  (doto (new TH2F "h2lam_c1" "#Lambda/#bar{#Lambda} 10-30%;p_{T} (GeV/c);m_{p#pi} (GeV/c^{2})"
+             v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16) {SetDirectory 0}))
+(def {h2-lam-c2}
+  (doto (new TH2F "h2lam_c2" "#Lambda/#bar{#Lambda} 30-50%;p_{T} (GeV/c);m_{p#pi} (GeV/c^{2})"
+             v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16) {SetDirectory 0}))
+(def {h2-lam-c3}
+  (doto (new TH2F "h2lam_c3" "#Lambda/#bar{#Lambda} 50-80%;p_{T} (GeV/c);m_{p#pi} (GeV/c^{2})"
+             v0s-npt-lam v0s-ptlo-lam v0s-pthi-lam 160 1.08 1.16) {SetDirectory 0}))
+(map (\ {h} {.Add h2-lam-c0 h}) v0s-tf-h2lam-c0)
+(map (\ {h} {.Add h2-lam-c1 h}) v0s-tf-h2lam-c1)
+(map (\ {h} {.Add h2-lam-c2 h}) v0s-tf-h2lam-c2)
+(map (\ {h} {.Add h2-lam-c3 h}) v0s-tf-h2lam-c3)
+
+;;; Per-centrality event counts
+(def {h-nevt-c0} (doto (new TH1F "hnevt_c0" "" 1 0. 2.) {SetDirectory 0}))
+(def {h-nevt-c1} (doto (new TH1F "hnevt_c1" "" 1 0. 2.) {SetDirectory 0}))
+(def {h-nevt-c2} (doto (new TH1F "hnevt_c2" "" 1 0. 2.) {SetDirectory 0}))
+(def {h-nevt-c3} (doto (new TH1F "hnevt_c3" "" 1 0. 2.) {SetDirectory 0}))
+(map (\ {h} {.Add h-nevt-c0 h}) v0s-tf-hnevt-c0)
+(map (\ {h} {.Add h-nevt-c1 h}) v0s-tf-hnevt-c1)
+(map (\ {h} {.Add h-nevt-c2 h}) v0s-tf-hnevt-c2)
+(map (\ {h} {.Add h-nevt-c3 h}) v0s-tf-hnevt-c3)
+
+(def {nev-c0} (.GetBinContent h-nevt-c0 1))
+(def {nev-c1} (.GetBinContent h-nevt-c1 1))
+(def {nev-c2} (.GetBinContent h-nevt-c2 1))
+(def {nev-c3} (.GetBinContent h-nevt-c3 1))
+
+(print "V0 spectra | inclusive K0s:" (.GetEntries h2-k0s)
+                    "Lambda:" (.GetEntries h2-lam)
+                    "Events (|vz|<10cm):" v0s-nev)
+(print "V0 spectra | Events per centrality —"
+       "0-10%:" nev-c0  "10-30%:" nev-c1  "30-50%:" nev-c2  "50-80%:" nev-c3)
+
+;;; ── Step 4: signal extraction per pT bin, per centrality class ───────────
+;;; Yield formula:  N = A × |σ| × √(2π) / mass_bin_width / N_ev
+(def {v0s-sqrt2pi}   2.506628)
+(def {v0s-bw-k0s}    (/ (- 0.565  0.43)  200.))
+(def {v0s-bw-lam}    (/ (- 1.16   1.08)  160.))
+(def {v0s-pt-bw-k0s} (/ (- v0s-pthi-k0s v0s-ptlo-k0s) (+ v0s-npt-k0s 0.)))
+(def {v0s-pt-bw-lam} (/ (- v0s-pthi-lam v0s-ptlo-lam) (+ v0s-npt-lam 0.)))
+
+(def {v0s-cent-labels} (list "0-10%" "10-30%" "30-50%" "50-80%"))
+(def {v0s-cent-colors} (list 2 4 6 8))
+
+;;; Pre-create TGraphErrors for each centrality class (main thread — Cling-safe)
+(def {v0s-gr-k0s-by-cent}
+  (do
+    (= {acc} {})
+    (dotimes {ci} 4 {
+      do
+      (= {col} (nth ci v0s-cent-colors))
+      (= {acc} (join acc (list (doto (new TGraphErrors v0s-npt-k0s)
+                                 {SetMarkerStyle 20}
+                                 {SetMarkerColor col}
+                                 {SetLineColor col}))))
+    })
+    acc))
+
+(def {v0s-gr-lam-by-cent}
+  (do
+    (= {acc} {})
+    (dotimes {ci} 4 {
+      do
+      (= {col} (nth ci v0s-cent-colors))
+      (= {acc} (join acc (list (doto (new TGraphErrors v0s-npt-lam)
+                                 {SetMarkerStyle 20}
+                                 {SetMarkerColor col}
+                                 {SetLineColor col}))))
+    })
+    acc))
+
+;;; Convenience lists for the loop below
+(def {v0s-h2k0s-by-cent} (list h2-k0s-c0 h2-k0s-c1 h2-k0s-c2 h2-k0s-c3))
+(def {v0s-h2lam-by-cent}  (list h2-lam-c0  h2-lam-c1  h2-lam-c2  h2-lam-c3))
+(def {v0s-nev-by-cent}   (list nev-c0 nev-c1 nev-c2 nev-c3))
+
+;;; ── K0s fits per centrality class ───────────────────────────────────────
+(dotimes {ci} 4 {
+  do
+  (= {h2}  (nth ci v0s-h2k0s-by-cent))
+  (= {nev} (nth ci v0s-nev-by-cent))
+  (= {gr}  (nth ci v0s-gr-k0s-by-cent))
+  (= {lbl} (nth ci v0s-cent-labels))
+  (if (> nev 0.) {
+    dotimes {ib} v0s-npt-k0s {
+      do
+      (= {pt-c} (+ v0s-ptlo-k0s (* (+ ib 0.5) v0s-pt-bw-k0s)))
+      (= {hmass} (doto (.ProjectionY h2 (concat "k0s_c" (str ci) "_proj_" (str ib)) (+ ib 1) (+ ib 1))
+                   {SetDirectory 0}))
+      (if (> (.GetEntries hmass) 100.) {
+        do
+        (= {tf1} (new TF1 (concat "fk0s_c" (str ci) "_" (str ib)) "gaus+pol2" 0.44 0.56))
+        (.SetParameter tf1 0 (.GetMaximum hmass))
+        (.SetParameter tf1 1 0.4976)
+        (.SetParameter tf1 2 0.005)
+        (.Fit hmass tf1 "RQ0")
+        (= {A}   (.GetParameter tf1 0))
+        (= {sig} (fabsf (.GetParameter tf1 2)))
+        (= {dA}  (.GetParError tf1 0))
+        (= {ds}  (.GetParError tf1 2))
+        ;;; accept σ in 5–50 MeV/c²
+        (if (band (> A 0.) (band (> sig 0.005) (< sig 0.05))) {
+          do
+          (= {yield}     (/ (/ (* A sig v0s-sqrt2pi) v0s-bw-k0s) nev))
+          (= {yield-err} (* yield (sqrtf (+ (* (/ dA A) (/ dA A)) (* (/ ds sig) (/ ds sig))))))
+          ;;; reject if relative uncertainty > 50 %
+          (if (< (/ yield-err yield) 0.5) {
+            do
+            (.SetPoint      gr ib pt-c yield)
+            (.SetPointError gr ib (* 0.5 v0s-pt-bw-k0s) yield-err)
+            (print "K0s" lbl "bin" ib "pT=" pt-c "yield/ev=" yield)
+          } {
+            print "K0s" lbl "bin" ib "pT=" pt-c "rel.err too large:" (/ yield-err yield)
+          })
+        } {
+          print "K0s" lbl "bin" ib "pT=" pt-c "fit rejected (A=" A "sig=" sig ")"
+        })
+      } {
+        print "K0s" lbl "bin" ib "pT=" pt-c "too few entries:" (.GetEntries hmass)
+      })
+    }
+  } {
+    print "K0s" lbl ": no events — skip"
+  })
+})
+
+;;; ── Λ/Λ̄ fits per centrality class ────────────────────────────────────────
+(dotimes {ci} 4 {
+  do
+  (= {h2}  (nth ci v0s-h2lam-by-cent))
+  (= {nev} (nth ci v0s-nev-by-cent))
+  (= {gr}  (nth ci v0s-gr-lam-by-cent))
+  (= {lbl} (nth ci v0s-cent-labels))
+  (if (> nev 0.) {
+    dotimes {ib} v0s-npt-lam {
+      do
+      (= {pt-c} (+ v0s-ptlo-lam (* (+ ib 0.5) v0s-pt-bw-lam)))
+      (= {hmass} (doto (.ProjectionY h2 (concat "lam_c" (str ci) "_proj_" (str ib)) (+ ib 1) (+ ib 1))
+                   {SetDirectory 0}))
+      (if (> (.GetEntries hmass) 100.) {
+        do
+        (= {tf1} (new TF1 (concat "flam_c" (str ci) "_" (str ib)) "gaus+pol1" 1.09 1.15))
+        (.SetParameter tf1 0 (.GetMaximum hmass))
+        (.SetParameter tf1 1 1.1157)
+        (.SetParameter tf1 2 0.002)
+        (.Fit hmass tf1 "RQ0")
+        (= {A}   (.GetParameter tf1 0))
+        (= {sig} (fabsf (.GetParameter tf1 2)))
+        (= {dA}  (.GetParError tf1 0))
+        (= {ds}  (.GetParError tf1 2))
+        ;;; accept σ in 3–25 MeV/c²
+        (if (band (> A 0.) (band (> sig 0.003) (< sig 0.025))) {
+          do
+          (= {yield}     (/ (/ (* A sig v0s-sqrt2pi) v0s-bw-lam) nev))
+          (= {yield-err} (* yield (sqrtf (+ (* (/ dA A) (/ dA A)) (* (/ ds sig) (/ ds sig))))))
+          ;;; reject if relative uncertainty > 50 %
+          (if (< (/ yield-err yield) 0.5) {
+            do
+            (.SetPoint      gr ib pt-c yield)
+            (.SetPointError gr ib (* 0.5 v0s-pt-bw-lam) yield-err)
+            (print "Lam" lbl "bin" ib "pT=" pt-c "yield/ev=" yield)
+          } {
+            print "Lam" lbl "bin" ib "pT=" pt-c "rel.err too large:" (/ yield-err yield)
+          })
+        } {
+          print "Lam" lbl "bin" ib "pT=" pt-c "fit rejected (A=" A "sig=" sig ")"
+        })
+      } {
+        print "Lam" lbl "bin" ib "pT=" pt-c "too few entries:" (.GetEntries hmass)
+      })
+    }
+  } {
+    print "Lam" lbl ": no events — skip"
+  })
+})
+
+;;; ── Step 5: canvas — 2 pads with 4 overlaid centrality spectra each ──────
+;;; Use a TH1F frame to fix the axis range regardless of how many points each
+;;; TGraphErrors contains.  All graphs are drawn with "P SAME" on top.
+(def {c-v0spec} (doto (new TCanvas "c_v0spec" "V0 pT spectra — Pb-Pb 5.02 TeV (LHC15o)" 1200 500)
+  {Divide 2 1}))
+
+;;; Left pad: K0s
+(.cd c-v0spec 1)
+(.SetLogy (.GetPad c-v0spec 1) 1)
+(def {hframe-k0s}
+  (doto (new TH1F "hframe_k0s"
+             "K^{0}_{S} #rightarrow #pi^{+}#pi^{-};p_{T} (GeV/c);(1/N_{ev}) dN/dp_{T} (GeV/c)^{-1}"
+             1 0.3 4.5)
+    {SetDirectory 0} {SetStats 0} {SetMinimum 1e-4} {SetMaximum 1.0}))
+(.Draw hframe-k0s "AXIS")
+
+(def {leg-k0s} (doto (new TLegend 0.55 0.65 0.88 0.88) {SetBorderSize 0}))
+(dotimes {ci} 4 {
+  do
+  (= {gr}  (nth ci v0s-gr-k0s-by-cent))
+  (= {lbl} (nth ci v0s-cent-labels))
+  (.Draw gr "P SAME")
+  (.AddEntry leg-k0s gr lbl "P")
+})
+(.Draw leg-k0s)
+
+;;; Right pad: Λ/Λ̄
+(.cd c-v0spec 2)
+(.SetLogy (.GetPad c-v0spec 2) 1)
+(def {hframe-lam}
+  (doto (new TH1F "hframe_lam"
+             "#Lambda/#bar{#Lambda} #rightarrow p#pi;p_{T} (GeV/c);(1/N_{ev}) dN/dp_{T} (GeV/c)^{-1}"
+             1 0.8 6.0)
+    {SetDirectory 0} {SetStats 0} {SetMinimum 1e-4} {SetMaximum 10.0}))
+(.Draw hframe-lam "AXIS")
+
+(def {leg-lam} (doto (new TLegend 0.55 0.65 0.88 0.88) {SetBorderSize 0}))
+(dotimes {ci} 4 {
+  do
+  (= {gr}  (nth ci v0s-gr-lam-by-cent))
+  (= {lbl} (nth ci v0s-cent-labels))
+  (.Draw gr "P SAME")
+  (.AddEntry leg-lam gr lbl "P")
+})
+(.Draw leg-lam)
+
+(.Update c-v0spec)
+(.RaiseWindow c-v0spec)
+
+;;; ── Step 6: save to AnalysisResults.root ────────────────────────────────
+;;; Caller may define v0s-output-file before loading to override the path.
+(default {v0s-output-file} "AnalysisResults.root")
+
+(= {v0s-fout} (::Open TFile v0s-output-file "RECREATE"))
+
+;;; K0s — TH2F(pT, mass) per centrality class + TGraphErrors yields
+(= {v0s-dir-k0s} (.mkdir v0s-fout "v0-k0s"))
+(.cd v0s-dir-k0s)
+(.Write h2-k0s-c0) (.Write h2-k0s-c1) (.Write h2-k0s-c2) (.Write h2-k0s-c3)
+(dotimes {ci} 4 {.Write (nth ci v0s-gr-k0s-by-cent) (concat "gr_k0s_c" (str ci))})
+
+;;; Λ/Λ̄ — TH2F(pT, mass) per centrality class + TGraphErrors yields
+(= {v0s-dir-lam} (.mkdir v0s-fout "v0-lam"))
+(.cd v0s-dir-lam)
+(.Write h2-lam-c0) (.Write h2-lam-c1) (.Write h2-lam-c2) (.Write h2-lam-c3)
+(dotimes {ci} 4 {.Write (nth ci v0s-gr-lam-by-cent) (concat "gr_lam_c" (str ci))})
+
+;;; Inclusive (reference)
+(= {v0s-dir-inc} (.mkdir v0s-fout "v0-inclusive"))
+(.cd v0s-dir-inc)
+(.Write h2-k0s) (.Write h2-lam)
+
+(.cd v0s-fout)
+(.Close v0s-fout)
+(print "V0 spectra | saved to" v0s-output-file)
+(print "V0 spectra | done.")

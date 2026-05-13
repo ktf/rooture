@@ -7,3 +7,4 @@ rooture
 DictOutput.cxx
 DictOutput.h
 .DS_Store
+*.root
