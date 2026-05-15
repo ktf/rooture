@@ -803,11 +803,14 @@ static void mcp_thread_fn() {
         // Restore fd 1 to the real MCP stdout so the new process can set up
         // correctly (it will dup+redirect fd 1 again during its own init).
         dup2(fileno(g_mcp_out), STDOUT_FILENO);
-        // Close everything except stdin/stdout/stderr so the new image starts
-        // with a clean fd table.
+        // Mark everything except stdin/stdout/stderr as close-on-exec so the
+        // new image starts with a clean fd table.  On macOS, calling close()
+        // directly on "guarded" system file descriptors (Mach port FDs) delivers
+        // EXC_GUARD and crashes the process; fcntl F_SETFD is safe on all fds
+        // and the kernel closes them correctly (respecting any guard) on execv.
         { int maxfd = (int)sysconf(_SC_OPEN_MAX);
           if (maxfd < 0 || maxfd > 4096) maxfd = 4096;
-          for (int fd = 3; fd < maxfd; fd++) close(fd); }
+          for (int fd = 3; fd < maxfd; fd++) fcntl(fd, F_SETFD, FD_CLOEXEC); }
         // Signal the new process that it is a hot-reload so it sends
         // notifications/tools/list_changed without waiting for initialize.
         setenv("ROOTURE_MCP_RELOAD", "1", 1);
