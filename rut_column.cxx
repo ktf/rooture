@@ -914,6 +914,63 @@ static lval* builtin_col_zip_ptr(lenv* /*e*/, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
+// (col-group-sum val-col mask-col idx-col) → float32 column
+//
+// Scatter-add: returns a float32 column of length max(idx)+1 where
+//   out[g] = Σ_{i : mask[i]>0.5 ∧ idx[i]==g} val[i]
+//
+// val-col  — float32, track-level values
+// mask-col — float32, track-level mask (non-zero = include)
+// idx-col  — int32,   group index per track (e.g. fIndexCollisions)
+//
+// Negative idx entries are skipped (O2 sentinel for ambiguous collision).
+// ---------------------------------------------------------------------------
+static lval* builtin_col_group_sum(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-group-sum", a, 3);
+  LASSERT_TYPE("col-group-sum", a, 0, LVAL_COLUMN);
+  LASSERT_TYPE("col-group-sum", a, 1, LVAL_COLUMN);
+  LASSERT_TYPE("col-group-sum", a, 2, LVAL_COLUMN);
+
+  auto& vals = col_of(a->cell[0]);
+  auto& mask = col_of(a->cell[1]);
+  auto& idxs = col_of(a->cell[2]);
+
+  LASSERT(a, vals->dtype == COL_FLOAT32,
+          "col-group-sum: val column must be float32");
+  LASSERT(a, mask->dtype == COL_FLOAT32,
+          "col-group-sum: mask column must be float32");
+  LASSERT(a, idxs->dtype == COL_INT32,
+          "col-group-sum: idx column must be int32");
+  LASSERT(a, vals->n == mask->n && vals->n == idxs->n,
+          "col-group-sum: column length mismatch (%zu / %zu / %zu)",
+          vals->n, mask->n, idxs->n);
+
+  size_t   n = vals->n;
+  float*   v = (float*)vals->data;
+  float*   m = (float*)mask->data;
+  int32_t* g = (int32_t*)idxs->data;
+
+  int32_t gmax = -1;
+  for (size_t i = 0; i < n; i++)
+    if (g[i] > gmax) gmax = g[i];
+
+  size_t ng  = (gmax < 0) ? 0 : (size_t)gmax + 1;
+  size_t esz = ng ? ng * sizeof(float) : sizeof(float);
+  float* out = (float*)col_alloc(esz);
+  if (!out) { lval_del(a); return lval_err("col-group-sum: out of memory"); }
+  for (size_t i = 0; i < ng; i++) out[i] = 0.0f;
+
+  for (size_t i = 0; i < n; i++)
+    if (m[i] > 0.5f && g[i] >= 0)
+      out[(size_t)g[i]] += v[i];
+
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = COL_FLOAT32; c->n = ng; c->data = out;
+  return lval_column(std::move(c));
+}
+
+// ---------------------------------------------------------------------------
 // (col-fill-h1 hist col) → nil
 // Fills a TH1 histogram directly from a column buffer — no interpreter
 // overhead per element.  Safe to call from a future thread provided the
@@ -1613,6 +1670,7 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "col-reduce-ptr", builtin_col_reduce_ptr);
   lenv_add_builtin(e, "col-zip",        builtin_col_zip);
   lenv_add_builtin(e, "col-zip-ptr",    builtin_col_zip_ptr);
+  lenv_add_builtin(e, "col-group-sum",    builtin_col_group_sum);
   lenv_add_builtin(e, "col-fill-h1",      builtin_col_fill_h1);
   lenv_add_builtin(e, "col-fill-mean-h1", builtin_col_fill_mean_h1);
   lenv_add_builtin(e, "col-fill-h2",    builtin_col_fill_h2);

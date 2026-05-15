@@ -109,8 +109,12 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
           char buf[32]; snprintf(buf, sizeof(buf), "%.17g", found->floating);
           r = buf;
         } else if (found->type == LVAL_FLOAT32) {
-          char buf[32]; snprintf(buf, sizeof(buf), "%.9gf", (float)found->floating);
+          char buf[32]; snprintf(buf, sizeof(buf), "%.9g", (float)found->floating);
           r = buf;
+          if (r.find('.') == std::string::npos && r.find('e') == std::string::npos &&
+              r.find('E') == std::string::npos && r.find('n') == std::string::npos)
+            r += ".0";
+          r += "f";
         } else if (found->type == LVAL_TOBJ && found->obj) {
           // Fold a heap object to a stable pointer cast: ((ClassName*)0xADDR)
           // The address is baked in at compile time; the value is read at runtime.

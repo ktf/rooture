@@ -1,0 +1,307 @@
+;;; examples/flow_v2.rut
+;;; v2{2, |Δη|>1} — two-particle cumulant flow with η-gap sub-events.
+;;;
+;;; Method: for each event compute
+;;;   Q2^A = Σ_{η > +η_gap/2} e^{i2φ}   (forward sub-event)
+;;;   Q2^B = Σ_{η < -η_gap/2} e^{i2φ}   (backward sub-event)
+;;;   ⟨cos 2Δφ⟩ = Re(Q2^A · Q2^{B*}) / (M_A · M_B)
+;;;
+;;; Averaged over events → v2{2} = sqrt(⟨cos 2Δφ⟩).
+;;; O(N) per event — no pair loop.
+;;;
+;;; Prerequisites — define before loading:
+;;;   aod-paths   — list of AO2D file paths
+;;;   trk-tree    — track tree name   (e.g. "O2track" for LHC15o)
+;;;   col-tree    — collision tree    (e.g. "O2collision_001")
+;;;
+;;; Optional:
+;;;   v2-cent-tree — centrality tree  (default "O2centrun2v0m")
+;;;   v2-eta-gap   — η gap half-width (default 0.5, so |Δη| > 1)
+;;;   v2-pt-min    — min pT GeV/c     (default 0.2)
+;;;   v2-pt-max    — max pT GeV/c     (default 5.0)
+;;;   v2-eta-max   — |η| acceptance   (default 0.8)
+;;;
+;;; Output symbols:
+;;;   v2-result    — list of 4 floats: v2{2} for each centrality class
+;;;   v2-err       — list of 4 floats: statistical uncertainty
+;;;   c-v2         — canvas
+
+;;; ── Defaults ────────────────────────────────────────────────────────────
+(default {v2-cent-tree} "O2centrun2v0m")
+(default {v2-eta-gap}   0.5f)
+(default {v2-pt-min}    0.2f)
+(default {v2-pt-max}    5.0f)
+(default {v2-eta-max}   0.8f)
+
+;;; ── Step 1: collect TF pairs ────────────────────────────────────────────
+(def {v2-tf-pairs}
+  (do
+    (= {acc} {})
+    (dotimes {fi} (len aod-paths) {
+      do
+      (= {ap} (nth fi aod-paths))
+      (= {fh} (::Open TFile ap))
+      (if (== fh 0) { print "WARNING: cannot open" ap } {
+        if (.IsZombie fh) { print "WARNING: zombie" ap } {
+          do
+          (= {fkeys} (.GetListOfKeys fh))
+          (dotimes {ki} (.GetEntries fkeys) {
+            do
+            (= {fk} (.At fkeys ki))
+            (if (== (.GetClassName fk) "TDirectoryFile") {
+              = {acc} (join acc (list (list ap (.GetName fk))))
+            } {})
+          })
+          (.Close fh)
+        }
+      })
+    })
+    acc))
+
+(print "Flow v2 | files:" (len aod-paths) "| TF pairs:" (len v2-tf-pairs))
+
+;;; ── Step 2: JIT functions ────────────────────────────────────────────────
+;;; φ = α + asin(snp)
+(def {v2-phi-ptr}
+  (jitfn-ptr (jit-fn float (\{{float alpha} {float snp}}
+    {(+ alpha (asinf snp))}))))
+
+;;; η = asinh(tgl)
+(def {v2-eta-ptr}
+  (jitfn-ptr (jit-fn float (\{{float tgl}}
+    {asinhf tgl}))))
+
+;;; pT-ok: v2-pt-min < 1/|q1pt| < v2-pt-max
+(def {v2-ptok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float q1pt}}
+    {do
+      (= {pt} (if (== q1pt 0.0f) {0.0f} {(/ 1.0f (fabsf q1pt))}))
+      (if (band (> pt v2-pt-min) (< pt v2-pt-max)) {1.0f} {0.0f})}))))
+
+;;; |η| < v2-eta-max
+(def {v2-etaok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float eta}}
+    {(if (< (fabsf eta) v2-eta-max) {1.0f} {0.0f})}))))
+
+;;; forward sub-event: η > +v2-eta-gap
+(def {v2-fwd-ptr}
+  (jitfn-ptr (jit-fn float (\{{float eta}}
+    {(if (> eta v2-eta-gap) {1.0f} {0.0f})}))))
+
+;;; backward sub-event: η < -v2-eta-gap
+(def {v2-bwd-ptr}
+  (jitfn-ptr (jit-fn float (\{{float eta}}
+    {(if (< eta (- 0.0f v2-eta-gap)) {1.0f} {0.0f})}))))
+
+;;; cos(2φ) and sin(2φ)
+(def {v2-cos2phi-ptr}
+  (jitfn-ptr (jit-fn float (\{{float phi}} {cosf (* 2.0f phi)}))))
+(def {v2-sin2phi-ptr}
+  (jitfn-ptr (jit-fn float (\{{float phi}} {sinf (* 2.0f phi)}))))
+
+;;; ones (for counting tracks per sub-event)
+(def {v2-ones-ptr}
+  (jitfn-ptr (jit-fn float (\{{float x}} {1.0f}))))
+
+;;; |vz| < 10 cm
+(def {v2-vz-cut-ptr}
+  (jitfn-ptr (jit-fn float (\{{float vz}}
+    {(if (< (fabsf vz) 10.0f) {1.0f} {0.0f})}))))
+
+;;; centrality class masks
+(def {v2-cent0-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c  0.0f) (< c 10.0f)) {1.0f} {0.0f})}))))
+(def {v2-cent1-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 10.0f) (< c 30.0f)) {1.0f} {0.0f})}))))
+(def {v2-cent2-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 30.0f) (< c 50.0f)) {1.0f} {0.0f})}))))
+(def {v2-cent3-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 50.0f) (< c 80.0f)) {1.0f} {0.0f})}))))
+
+;;; Re(Q_A · Q_B*) = Qre_A*Qre_B + Qim_A*Qim_B  (4-argument col-zip-ptr)
+(def {v2-corr-ptr}
+  (jitfn-ptr (jit-fn float (\{{float qrea} {float qima} {float qreb} {float qimb}}
+    {(+ (* qrea qreb) (* qima qimb))}))))
+
+;;; weight: M_A * M_B
+(def {v2-mult-ptr}
+  (jitfn-ptr (jit-fn float (\{{float ma} {float mb}} {(* ma mb)}))))
+
+;;; sum function for col-reduce-ptr
+(def {v2-sum-ptr}
+  (jitfn-ptr (jit-fn float (\{{float acc} {float x}} {(+ acc x)}))))
+
+;;; per-event correlator: c_i = Re(Q_A·Q_B*) / (M_A·M_B)  (0 if weight=0)
+(def {v2-perdiv-ptr}
+  (jitfn-ptr (jit-fn float (\{{float corr} {float wgt}}
+    {(if (> wgt 0.0f) {(/ corr wgt)} {0.0f})}))))
+
+(print "Flow v2 | JIT functions compiled.")
+
+;;; ── Step 3: per-centrality accumulators (atoms — thread-safe) ────────────
+;;; Each atom holds {sum-corr sum-wgt sum-c sum-c2 nev} per centrality class.
+;;; sum-c = Σ c_i, sum-c2 = Σ c_i² where c_i = Re(Q_A·Q_B*)/(M_A·M_B) per event.
+(def {v2-acc-c0} (atom (list 0. 0. 0. 0. 0.)))
+(def {v2-acc-c1} (atom (list 0. 0. 0. 0. 0.)))
+(def {v2-acc-c2} (atom (list 0. 0. 0. 0. 0.)))
+(def {v2-acc-c3} (atom (list 0. 0. 0. 0. 0.)))
+(def {v2-accs}   (list v2-acc-c0 v2-acc-c1 v2-acc-c2 v2-acc-c3))
+(def {v2-cent-ptrs} (list v2-cent0-ptr v2-cent1-ptr v2-cent2-ptr v2-cent3-ptr))
+
+;;; Build TF index list for pmap
+(def {v2-tf-idx}
+  (do
+    (= {acc} {})
+    (dotimes {i} (len v2-tf-pairs) {= {acc} (join acc (list i))})
+    acc))
+
+(def {v2-sw} (doto (new TStopwatch) {Start}))
+
+(pmap (\ {i} {
+  do
+  (= {pair} (nth i v2-tf-pairs))
+  (= {ap}   (nth 0 pair))
+  (= {tf}   (nth 1 pair))
+
+  ;;; track branches
+  (= {s1pt-c}  (load-branch ap (concat tf "/" trk-tree) "fSigned1Pt"))
+  (= {alpha-c} (load-branch ap (concat tf "/" trk-tree) "fAlpha"))
+  (= {snp-c}   (load-branch ap (concat tf "/" trk-tree) "fSnp"))
+  (= {tgl-c}   (load-branch ap (concat tf "/" trk-tree) "fTgl"))
+  (= {cidx-c}  (load-branch ap (concat tf "/" trk-tree) "fIndexCollisions"))
+
+  ;;; collision branches
+  (= {pv-z-c} (load-branch ap (concat tf "/" col-tree) "fPosZ"))
+  (= {cent-c} (load-branch ap (concat tf "/" v2-cent-tree) "fCentRun2V0M"))
+
+  ;;; per-track kinematics
+  (= {phi-c}   (col-zip-ptr  v2-phi-ptr    alpha-c snp-c))
+  (= {eta-c}   (col-map-ptr  v2-eta-ptr    tgl-c))
+  (= {ptok-c}  (col-map-ptr  v2-ptok-ptr   s1pt-c))
+  (= {etaok-c} (col-map-ptr  v2-etaok-ptr  eta-c))
+  (= {cos2-c}  (col-map-ptr  v2-cos2phi-ptr phi-c))
+  (= {sin2-c}  (col-map-ptr  v2-sin2phi-ptr phi-c))
+  (= {ones-c}  (col-map-ptr  v2-ones-ptr   s1pt-c))
+
+  ;;; event selection at collision level → propagate to track level
+  (= {vz-ok-col}  (col-map-ptr v2-vz-cut-ptr pv-z-c))
+  (= {evsel-trk}  (col-gather  vz-ok-col cidx-c))
+
+  ;;; base track quality mask: evsel + pT + |η|
+  (= {qual-c} (col-and evsel-trk ptok-c etaok-c))
+
+  ;;; sub-event track masks
+  (= {fwd-c}  (col-and qual-c (col-map-ptr v2-fwd-ptr eta-c)))
+  (= {bwd-c}  (col-and qual-c (col-map-ptr v2-bwd-ptr eta-c)))
+
+  ;;; per-collision Q-vectors via col-group-sum (track→collision scatter-add)
+  (= {qre-a} (col-group-sum cos2-c fwd-c cidx-c))
+  (= {qim-a} (col-group-sum sin2-c fwd-c cidx-c))
+  (= {ma}    (col-group-sum ones-c fwd-c cidx-c))
+  (= {qre-b} (col-group-sum cos2-c bwd-c cidx-c))
+  (= {qim-b} (col-group-sum sin2-c bwd-c cidx-c))
+  (= {mb}    (col-group-sum ones-c bwd-c cidx-c))
+
+  ;;; per-collision: Re(Q_A·Q_B*) and weight M_A·M_B
+  (= {corr-col} (col-zip-ptr v2-corr-ptr qre-a qim-a qre-b qim-b))
+  (= {wgt-col}  (col-zip-ptr v2-mult-ptr ma mb))
+
+  ;;; accumulate per centrality class using atoms
+  (dotimes {ci} 4 {
+    do
+    (= {cptr} (nth ci v2-cent-ptrs))
+    (= {acc-atom} (nth ci v2-accs))
+    ;;; collision-level mask: vz-ok AND centrality class
+    (= {evsel-ci} (col-and vz-ok-col (col-map-ptr cptr cent-c)))
+    ;;; masked sums over selected collisions
+    (= {s-corr} (col-reduce-ptr v2-sum-ptr 0.0 (col-mask evsel-ci corr-col)))
+    (= {s-wgt}  (col-reduce-ptr v2-sum-ptr 0.0 (col-mask evsel-ci wgt-col)))
+    (= {s-nev}  (col-reduce-ptr v2-sum-ptr 0.0 evsel-ci))
+    ;;; per-event c_i = Re(Q_A·Q_B*) / (M_A·M_B); accumulate Σc_i and Σc_i² for variance
+    (= {c-col}  (col-zip-ptr v2-perdiv-ptr corr-col wgt-col))
+    (= {s-c}    (col-reduce-ptr v2-sum-ptr 0.0 (col-mask evsel-ci c-col)))
+    (= {s-c2}   (col-reduce-ptr v2-sum-ptr 0.0
+                   (col-mask evsel-ci (col-zip-ptr v2-mult-ptr c-col c-col))))
+    ;;; thread-safe update
+    (swap! acc-atom (\ {old} {
+      list (+ (nth 0 old) s-corr)
+           (+ (nth 1 old) s-wgt)
+           (+ (nth 2 old) s-c)
+           (+ (nth 3 old) s-c2)
+           (+ (nth 4 old) s-nev)
+    }))
+  })
+}) v2-tf-idx)
+
+(.Stop v2-sw)
+(print "Flow v2 | fill done in" (.RealTime v2-sw) "s")
+
+;;; ── Step 4: compute v2{2} per centrality class ───────────────────────────
+(def {v2-cent-labels} (list "0-10%" "10-30%" "30-50%" "50-80%"))
+(def {v2-cent-x}      (list 5.0 20.0 40.0 65.0))   ; centrality % midpoints
+
+(def {v2-result} {})
+(def {v2-err}    {})
+
+(dotimes {ci} 4 {
+  do
+  (= {acc}    (deref (nth ci v2-accs)))
+  (= {s-corr} (nth 0 acc))
+  (= {s-wgt}  (nth 1 acc))
+  (= {s-c}    (nth 2 acc))
+  (= {s-c2}   (nth 3 acc))
+  (= {nev}    (nth 4 acc))
+  (= {lbl}    (nth ci v2-cent-labels))
+  (print "Flow v2 |" lbl "sum_corr=" s-corr "sum_wgt=" s-wgt "nev=" nev)
+  (if (> s-wgt 0.) {
+    do
+    (= {mean-corr} (/ s-corr s-wgt))
+    (if (> mean-corr 0.) {
+      do
+      (= {v2val} (sqrtf mean-corr))
+      ;;; statistical error via Var(c) = <c²> - <c>²  where c_i = Re(Q_A·Q_B*)_i/(M_A·M_B)_i
+      ;;; σ(v2{2}) = sqrt(Var(c)/N) / (2*v2)
+      (= {mean-c}  (/ s-c  nev))
+      (= {mean-c2} (/ s-c2 nev))
+      (= {var-c}   (- mean-c2 (* mean-c mean-c)))
+      (= {v2err} (if (band (> var-c 0.) (> nev 1.)) {
+        (/ (sqrtf (/ var-c nev)) (* 2.0 v2val))
+      } { 0.0 }))
+      (= {v2-result} (join v2-result (list v2val)))
+      (= {v2-err}    (join v2-err    (list v2err)))
+      (print "Flow v2 |" lbl "v2{2}=" v2val "+/-" v2err)
+    } {
+      do
+      (= {v2-result} (join v2-result (list 0.)))
+      (= {v2-err}    (join v2-err    (list 0.)))
+      (print "Flow v2 |" lbl "mean_corr <= 0 — cannot compute v2")
+    })
+  } {
+    do
+    (= {v2-result} (join v2-result (list 0.)))
+    (= {v2-err}    (join v2-err    (list 0.)))
+    (print "Flow v2 |" lbl "no events")
+  })
+})
+
+;;; ── Step 5: canvas ───────────────────────────────────────────────────────
+(def {gr-v2} (doto (new TGraphErrors 4)
+  {SetTitle "v_{2}{2, |#Delta#eta|>1} — Pb-Pb 5.02 TeV;Centrality (%);v_{2}{2}"}
+  {SetMarkerStyle 20} {SetMarkerColor 2} {SetLineColor 2} {SetMarkerSize 0.8}))
+
+(dotimes {ci} 4 {
+  do
+  (= {x}   (nth ci v2-cent-x))
+  (= {v2v} (nth ci v2-result))
+  (= {v2e} (nth ci v2-err))
+  (.SetPoint      gr-v2 ci x v2v)
+  (.SetPointError gr-v2 ci 0. v2e)
+})
+
+(def {c-v2} (new TCanvas "c_v2" "Elliptic flow — Pb-Pb 5.02 TeV (LHC15o)" 600 500))
+(def {hframe-v2}
+  (doto (new TH1F "hframe_v2"
+             "v_{2}{2, |#Delta#eta|>1} — Pb-Pb 5.02 TeV;Centrality (%);v_{2}{2}"
+             1 0. 80.)
+    {SetDirectory 0} {SetStats 0} {SetMinimum 0.} {SetMaximum 0.08}))
+(.Draw hframe-v2 "AXIS")
+(.Draw gr-v2 "P SAME")
+(.Update c-v2)
+(.RaiseWindow c-v2)
+(print "Flow v2 | done.")

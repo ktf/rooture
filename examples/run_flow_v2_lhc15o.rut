@@ -1,0 +1,12 @@
+;;; examples/run_flow_v2_lhc15o.rut
+;;; v2{2,|Δη|>1} elliptic flow on LHC15o Pb-Pb 5.02 TeV open data.
+;;;
+;;; Usage:
+;;;   (load "examples/run_flow_v2_lhc15o.rut")
+
+(load "examples/datasets/lhc15o_245349.rut")
+(load stdlib.rut)
+(def {aod-paths} (take 10 lhc15o-245349-paths))
+(def {trk-tree}  "O2track")
+(def {col-tree}  "O2collision_001")
+(load "examples/flow_v2.rut")
