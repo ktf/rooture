@@ -233,3 +233,6 @@ in separate files within each skill's folder and referenced from `SKILL.md`.
 - `ccdb-proxy` — fetching calibration/PID objects from ALICE CCDB via the local
   credential proxy (`http://localhost:8888`). Covers auth, path for TPC BB params,
   `mPar` layout, and usage with `spectra_tpc.rut`.
+
+- `alice-datasets` — tree names, file paths, and branch names for known local datasets
+  (LHC15o, Run 3 AO2D). **Read this before running any example that loads AO2D data.**

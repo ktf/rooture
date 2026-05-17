@@ -282,7 +282,7 @@
 
 ;;; ── Step 5: canvas ───────────────────────────────────────────────────────
 (def {gr-v2} (doto (new TGraphErrors 4)
-  {SetTitle "v_{2}{2, |#Delta#eta|>1} — Pb-Pb 5.02 TeV;Centrality (%);v_{2}{2}"}
+  {SetTitle "v_{2}\{2, |#Delta#eta|>1\} — Pb-Pb 5.02 TeV;Centrality (%);v_{2}\{2\}"}
   {SetMarkerStyle 20} {SetMarkerColor 2} {SetLineColor 2} {SetMarkerSize 0.8}))
 
 (dotimes {ci} 4 {
@@ -297,7 +297,7 @@
 (def {c-v2} (new TCanvas "c_v2" "Elliptic flow — Pb-Pb 5.02 TeV (LHC15o)" 600 500))
 (def {hframe-v2}
   (doto (new TH1F "hframe_v2"
-             "v_{2}{2, |#Delta#eta|>1} — Pb-Pb 5.02 TeV;Centrality (%);v_{2}{2}"
+             "v_{2}\{2, |#Delta#eta|>1\} — Pb-Pb 5.02 TeV;Centrality (%);v_{2}\{2\}"
              1 0. 80.)
     {SetDirectory 0} {SetStats 0} {SetMinimum 0.} {SetMaximum 0.08}))
 (.Draw hframe-v2 "AXIS")

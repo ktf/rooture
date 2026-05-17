@@ -57,12 +57,12 @@
 ;;; ── Event selection parameters ───────────────────────────────────────────
 ;;; Set bcSOR = 0 to disable TF/ITS ROF border checks (pass all).
 ;;; Set to the actual first-BC-of-run value from the run CCDB page to enable.
-(def {bcSOR}     0)
-(def {nBCsPerTF} 456192)   ;;; 128 * 3564 (Run 3)
-(def {rofLength} 594)      ;;; ITS ROF length in BCs (Run 3)
-(def {rofOffset} 0)
-(def {tvx-bit}   -1)      ;;; -1 = skip TVX (fTriggerMask not filled in all datasets)
-(def {pvz-cut}   10.0)
+(default {bcSOR}     0)
+(default {nBCsPerTF} 456192)   ;;; 128 * 3564 (Run 3)
+(default {rofLength} 594)      ;;; ITS ROF length in BCs (Run 3)
+(default {rofOffset} 0)
+(default {tvx-bit}   -1)      ;;; -1 = skip TVX (fTriggerMask not filled in all datasets)
+(default {pvz-cut}   10.0)
 (load examples/eventsel.rut)
 
 ;;; ── Optional: fetch BB parameters from CCDB ─────────────────────────────
@@ -253,15 +253,30 @@
 (def {sub-ptr}
   (jitfn! "sub" float (\{{float a} {float b}} {(- a b)})))
 
-;;; DCA primary-track selection matching isGlobalTrack():
-;;;   |dcaXY| < 0.0105 + 0.035 / pT^1.1   (pT-parameterised, tight at low pT)
+;;; DCA primary-track selection.
+;;;
+;;; flat-dca-mode 0 (default): pT-parameterised cut matching isGlobalTrack()
+;;;   |dcaXY| < 0.0105 + 0.035 / pT^1.1   (tight at low pT, rejects Λ→pπ secondaries)
 ;;;   |dcaZ|  < 2.0 cm
-;;; The flat 2.4/3.2 cm cuts are track-quality only and let through Λ→pπ secondaries.
+;;;
+;;; flat-dca-mode 1: flat track-quality-only cuts (reproduces the secondary contamination
+;;;   that was present before the pT-parameterised cut was introduced)
+;;;   |dcaXY| < 2.4 cm,  |dcaZ| < 3.2 cm
+;;;
+;;; Set before loading to reproduce the old behaviour, e.g. to generate before/after plots:
+;;;   (def {flat-dca-mode} 1)
+;;;   (load "examples/spectra_tpc.rut")
+(default {flat-dca-mode} 0)
 (def {dca-ok-ptr}
-  (jitfn! "dca-ok" float (\{{float dxy} {float dz} {float pt}}
-    {(if (< (fabsf dxy) (+ 0.0105f (/ 0.0350f (powf (fabsf pt) 1.1f))))
-      {(if (< (fabsf dz) 2.0f) {1.0f} {0.0f})}
-      {0.0f})})))
+  (if (== flat-dca-mode 1)
+    {jitfn! "dca-ok-flat" float (\{{float dxy} {float dz} {float pt}}
+      {(if (< (fabsf dxy) 2.4f)
+        {(if (< (fabsf dz) 3.2f) {1.0f} {0.0f})}
+        {0.0f})})}
+    {jitfn! "dca-ok-pt" float (\{{float dxy} {float dz} {float pt}}
+      {(if (< (fabsf dxy) (+ 0.0105f (/ 0.0350f (powf (fabsf pt) 1.1f))))
+        {(if (< (fabsf dz) 2.0f) {1.0f} {0.0f})}
+        {0.0f})})}))
 
 ;;; mutable nCls threshold
 (def {min-cls-box} (new TArrayI 1))

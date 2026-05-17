@@ -36,12 +36,12 @@
 ;;; These are set here only as a fallback. When loading from spectra_tpc.rut
 ;;; or another script, define these BEFORE loading eventsel.rut so the
 ;;; jit-fns below capture your values at compile time.
-(def {bcSOR}     0)       ;;; 0 = unknown: disables TF/ROF border checks
-(def {nBCsPerTF} 456192)  ;;; 128 * 3564 (Run 3 default)
-(def {rofLength} 594)     ;;; ITS ROF length in BCs (Run 3)
-(def {rofOffset} 0)
-(def {tvx-bit}   -1)      ;;; -1 = skip TVX check; set to 0 for most Run 3 data
-(def {pvz-cut}   10.0)
+(default {bcSOR}     0)       ;;; 0 = unknown: disables TF/ROF border checks
+(default {nBCsPerTF} 456192)  ;;; 128 * 3564 (Run 3 default)
+(default {rofLength} 594)     ;;; ITS ROF length in BCs (Run 3)
+(default {rofOffset} 0)
+(default {tvx-bit}   -1)      ;;; -1 = skip TVX check; set to 0 for most Run 3 data
+(default {pvz-cut}   10.0)
 
 ;;; ── Tree name defaults (override before loading for non-standard layouts) ─
 (default {bc-tree}   "O2bc_001")
@@ -80,7 +80,7 @@
 
 ;;; ── pvZ cut jit-fn ───────────────────────────────────────────────────────
 (def {pvz-ok-ptr}
-  (jitfn! "pvz-ok" float (\{{float pvz}}
+  (jitfn! (concat "pvz-ok-" (str pvz-cut)) float (\{{float pvz}}
     {(if (< (fabsf pvz) pvz-cut) {1.0f} {0.0f})})))
 
 ;;; ── compute-evsel-tf ─────────────────────────────────────────────────────
