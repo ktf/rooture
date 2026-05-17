@@ -1,0 +1,25 @@
+;;; examples/inspect_aod.rut
+;;;
+;;; Inspect the structure of an AO2D file: list timeframes, trees, and branches.
+;;;
+;;; Usage:
+;;;   (def {aod-path} "/path/to/AO2D.root")
+;;;   (load "examples/inspect_aod.rut")
+
+(load stdlib.rut)
+(load rootlib.rut)
+
+(= {f} (::Open TFile aod-path))
+
+(print "=== Timeframes ===")
+(= {tf-names} (tfile-key-names-of-class f "TDirectoryFile"))
+(print tf-names)
+
+(print "=== Trees in first timeframe ===")
+(= {tf} (. Get f (fst tf-names)))
+(= {tree-names} (tfile-key-names-of-class tf "TTree"))
+(print tree-names)
+
+(print "=== Branches in O2track ===")
+(= {t} (. Get tf "O2track"))
+(print (tree-branch-names t))

@@ -1,0 +1,56 @@
+;;;
+;;; rootlib.rut — ROOT utility functions
+;;;
+;;; (load "rootlib.rut")
+;;; Requires stdlib.rut to be loaded first.
+;;;
+
+;;; ── TFile / TDirectory introspection ─────────────────────────────────────
+
+;;; (tfile-key-names f) → list of key name strings
+(fun {tfile-key-names f} {
+  do
+  (= {keys} (.GetListOfKeys f))
+  (= {acc}  nil)
+  (dotimes {i} (.GetEntries keys) {
+    = {acc} (join acc (list (.GetName (.At keys i))))
+  })
+  acc
+})
+
+;;; (tfile-key-names-of-class f cls) → list of key name strings filtered by class name
+(fun {tfile-key-names-of-class f cls} {
+  do
+  (= {keys} (.GetListOfKeys f))
+  (= {acc}  nil)
+  (dotimes {i} (.GetEntries keys) {
+    do
+    (= {k} (.At keys i))
+    (if (== (.GetClassName k) cls)
+      {= {acc} (join acc (list (.GetName k)))}
+      {})
+  })
+  acc
+})
+
+;;; (tree-branch-names t) → list of branch name strings for a TTree
+(fun {tree-branch-names t} {
+  do
+  (= {branches} (.GetListOfBranches t))
+  (= {acc} nil)
+  (dotimes {i} (.GetEntries branches) {
+    = {acc} (join acc (list (.GetName (.At branches i))))
+  })
+  acc
+})
+
+;;; (tfile-ls f) → print class and name of every key, return nil
+(fun {tfile-ls f} {
+  do
+  (= {keys} (.GetListOfKeys f))
+  (dotimes {i} (.GetEntries keys) {
+    do
+    (= {k} (.At keys i))
+    (print (.GetClassName k) (.GetName k))
+  })
+})
