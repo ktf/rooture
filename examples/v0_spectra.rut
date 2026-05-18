@@ -19,6 +19,10 @@
 ;;;   v0s-gr-lam-by-cent             — list of 4 TGraphErrors for Λ/Λ̄
 ;;;   c-v0spec                       — canvas
 
+;;; ── Analysis ─────────────────────────────────────────────────────────────
+;;; Call (run) to execute.
+(fun {run} {do
+
 ;;; ── Step 1: collect all {aod-path tf-name} pairs ────────────────────────
 (def {v0spec-tf-pairs}
   (do
@@ -740,3 +744,11 @@
 (.Close v0s-fout)
 (print "V0 spectra | saved to" v0s-output-file)
 (print "V0 spectra | done.")
+
+}) ;;; end run
+
+(provide {run
+          h2-k0s-c0 h2-k0s-c1 h2-k0s-c2 h2-k0s-c3
+          h2-lam-c0 h2-lam-c1 h2-lam-c2 h2-lam-c3
+          v0s-gr-k0s-by-cent v0s-gr-lam-by-cent
+          c-v0spec})

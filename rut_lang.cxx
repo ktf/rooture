@@ -158,6 +158,17 @@ void lenv_def(lenv* e, lval* k, lval* v) {
   lenv_put(e, k, v);
 }
 
+/* Look up k only in the current (local) frame — do not walk the parent chain.
+ * Returns NULL if not found (unlike lenv_get which auto-creates a string). */
+lval* lenv_get_local(lenv* e, lval* k) {
+  for (int i = 0; i < e->count; i++) {
+    if (strcmp(e->syms[i], k->sym) == 0) {
+      return lval_copy(e->vals[i]);
+    }
+  }
+  return NULL;
+}
+
 lval* lval_eval(lenv* e, lval* v) {
   if (v->type == LVAL_SYM) {
     /* @name — look up a TNamed ROOT object by name */

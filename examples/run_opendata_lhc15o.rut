@@ -12,3 +12,4 @@
 (def {bc-tree}        "O2bc_001")
 (def {its-map-branch} "fITSClusterSizes")
 (load "examples/spectra_tpc.rut")
+(run)

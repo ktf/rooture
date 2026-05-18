@@ -24,6 +24,7 @@
 #include "TMethodArg.h"
 #include "TFile.h"
 #include "TStyle.h"
+#include "TEnv.h"
 #include "TRandom.h"
 #include "TObjString.h"
 #include "TCollection.h"
@@ -291,6 +292,7 @@ lenv* lenv_new(void);
 void  lenv_del(lenv* e);
 lenv* lenv_copy(lenv* e);
 lval* lenv_get(lenv* e, lval* v);
+lval* lenv_get_local(lenv* e, lval* k);
 void  lenv_put(lenv* e, lval* k, lval* v);
 void  lenv_def(lenv* e, lval* k, lval* v);
 

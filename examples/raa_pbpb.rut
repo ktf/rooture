@@ -29,6 +29,10 @@
 ;;; Helper: map any float column to 1.0 (event counting)
 (def {ones-ptr} (jitfn! "ones" float (\{{float x}} {1.0f})))
 
+;;; ── Analysis ─────────────────────────────────────────────────────────────
+;;; Call (run) to execute.
+(fun {run} {do
+
 ;;; ── Histograms ───────────────────────────────────────────────────────────
 (def {h-pt-c0} (doto (new TH1F "hpt_c0" "0-10%;p_{T} (GeV/c);Tracks"   100 0. 10.) {SetDirectory 0} {Sumw2}))
 (def {h-pt-c1} (doto (new TH1F "hpt_c1" "10-30%;p_{T} (GeV/c);Tracks"  100 0. 10.) {SetDirectory 0} {Sumw2}))
@@ -214,3 +218,10 @@
 } {
   print "WARNING: no events in one or more centrality classes — skipping R_CP (check EOS access)"
 })
+
+}) ;;; end run
+
+(provide {run
+          h-pt-c0 h-pt-c1 h-pt-c2 h-pt-c3
+          h-nev-c0 h-nev-c1 h-nev-c2 h-nev-c3
+          c-cent h-rcp-c0 h-rcp-c1 h-rcp-c2 c-rcp})

@@ -265,6 +265,6 @@
     (col-and m-ok tpc-de tof-de))}))
 
 
-(print "pid_tpc.rut loaded."
-  "bb0=" bb0 "bb-res=" bb-res "nsigma-max=" nsigma-max
-  "p-min-pid=" p-min-pid "sig-min=" sig-min)
+(provide {pid-masks
+          bb0 bb1 bb2 bb3 bb4 bb-res nsigma-max p-min-pid sig-min
+          tof-c pid-m-el pid-m-mu pid-m-pi pid-m-ka pid-m-pr pid-m-de})

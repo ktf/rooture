@@ -15,3 +15,4 @@
 (def {its-map-branch} "fITSClusterSizes")
 (load "examples/spectra_tpc.rut")
 (load "examples/raa_pbpb.rut")
+(run)

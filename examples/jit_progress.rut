@@ -43,3 +43,5 @@
     (jitfn-ptr fn)
   }))
 } {})
+
+(provide {jitfn!})

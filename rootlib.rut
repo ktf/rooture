@@ -54,3 +54,5 @@
     (print (.GetClassName k) (.GetName k))
   })
 })
+
+(provide {tfile-key-names tfile-key-names-of-class tree-branch-names tfile-ls})

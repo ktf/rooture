@@ -135,11 +135,4 @@
   col-and (nth 0 flags) (nth 1 flags) (nth 2 flags) (nth 4 flags)
 }))
 
-(print "eventsel.rut loaded."
-  "bcSOR=" bcSOR
-  "nBCsPerTF=" nBCsPerTF
-  "rofLength=" rofLength
-  "tvx-bit=" tvx-bit
-  "pvz-cut=" pvz-cut
-  "bc-tree=" bc-tree
-  "coll-tree=" coll-tree)
+(provide {compute-evsel-tf evsel-and evsel-sel8})

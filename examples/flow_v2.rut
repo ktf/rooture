@@ -33,6 +33,10 @@
 (default {v2-pt-max}    5.0f)
 (default {v2-eta-max}   0.8f)
 
+;;; ── Analysis ─────────────────────────────────────────────────────────────
+;;; Call (run) to execute.
+(fun {run} {do
+
 ;;; ── Step 1: collect TF pairs ────────────────────────────────────────────
 (def {v2-tf-pairs}
   (do
@@ -305,3 +309,7 @@
 (.Update c-v2)
 (.RaiseWindow c-v2)
 (print "Flow v2 | done.")
+
+}) ;;; end run
+
+(provide {run v2-result v2-err c-v2})

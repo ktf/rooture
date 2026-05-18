@@ -1383,6 +1383,7 @@ void lenv_add_builtins_root(lenv* e) {
   lenv_add_global_object(e, "gDirectory",   gDirectory,   TClass::GetClass("TDirectory"));
   lenv_add_global_object(e, "gRandom",      gRandom,      TClass::GetClass("TRandom"));
   lenv_add_global_object(e, "gStyle",       gStyle,       TClass::GetClass("TStyle"));
+  lenv_add_global_object(e, "gEnv",         gEnv,         TClass::GetClass("TEnv"));
   /* Register the callable bridge by address so Cling's JIT can call it
      without relying on symbol export (-rdynamic/-export_dynamic). */
   gInterpreter->Declare(

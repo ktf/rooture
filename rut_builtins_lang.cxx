@@ -585,10 +585,30 @@ static int paren_depth(const std::string& s) {
   return depth;
 }
 
+/* Per-load provide accumulator — set by builtin_provide, consumed by builtin_load.
+ * Using a thread-local avoids polluting the env and handles nested loads correctly. */
+static thread_local lval* g_provide_pending = nullptr;
+
+/* (provide {sym1 sym2 ...}) — declare a module's public API.
+ * Stores the symbol list so builtin_load can return it as the manifest. */
+lval* builtin_provide(lenv* e, lval* a) {
+  LASSERT_NUM("provide", a, 1);
+  LASSERT_TYPE("provide", a, 0, LVAL_QEXPR);
+  for (int i = 0; i < a->cell[0]->count; i++) {
+    LASSERT(a, a->cell[0]->cell[i]->type == LVAL_SYM,
+            "'provide' list must contain symbols, got %s at index %i",
+            ltype_name(a->cell[0]->cell[i]->type), i);
+  }
+  if (g_provide_pending) lval_del(g_provide_pending);
+  g_provide_pending = lval_copy(a->cell[0]);
+  lval_del(a);
+  return lval_sexpr();
+}
+
 lval* builtin_load(lenv* e, lval* a) {
   LASSERT_NUM("load", a, 1);
   LASSERT_TYPE("load", a, 0, LVAL_STR);
-  
+
   /* Resolve filename against load_path if not directly accessible */
   std::string filename = a->cell[0]->str;
   char* expanded = gSystem->ExpandPathName(filename.c_str());
@@ -607,36 +627,45 @@ lval* builtin_load(lenv* e, lval* a) {
   /* Parse File given by string name */
   mpc_result_t r;
   if (mpc_parse_contents(filename.c_str(), Lispy, &r)) {
-    
+
     /* Read contents */
     lval* expr = lval_read((mpc_ast_t *)r.output);
     mpc_ast_delete((mpc_ast_t *)r.output);
 
-    /* Evaluate each Expression */
+    /* Save outer provide so nested loads don't stomp it */
+    lval* outer_pending = g_provide_pending;
+    g_provide_pending = nullptr;
+
+    /* Evaluate each Expression in the current environment */
     while (expr->count) {
       lval* x = lval_eval(e, lval_pop(expr, 0));
-      /* If Evaluation leads to error print it */
       if (x->type == LVAL_ERR) { lval_println(x); }
       lval_del(x);
     }
-    
-    /* Delete expressions and arguments */
-    lval_del(expr);    
+    lval_del(expr);
+
+    /* Collect this file's manifest, then restore outer pending */
+    lval* result;
+    if (g_provide_pending) {
+      result = g_provide_pending;   /* transfer ownership */
+    } else {
+      result = lval_sexpr();
+    }
+    g_provide_pending = outer_pending;
+
     lval_del(a);
-    
-    /* Return empty list */
-    return lval_sexpr();
-    
+    return result;
+
   } else {
     /* Get Parse Error as String */
     char* err_msg = mpc_err_string(r.error);
     mpc_err_delete(r.error);
-    
+
     /* Create new error message using it */
     lval* err = lval_err("Could not load Library %s", err_msg);
     free(err_msg);
     lval_del(a);
-    
+
     /* Cleanup and return error */
     return err;
   }
@@ -1217,6 +1246,7 @@ void lenv_add_builtins_lang(lenv* e) {
   lenv_add_builtin(e, "<=", builtin_le);
   /* Helpers */
   lenv_add_builtin(e, "load",        builtin_load);
+  lenv_add_builtin(e, "provide",     builtin_provide);
   lenv_add_builtin(e, "error",       builtin_error);
   lenv_add_builtin(e, "print",       builtin_print);
   lenv_add_builtin(e, "exit",        builtin_exit);

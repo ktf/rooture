@@ -12,3 +12,4 @@
 (def {col-tree} "O2collision_001")
 (def {bz}       0.5)
 (load "examples/v0_spectra.rut")
+(run)

@@ -10,3 +10,4 @@
 (def {trk-tree}  "O2track")
 (def {col-tree}  "O2collision_001")
 (load "examples/flow_v2.rut")
+(run)

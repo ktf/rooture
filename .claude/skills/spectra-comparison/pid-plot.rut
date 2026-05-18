@@ -2,7 +2,7 @@
 ;;;
 ;;; Prerequisites: spectra_tpc.rut must have been loaded, which defines:
 ;;;   tf-pairs, extra-tree, trk-tree, coll-tree
-;;;   sub-ptr, eta-ok-ptr, cls-ok-ptr, its-ok-ptr, tpcchi2-ok-ptr, crows-ok-ptr, mul-ptr
+;;;   sub-ptr, eta-ok-ptr, cls-ok-ptr, its-ok-ptr, tpcchi2-ok-ptr, crows-ok-ptr
 ;;;   compute-evsel-tf, evsel-and
 ;;;   bb0..bb4, pid-m-el..pid-m-de
 
@@ -37,11 +37,7 @@
   (= {m-its}     (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c)))
   (= {m-tpcq}    (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
   (= {m-crows}   (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))
-  (= {mask}      (col-zip-ptr mul-ptr m-ev
-                   (col-zip-ptr mul-ptr m-eta
-                     (col-zip-ptr mul-ptr m-cls
-                       (col-zip-ptr mul-ptr m-its
-                         (col-zip-ptr mul-ptr m-tpcq m-crows))))))
+  (= {mask}      (col-and m-ev m-eta m-cls m-its m-tpcq m-crows))
   (col-fill-h2 h2 (col-mask mask pinner-c) (col-mask mask sig-c))
 })
 
