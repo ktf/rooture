@@ -40,6 +40,8 @@ struct CachedMethodCall {
 };
 static std::unordered_map<std::string, CachedMethodCall> g_method_cache;
 
+void rut_method_cache_clear() { g_method_cache.clear(); }
+
 // Typed argument collected before lval_to_cpp_arg consumes the lval list.
 struct CacheArg {
   int         type; // LVAL_NUM / LVAL_FLOAT / LVAL_STR / LVAL_TOBJ

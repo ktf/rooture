@@ -486,6 +486,7 @@ void lval_print(lval* v) {
       rut_print("<column: %zu entries [%s]>", cp->n,
                 cp->dtype == COL_FLOAT32 ? "f32" :
                 cp->dtype == COL_FLOAT64 ? "f64" :
+                cp->dtype == COL_FLOAT16 ? "f16" :
                 cp->dtype == COL_INT32   ? "i32" :
                 cp->dtype == COL_UINT8   ? "u8"  : "?");
     } break;
@@ -602,6 +603,7 @@ static void lval_sprint_impl(lval* v, std::string& out, int& budget) {
       snprintf(buf, sizeof(buf), "<column: %zu entries [%s]>", cp->n,
                cp->dtype == COL_FLOAT32 ? "f32" :
                cp->dtype == COL_FLOAT64 ? "f64" :
+               cp->dtype == COL_FLOAT16 ? "f16" :
                cp->dtype == COL_INT32   ? "i32" :
                cp->dtype == COL_UINT8   ? "u8"  : "?");
       out += buf; break;

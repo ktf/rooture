@@ -1,0 +1,143 @@
+;;; tests/col_f16.rut — regression tests for col-cast-f16 / COL_FLOAT16
+;;;
+;;; Exercises every compute path that auto-promotes float16 → float32:
+;;;   col-dtype, col-ref, col->list, col-cast-f32, col-reduce, col-map,
+;;;   col-zip, col-jit-fn, col-fill-h1
+;;; Also checks DCA-range round-trip precision (< 1 μm for values 0.0001–0.1 cm).
+;;;
+;;; Run via ctest or:
+;;;   rooture tests/col_f16.rut
+
+(load stdlib.rut)
+
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)}}))
+
+;;; floating-point near-equal
+(def {assert-near} (\{label got expected tol} {do
+  (= {diff} (if (< (- got expected) 0.) {(- 0. (- got expected))} {(- got expected)}))
+  (if (<= diff tol)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected "  |diff|:" diff "  tol:" tol)
+      (exit 1)})}))
+
+;;; ── create synthetic test data ─────────────────────────────────────────────
+;;; x = [1, 2, 3, 4]  (all exactly representable in float16)
+;;; y = [0.5, 0.5, 0.5, 0.5]  (exact in float16)
+;;; d = [0.0105, 0.035, 0.0001, 0.099]  (DCA-range values)
+
+(process-line "{
+  TFile* _f1 = TFile::Open(\"/tmp/_rut_f16test.root\",\"RECREATE\");
+  TTree* _t1 = new TTree(\"T\",\"T\");
+  float _x=0, _y=0;
+  _t1->Branch(\"x\",&_x,\"x/F\");
+  _t1->Branch(\"y\",&_y,\"y/F\");
+  float _xs[]={1.f,2.f,3.f,4.f};
+  for(int _i=0;_i<4;_i++){_x=_xs[_i];_y=0.5f;_t1->Fill();}
+  _t1->Write(); delete _f1;
+}")
+(process-line "{
+  TFile* _f2 = TFile::Open(\"/tmp/_rut_f16test_dca.root\",\"RECREATE\");
+  TTree* _t2 = new TTree(\"T\",\"T\");
+  float _d=0;
+  _t2->Branch(\"d\",&_d,\"d/F\");
+  float _ds[]={0.0105f,0.035f,0.0001f,0.099f};
+  for(int _i=0;_i<4;_i++){_d=_ds[_i];_t2->Fill();}
+  _t2->Write(); delete _f2;
+}")
+
+(= {x-f32} (load-branch "/tmp/_rut_f16test.root"     "T" "x"))
+(= {y-f32} (load-branch "/tmp/_rut_f16test.root"     "T" "y"))
+(= {d-f32} (load-branch "/tmp/_rut_f16test_dca.root" "T" "d"))
+
+;;; cast to float16
+(= {x-f16} (col-cast-f16 x-f32))
+(= {y-f16} (col-cast-f16 y-f32))
+(= {d-f16} (col-cast-f16 d-f32))
+
+;;; jit helpers
+(def {add-jit} (jit-fn float (\{{float a} {float b}} {(+ a b)})))
+(def {dbl-jit} (jit-fn float (\{{float x}}           {(* x 2.0f)})))
+(def {col-sum} (\{c} {(col-reduce add-jit 0. c)}))
+
+;;; col-jit-fn helpers
+(def {neg-jitfn} (col-jit-fn {float} (\{{col x}} {(- 0.0f x)})))
+(def {add-jitfn} (col-jit-fn {float} (\{{col a} {col b}} {(+ a b)})))
+
+;;; ── 1. col-dtype ───────────────────────────────────────────────────────────
+(assert-eq   "col-dtype f32"         (col-dtype x-f32) "float")
+(assert-eq   "col-dtype f16"         (col-dtype x-f16) "float16")
+
+;;; ── 2. col-length unchanged after cast ─────────────────────────────────────
+(assert-eq   "col-length f32"        (col-length x-f32) 4)
+(assert-eq   "col-length f16"        (col-length x-f16) 4)
+
+;;; ── 3. col-ref on float16 ──────────────────────────────────────────────────
+(assert-near "col-ref f16[0]"        (col-ref x-f16 0) 1.0 1e-5)
+(assert-near "col-ref f16[1]"        (col-ref x-f16 1) 2.0 1e-5)
+(assert-near "col-ref f16[2]"        (col-ref x-f16 2) 3.0 1e-5)
+(assert-near "col-ref f16[3]"        (col-ref x-f16 3) 4.0 1e-5)
+
+;;; ── 4. col->list on float16 ────────────────────────────────────────────────
+(= {xl} (col->list x-f16))
+(assert-eq   "col->list len"         (len xl) 4)
+(assert-near "col->list [0]"         (nth 0 xl) 1.0 1e-5)
+(assert-near "col->list [3]"         (nth 3 xl) 4.0 1e-5)
+
+;;; ── 5. col-cast-f32 round-trip ─────────────────────────────────────────────
+(= {x-rt} (col-cast-f32 x-f16))
+(assert-eq   "round-trip dtype"      (col-dtype x-rt) "float")
+(assert-near "round-trip sum"        (col-sum x-rt) 10.0 1e-4)
+
+;;; ── 6. col-reduce on float16 (auto-promotion) ──────────────────────────────
+(assert-near "col-reduce f16 x"      (col-sum x-f16) 10.0 1e-4)
+(assert-near "col-reduce f16 y"      (col-sum y-f16)  2.0 1e-4)
+
+;;; ── 7. col-map on float16 ──────────────────────────────────────────────────
+(= {x2} (col-map dbl-jit x-f16))
+(assert-near "col-map dbl sum"       (col-sum x2) 20.0 1e-4)
+
+;;; ── 8. col-zip f16+f16 — result [1.5, 2.5, 3.5, 4.5], sum=12 ─────────────
+(= {xy-ff} (col-zip add-jit x-f16 y-f16))
+(assert-near "col-zip f16+f16 sum"   (col-sum xy-ff) 12.0 1e-4)
+
+;;; ── 9. col-zip f16+f32 mixed ───────────────────────────────────────────────
+(= {xy-fm} (col-zip add-jit x-f16 y-f32))
+(assert-near "col-zip f16+f32 sum"   (col-sum xy-fm) 12.0 1e-4)
+
+;;; ── 10. col-jit-fn single f16 input — negate, sum = -10 ───────────────────
+(= {xneg} (neg-jitfn x-f16))
+(assert-near "col-jitfn negate sum"  (col-sum xneg) -10.0 1e-4)
+
+;;; ── 11. col-jit-fn two f16 inputs — add, sum = 12 ─────────────────────────
+(= {xy-jit} (add-jitfn x-f16 y-f16))
+(assert-near "col-jitfn add sum"     (col-sum xy-jit) 12.0 1e-4)
+
+;;; ── 12. col-fill-h1 with f16 ───────────────────────────────────────────────
+(= {h} (doto (new TH1F "hf16" ";x;counts" 10 0. 5.) {SetDirectory 0}))
+(col-fill-h1 h x-f16)
+(assert-near "col-fill-h1 entries"   (.GetEntries h) 4.0 0.5)
+(assert-near "col-fill-h1 mean"      (.GetMean h)    2.5 0.01)
+
+;;; ── 13. DCA-range precision: round-trip error < 1 μm = 1e-4 cm ────────────
+;;; FP16 resolution at 0.1 cm is ~2^-14 ≈ 6e-5 cm, well inside the tightest
+;;; DCA cut (0.0105 cm).
+(= {d-rt} (col-cast-f32 d-f16))
+(assert-near "DCA d[0]=0.0105 1μm"  (col-ref d-rt 0) (col-ref d-f32 0) 1e-4)
+(assert-near "DCA d[1]=0.035  1μm"  (col-ref d-rt 1) (col-ref d-f32 1) 1e-4)
+(assert-near "DCA d[2]=0.0001 1μm"  (col-ref d-rt 2) (col-ref d-f32 2) 1e-4)
+(assert-near "DCA d[3]=0.099  1μm"  (col-ref d-rt 3) (col-ref d-f32 3) 1e-4)
+
+;;; ── 14. idempotent: f16→f16 ────────────────────────────────────────────────
+(= {x-f16-2} (col-cast-f16 x-f16))
+(assert-eq   "f16->f16 dtype"        (col-dtype x-f16-2) "float16")
+(assert-near "f16->f16 sum"          (col-sum x-f16-2) 10.0 1e-4)
+
+;;; ── done ───────────────────────────────────────────────────────────────────
+(print "All col-f16 tests passed.")
+(exit 0)

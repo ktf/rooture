@@ -271,6 +271,7 @@ enum ColDtype {
   COL_INT16,   COL_UINT16,
   COL_INT8,    COL_UINT8,
   COL_BOOL,
+  COL_FLOAT16,  // storage-only; auto-promotes to float32 in all compute paths
 };
 
 struct RutColumn {
@@ -311,7 +312,8 @@ std::string lval_to_cpp_arg(lenv* e, lval* a, int offset,
 void lenv_add_builtins_lang(lenv* e);
 void lenv_add_builtins_root(lenv* e);
 void lenv_add_builtins_jitfn(lenv* e);
-void rut_file_cache_clear();   // close all cached TFiles (main thread)
+void rut_file_cache_clear();    // close all cached TFiles (main thread)
+void rut_method_cache_clear();  // destroy TMethodCall cache while gCling is alive
 void lenv_add_builtins_column(lenv* e);
 void lenv_add_builtins_net(lenv* e);
 void lenv_add_builtins(lenv* e);

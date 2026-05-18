@@ -701,6 +701,10 @@ lval* builtin_exit(lenv* e, lval* a) {
   LASSERT_NUM("exit", a, 1);
   LASSERT_TYPE("exit", a, 0, LVAL_NUM);
 
+  // Destroy the TMethodCall cache while gCling is still alive.
+  // If we let it be destroyed by the static-destructor sequence after exit(),
+  // gCling is already null and TMethodCall::~TMethodCall() crashes.
+  rut_method_cache_clear();
   exit(a->cell[0]->num);
 
   /* Delete arguments and return */

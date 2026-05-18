@@ -99,6 +99,7 @@ static size_t col_dtype_size(int d) {
     case COL_FLOAT32:
     case COL_INT32:
     case COL_UINT32:               return 4;
+    case COL_FLOAT16:
     case COL_INT16:
     case COL_UINT16:               return 2;
     case COL_INT8:
@@ -121,8 +122,25 @@ static const char* col_dtype_name(int d) {
     case COL_INT8:    return "char";
     case COL_UINT8:   return "unsigned char";
     case COL_BOOL:    return "bool";
+    case COL_FLOAT16: return "float16";
     default:          return "unknown";
   }
+}
+
+// ---------------------------------------------------------------------------
+// col_promote_to_f32 — if col is COL_FLOAT16, return a new float32 column;
+// otherwise return the same shared_ptr unchanged (zero extra allocation).
+// Called at the entry of every compute path so FP16 is storage-only.
+// ---------------------------------------------------------------------------
+static RutColumnPtr col_promote_to_f32(const RutColumnPtr& c) {
+  if (c->dtype != COL_FLOAT16) return c;
+  size_t n    = c->n;
+  float* out  = (float*)col_alloc(n ? n * sizeof(float) : sizeof(float));
+  _Float16* in = (_Float16*)c->data;
+  for (size_t i = 0; i < n; i++) out[i] = (float)in[i];
+  auto r = std::make_shared<RutColumn>();
+  r->dtype = COL_FLOAT32; r->n = n; r->data = out;
+  return r;
 }
 
 // Parse a C type name string to a ColDtype, returns -1 if unknown.
@@ -404,8 +422,9 @@ static lval* builtin_jitfn_ptr(lenv* /*e*/, lval* a) {
 // ---------------------------------------------------------------------------
 // out_dtype == -1 means "same as input dtype"
 static lval* col_map_impl(void* fp, RutColumnPtr& in_col, int out_dtype = -1) {
-  size_t n      = in_col->n;
-  int    idtype = in_col->dtype;
+  RutColumnPtr promoted = col_promote_to_f32(in_col);  // no-op if not FP16
+  size_t n      = promoted->n;
+  int    idtype = promoted->dtype;
   int    odtype = (out_dtype < 0) ? idtype : out_dtype;
   size_t oesz   = col_dtype_size(odtype);
   void*  out    = col_alloc(n ? n * oesz : oesz);
@@ -413,7 +432,7 @@ static lval* col_map_impl(void* fp, RutColumnPtr& in_col, int out_dtype = -1) {
 
 #define TYPED_MAP(Tin, Tout) do { \
     auto f = (Tout(*)(Tin))fp; \
-    Tin*  in  = (Tin*)in_col->data; \
+    Tin*  in  = (Tin*)promoted->data; \
     Tout* out2 = (Tout*)out; \
     for (size_t i = 0; i < n; i++) out2[i] = f(in[i]); \
   } while (0)
@@ -453,8 +472,9 @@ static lval* col_map_impl(void* fp, RutColumnPtr& in_col, int out_dtype = -1) {
 }
 
 static lval* col_filter_impl(void* fp, RutColumnPtr& in_col) {
-  size_t n     = in_col->n;
-  int    dtype = in_col->dtype;
+  RutColumnPtr promoted = col_promote_to_f32(in_col);  // no-op if not FP16
+  size_t n     = promoted->n;
+  int    dtype = promoted->dtype;
   size_t esz   = col_dtype_size(dtype);
   void*  out   = col_alloc(n * esz);
   if (!out) return lval_err("col-filter: out of memory");
@@ -462,7 +482,7 @@ static lval* col_filter_impl(void* fp, RutColumnPtr& in_col) {
 
 #define TYPED_FILTER(T) do { \
     auto f = (bool(*)(T))fp; \
-    T* in  = (T*)in_col->data; \
+    T* in  = (T*)promoted->data; \
     T* o   = (T*)out; \
     for (size_t i = 0; i < n; i++) if (f(in[i])) o[out_n++] = in[i]; \
   } while (0)
@@ -489,14 +509,15 @@ static lval* col_filter_impl(void* fp, RutColumnPtr& in_col) {
 }
 
 static lval* col_reduce_impl(void* fp, lval* init, RutColumnPtr& col) {
-  size_t n     = col->n;
-  int    dtype = col->dtype;
+  RutColumnPtr promoted = col_promote_to_f32(col);  // no-op if not FP16
+  size_t n     = promoted->n;
+  int    dtype = promoted->dtype;
   lval*  result = nullptr;
 
 #define TYPED_REDUCE(T) do { \
     auto f = (T(*)(T,T))fp; \
     T acc = (T)(init->type == LVAL_FLOAT ? init->floating : (double)init->num); \
-    T* p  = (T*)col->data; \
+    T* p  = (T*)promoted->data; \
     for (size_t i = 0; i < n; i++) acc = f(acc, p[i]); \
     result = (dtype == COL_FLOAT32 || dtype == COL_FLOAT64) \
              ? lval_floating((double)acc) : lval_num((long)acc); \
@@ -520,27 +541,28 @@ static lval* col_reduce_impl(void* fp, lval* init, RutColumnPtr& col) {
 }
 
 static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx) {
-  auto& c0  = col_of(a->cell[first_col_idx]);
-  size_t n  = c0->n;
-  int dtype = c0->dtype;
+  // Promote any FP16 inputs to float32 (zero-cost for non-FP16 columns).
+  std::vector<RutColumnPtr> cols(ncols);
+  for (int i = 0; i < ncols; i++)
+    cols[i] = col_promote_to_f32(col_of(a->cell[first_col_idx + i]));
+  size_t n   = cols[0]->n;
+  int  dtype = cols[0]->dtype;
   size_t esz = col_dtype_size(dtype);
   void* out  = col_alloc(n * esz);
   if (!out) return lval_err("col-zip: out of memory");
 
 #define ZIP2(T) do { \
-    auto f=(T(*)(T,T))fp; T* pa=(T*)col_of(a->cell[first_col_idx])->data; \
-    T* pb=(T*)col_of(a->cell[first_col_idx+1])->data; T* po=(T*)out; \
+    auto f=(T(*)(T,T))fp; T* pa=(T*)cols[0]->data; \
+    T* pb=(T*)cols[1]->data; T* po=(T*)out; \
     for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i]); } while(0)
 #define ZIP3(T) do { \
-    auto f=(T(*)(T,T,T))fp; T* pa=(T*)col_of(a->cell[first_col_idx])->data; \
-    T* pb=(T*)col_of(a->cell[first_col_idx+1])->data; \
-    T* pc=(T*)col_of(a->cell[first_col_idx+2])->data; T* po=(T*)out; \
+    auto f=(T(*)(T,T,T))fp; T* pa=(T*)cols[0]->data; \
+    T* pb=(T*)cols[1]->data; T* pc=(T*)cols[2]->data; T* po=(T*)out; \
     for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i],pc[i]); } while(0)
 #define ZIP4(T) do { \
-    auto f=(T(*)(T,T,T,T))fp; T* pa=(T*)col_of(a->cell[first_col_idx])->data; \
-    T* pb=(T*)col_of(a->cell[first_col_idx+1])->data; \
-    T* pc=(T*)col_of(a->cell[first_col_idx+2])->data; \
-    T* pd=(T*)col_of(a->cell[first_col_idx+3])->data; T* po=(T*)out; \
+    auto f=(T(*)(T,T,T,T))fp; T* pa=(T*)cols[0]->data; \
+    T* pb=(T*)cols[1]->data; T* pc=(T*)cols[2]->data; \
+    T* pd=(T*)cols[3]->data; T* po=(T*)out; \
     for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i],pc[i],pd[i]); } while(0)
 #define DISPATCH_ZIP(T) switch(ncols){case 2:ZIP2(T);break;case 3:ZIP3(T);break;case 4:ZIP4(T);break;}
   switch (dtype) {
@@ -647,6 +669,7 @@ static lval* builtin_col_ref(lenv* /*e*/, lval* a) {
     case COL_INT8:    r = lval_num(((int8_t*)col->data)[idx]);             break;
     case COL_UINT8:   r = lval_num((long)((uint8_t*)col->data)[idx]);      break;
     case COL_BOOL:    r = lval_num(((char*)col->data)[idx] ? 1 : 0);       break;
+    case COL_FLOAT16: r = lval_floating((double)((_Float16*)col->data)[idx]); break;
     default:          r = lval_err("col-ref: unsupported dtype"); break;
   }
   lval_del(a);
@@ -680,6 +703,7 @@ static lval* builtin_col_to_list(lenv* /*e*/, lval* a) {
       case COL_INT8:    elem = lval_num(((int8_t*)col->data)[i]);          break;
       case COL_UINT8:   elem = lval_num((long)((uint8_t*)col->data)[i]);   break;
       case COL_BOOL:    elem = lval_num(((char*)col->data)[i] ? 1 : 0);    break;
+      case COL_FLOAT16: elem = lval_floating((double)((_Float16*)col->data)[i]); break;
       default:          elem = lval_num(0); break;
     }
     lval_add(q, elem);
@@ -1002,6 +1026,7 @@ static lval* builtin_col_fill_h1(lenv* /*e*/, lval* a) {
     case COL_INT8:    FILL_LOOP(int8_t);   break;
     case COL_UINT8:   FILL_LOOP(uint8_t);  break;
     case COL_BOOL:    FILL_LOOP(char);     break;
+    case COL_FLOAT16: FILL_LOOP(_Float16); break;
     default:
       lval_del(a);
       return lval_err("col-fill-h1: unsupported dtype");
@@ -1113,12 +1138,55 @@ static lval* builtin_col_cast_f32(lenv* /*e*/, lval* a) {
     case COL_INT8:    CAST32(int8_t);   break;
     case COL_UINT8:   CAST32(uint8_t);  break;
     case COL_BOOL:    CAST32(char);     break;
+    case COL_FLOAT16: CAST32(_Float16); break;
     default: free(out); lval_del(a); return lval_err("col-cast-f32: unsupported dtype");
   }
 #undef CAST32
   lval_del(a);
   auto c = std::make_shared<RutColumn>();
   c->dtype = COL_FLOAT32; c->n = n; c->data = out;
+  return lval_column(std::move(c));
+}
+
+// ---------------------------------------------------------------------------
+// (col-cast-f16 col) → float16 column
+// Compresses any numeric column to float16 storage (2 bytes/element).
+// Safe for values in the cm range (DCA, vertex position, etc.): FP16 gives
+// ~μm precision which is well within typical cut thresholds.
+// All compute builtins (col-map-ptr, col-zip-ptr, col-jit-fn, col-fill-h1)
+// auto-promote float16 columns back to float32 transparently.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_cast_f16(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-cast-f16", a, 1);
+  LASSERT_TYPE("col-cast-f16", a, 0, LVAL_COLUMN);
+  auto& col  = col_of(a->cell[0]);
+  if (col->dtype == COL_FLOAT16) {
+    // Already float16 — return the same column (idempotent, no copy needed).
+    lval* r = lval_column(RutColumnPtr(col));
+    lval_del(a);
+    return r;
+  }
+  size_t n   = col->n;
+  _Float16* out = (_Float16*)col_alloc(n ? n * sizeof(_Float16) : sizeof(_Float16));
+  if (!out) { lval_del(a); return lval_err("col-cast-f16: out of memory"); }
+#define CAST16(T) do { T* p=(T*)col->data; for(size_t i=0;i<n;i++) out[i]=(_Float16)p[i]; } while(0)
+  switch (col->dtype) {
+    case COL_FLOAT32: CAST16(float);    break;
+    case COL_FLOAT64: CAST16(double);   break;
+    case COL_INT64:   CAST16(int64_t);  break;
+    case COL_UINT64:  CAST16(uint64_t); break;
+    case COL_INT32:   CAST16(int32_t);  break;
+    case COL_UINT32:  CAST16(uint32_t); break;
+    case COL_INT16:   CAST16(int16_t);  break;
+    case COL_UINT16:  CAST16(uint16_t); break;
+    case COL_INT8:    CAST16(int8_t);   break;
+    case COL_UINT8:   CAST16(uint8_t);  break;
+    default: free(out); lval_del(a); return lval_err("col-cast-f16: unsupported dtype");
+  }
+#undef CAST16
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = COL_FLOAT16; c->n = n; c->data = out;
   return lval_column(std::move(c));
 }
 
@@ -1675,6 +1743,7 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "col-fill-mean-h1", builtin_col_fill_mean_h1);
   lenv_add_builtin(e, "col-fill-h2",    builtin_col_fill_h2);
   lenv_add_builtin(e, "col-cast-f32",   builtin_col_cast_f32);
+  lenv_add_builtin(e, "col-cast-f16",   builtin_col_cast_f16);
   lenv_add_builtin(e, "col-mask",       builtin_col_mask);
   lenv_add_builtin(e, "col-cat",           builtin_col_cat);
   lenv_add_builtin(e, "col-dca-v0",        builtin_col_dca_v0);
@@ -1692,27 +1761,28 @@ void lenv_add_builtins_column(lenv* e) {
     typedef void(*DispFn)(size_t, float**);
     DispFn dispatch = (DispFn)fn->obj;
 
-    // Validate argument count and types.
+    // Validate argument count and types; auto-promote FP16 inputs to float32.
     if (args->count != n_inputs) {
       lval_del(args);
       return lval_err("col-jit-fn '%s': expected %d column args, got %d",
                       fn->sym, n_inputs, args->count);
     }
+    std::vector<RutColumnPtr> promoted(n_inputs);
     for (int i = 0; i < n_inputs; i++) {
       if (args->cell[i]->type != LVAL_COLUMN) {
         lval_del(args);
         return lval_err("col-jit-fn '%s': argument %d must be a Column", fn->sym, i);
       }
-      auto& c = col_of(args->cell[i]);
-      if (c->dtype != COL_FLOAT32) {
+      promoted[i] = col_promote_to_f32(col_of(args->cell[i]));
+      if (promoted[i]->dtype != COL_FLOAT32) {
         lval_del(args);
         return lval_err("col-jit-fn '%s': argument %d must be float32", fn->sym, i);
       }
     }
 
-    size_t n = col_of(args->cell[0])->n;
+    size_t n = promoted[0]->n;
     for (int i = 1; i < n_inputs; i++) {
-      if (col_of(args->cell[i])->n != n) {
+      if (promoted[i]->n != n) {
         lval_del(args);
         return lval_err("col-jit-fn '%s': column length mismatch at argument %d", fn->sym, i);
       }
@@ -1733,7 +1803,7 @@ void lenv_add_builtins_column(lenv* e) {
     std::vector<float*> arg_ptrs(n_outputs + n_inputs);
     for (int j = 0; j < n_outputs; j++) arg_ptrs[j] = out_ptrs[j];
     for (int i = 0; i < n_inputs; i++)
-      arg_ptrs[n_outputs + i] = (float*)col_of(args->cell[i])->data;
+      arg_ptrs[n_outputs + i] = (float*)promoted[i]->data;
 
     dispatch(n, arg_ptrs.data());
     lval_del(args);
