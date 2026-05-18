@@ -1,5 +1,5 @@
 ---
-description: Rooture language reference and workflow. Use when writing, running, or debugging rooture (.rut) code, or using the rooture MCP tools (eval, list_canvases, list_symbols, get_canvas).
+description: Rooture language reference and workflow. Use when writing, running, or debugging rooture (.rut) code, or using the rooture MCP tools (eval, load, list_canvases, list_symbols, get_canvas).
 ---
 
 # rooture-lang
@@ -84,11 +84,32 @@ Return types: void → `()`, pointer → TOBJ, float → float, int → integer.
 
 ## MCP workflow
 
-1. Load MCP tool schemas: `ToolSearch "select:mcp__rooture__eval,mcp__rooture__list_canvases,mcp__rooture__list_symbols"`
-2. Create a canvas before drawing: `(def {c} (new TCanvas ...))`
-3. Eval expressions one at a time or compose multi-line strings.
-4. Use `mcp__rooture__list_symbols` to inspect the environment.
-5. Use `mcp__rooture__get_canvas` to view plots (returns PNG inline).
+1. Load MCP tool schemas: `ToolSearch "select:mcp__rooture__eval,mcp__rooture__load,mcp__rooture__list_canvases,mcp__rooture__list_symbols"`
+2. **Use `mcp__rooture__load` to load scripts** — it calls `(load "path")` and returns the provide manifest (list of exported symbols). Prefer this over `eval` + `(load ...)` for discoverability.
+3. After loading, call `(run)` via `eval` to execute the analysis (all library scripts wrap analysis code in a `run` function).
+4. Create a canvas before drawing: `(def {c} (new TCanvas ...))`
+5. Eval expressions one at a time or compose multi-line strings.
+6. Use `mcp__rooture__list_symbols` to inspect the environment.
+7. Use `mcp__rooture__get_canvas` to view plots (returns PNG inline).
+
+### `provide` system
+
+Library scripts declare their public API with `(provide {sym1 sym2 ...})` at the end.
+`load` returns this manifest so you know what is available without reading source.
+
+```scheme
+;;; Loading returns the manifest:
+;;; Exports: {run tf-pairs h-pt h-p h-pt-species bb0 bb1 bb2 bb3 bb4 ...}
+(load "examples/spectra_tpc.rut")
+
+;;; Then run the analysis:
+(run)
+```
+
+For long-running loads (scripts that scan timeframes), use `eval_async`:
+```scheme
+eval_async expr="(load \"examples/spectra_tpc.rut\")"
+```
 
 ## Custom colors
 

@@ -203,6 +203,48 @@ When making multiple method calls on the same object, always prefer `doto` over 
 (if cond  true-val   false-val)    ; Error: expected Q-Expression
 ```
 
+## Script provide system — side-effect-free loading
+
+All library scripts in `examples/` wrap their analysis code in `(fun {run} {do ...})`
+and declare their public API with `(provide {...})` at the end. This means:
+
+- **Loading a script is side-effect-free** — no histograms are filled, no canvases are
+  drawn. Call `(run)` explicitly to execute the analysis.
+- **`load` returns the manifest** — the Q-expression of exported symbol names from
+  `provide`, so you immediately know what a script defines.
+- **Pure library files** (`pid_tpc.rut`, `jit_progress.rut`, `eventsel.rut`, `rootlib.rut`)
+  have `provide` but no `run` function — their definitions take effect on load.
+
+### Standard two-step pattern
+
+```scheme
+;;; Step 1: set up inputs, then load — returns the manifest
+(def {aod-paths} ...)
+(def {trk-tree} "O2track_iu")
+(load "examples/spectra_tpc.rut")
+;;; → Exports: {run tf-pairs propagate-to-dca h-pt h-p ...}
+
+;;; Step 2: run the analysis
+(run)
+```
+
+### MCP `load` tool
+
+Use the `load` MCP tool (not `eval` + `(load ...)`) to load scripts from the client side.
+It wraps `(load ...)` and formats the output:
+
+```
+load path="examples/spectra_tpc.rut"
+→ Loaded: examples/spectra_tpc.rut
+  Exports: {run tf-pairs propagate-to-dca h-pt h-p h-pt-species ...}
+  Output:
+  Timeframes: 127
+```
+
+If a script has no `provide`, it returns `(no provide declaration — exports nothing)`.
+For long-running loads (scripts that discover timeframes), use `eval_async` with
+`(load "path")` instead.
+
 ## Available skills
 
 All skills use the folder-based format (`.claude/skills/<name>/SKILL.md`) with YAML

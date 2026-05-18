@@ -566,6 +566,17 @@ static void mcp_thread_fn() {
     {{"name", "reload"},
      {"description", "Restart the rooture process with a freshly built binary. The new process automatically signals the client to refresh its tool list — no manual /mcp reconnect needed."},
      {"inputSchema", {{"type","object"},{"properties",json::object()},{"required",json::array()}}}},
+    {{"name", "load"},
+     {"description",
+       "Load a rooture script file and return its provide manifest — the list of symbols it exports. "
+       "Use this to introspect what a script defines before using eval to call its functions. "
+       "Returns 'Exports: {sym1 sym2 ...}' when the script ends with (provide {...}), "
+       "or '(no provide declaration)' for scripts without one. "
+       "Any output printed during loading appears under 'Output:'. "
+       "For long-running scripts (e.g. those that discover timeframes), prefer eval_async with (load \"path\")."},
+     {"inputSchema", {{"type","object"},
+       {"properties", {{"path", {{"type","string"},{"description","Path to the .rut file to load"}}}}},
+       {"required", {"path"}}}}},
   });
 
   // Hot-reload: the previous process signalled us via env var.  Send a log
@@ -794,6 +805,45 @@ static void mcp_thread_fn() {
             {"content", json::array({{{"type","text"},{"text","Observations recorded for "+scr_id}}})}
           }}});
         }
+
+      } else if (tool == "load") {
+        std::string path = args.value("path","");
+        // Escape path for rooture string literal
+        std::string escaped;
+        for (char c : path) {
+          if (c == '"') escaped += "\\\"";
+          else if (c == '\\') escaped += "\\\\";
+          else escaped += c;
+        }
+        std::string raw = eval_expr("(load \"" + escaped + "\")");
+        // Split: everything before the last line is loading output;
+        // the last non-empty line is lval_println of the provide manifest (or "()" / "Error: ...").
+        std::string manifest, output;
+        {
+          std::string trimmed = raw;
+          while (!trimmed.empty() && trimmed.back() == '\n') trimmed.pop_back();
+          size_t pos = trimmed.rfind('\n');
+          if (pos == std::string::npos) {
+            manifest = trimmed;
+          } else {
+            manifest = trimmed.substr(pos + 1);
+            output   = trimmed.substr(0, pos);
+          }
+        }
+        std::string text;
+        if (manifest.rfind("Error", 0) == 0) {
+          text = "Error loading '" + path + "': " + manifest;
+          if (!output.empty()) text += "\n\nOutput:\n" + output;
+        } else if (manifest.empty() || manifest == "()") {
+          text = "Loaded: " + path + "\n(no provide declaration — exports nothing)";
+          if (!output.empty()) text += "\n\nOutput:\n" + output;
+        } else {
+          text = "Loaded: " + path + "\nExports: " + manifest;
+          if (!output.empty()) text += "\n\nOutput:\n" + output;
+        }
+        send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
+          {"content", json::array({{{"type","text"},{"text",text}}})}
+        }}});
 
       } else if (tool == "reload") {
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
