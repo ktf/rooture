@@ -136,3 +136,12 @@ set_tests_properties(col_kernel PROPERTIES
   PASS_REGULAR_EXPRESSION "All col-kernel tests passed"
   DEPENDS col_f16
 )
+
+add_test(
+  NAME its_clsize
+  COMMAND $<TARGET_FILE:rooture> tests/its_clsize.rut
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(its_clsize PROPERTIES
+  PASS_REGULAR_EXPRESSION "All its-clsize tests passed"
+)

@@ -1,0 +1,80 @@
+;;; tests/its_clsize.rut — unit tests for examples/its_clsize.rut
+;;;
+;;; Tests the fITSClusterSizes bitfield decoder and col-its-cls-size helper.
+;;;
+;;; Run via ctest or:
+;;;   rooture tests/its_clsize.rut
+
+(load stdlib.rut)
+(load examples/its_clsize.rut)
+
+(def {assert-near} (\{label got expected tol} {do
+  (= {diff} (if (< (- got expected) 0.) {(- 0. (- got expected))} {(- got expected)}))
+  (if (<= diff tol)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected "  |diff|:" diff)
+      (exit 1)})}))
+
+;;; ── Create synthetic test data ───────────────────────────────────────────
+;;;
+;;; its[0] = 0x00000021  → layer 0 = 1, layer 1 = 2, rest = 0 → mean = 1.5
+;;; its[1] = 0x0000000F  → layer 0 = 15, rest = 0             → mean = 15.0
+;;; its[2] = 0x00000000  → no hits                            → mean = 0.0
+;;; its[3] = 0x00000321  → layers 0=1, 1=2, 2=3, rest=0       → mean = 2.0
+;;; its[4] = 0x87654321  → l0=1 l1=2 l2=3 l3=4 l4=5 l5=6 l6=7 → mean = 4.0
+;;;
+;;; tgl[0..4] = 0.0  → cos(λ) = 1.0 (no correction)
+;;; tgl[5]    = 1.0  → cos(λ) = 1/√2 ≈ 0.70711
+
+(process-line "{
+  TFile* _f = TFile::Open(\"/tmp/_rut_itstest.root\",\"RECREATE\");
+  TTree* _t = new TTree(\"T\",\"T\");
+  UInt_t _its = 0; float _tgl = 0;
+  _t->Branch(\"its\", &_its, \"its/i\");
+  _t->Branch(\"tgl\", &_tgl, \"tgl/F\");
+  UInt_t _iv[] = {0x00000021u, 0x0000000Fu, 0x00000000u, 0x00000321u, 0x87654321u, 0x00000021u};
+  float  _tv[] = {0.f, 0.f, 0.f, 0.f, 0.f, 1.f};
+  for(int _i=0;_i<6;_i++){_its=_iv[_i];_tgl=_tv[_i];_t->Fill();}
+  _t->Write(); delete _f;
+}")
+
+(= {its-c} (load-branch "/tmp/_rut_itstest.root" "T" "its"))
+(= {tgl-c} (load-branch "/tmp/_rut_itstest.root" "T" "tgl"))
+(= {cls-c}  (col-its-cls-size its-c tgl-c))
+(= {icls-c} (col-its-inner-cls-size its-c tgl-c))
+
+;;; ── All-layers tests ─────────────────────────────────────────────────────
+
+;;; its[0] = 0x21: layers 0=1, 1=2 → mean=1.5, tgl=0 → ×1.0 = 1.5
+(assert-near "cls[0] l0=1,l1=2 tgl=0"  (col-ref cls-c 0) 1.5 1e-5)
+
+;;; its[1] = 0x0F: layer 0=15 → mean=15.0, tgl=0 → ×1.0 = 15.0
+(assert-near "cls[1] l0=15 tgl=0"      (col-ref cls-c 1) 15.0 1e-5)
+
+;;; its[2] = 0x00: no hits → mean=0.0
+(assert-near "cls[2] no hits"          (col-ref cls-c 2) 0.0 1e-5)
+
+;;; its[3] = 0x321: layers 0=1,1=2,2=3 → mean=2.0, tgl=0 → 2.0
+(assert-near "cls[3] l0=1,l1=2,l2=3"  (col-ref cls-c 3) 2.0 1e-5)
+
+;;; its[4] = 0x87654321: l0=1,l1=2,l2=3,l3=4,l4=5,l5=6,l6=7 (bits 28-31 unused) → sum=28,cnt=7 → mean=4.0
+(assert-near "cls[4] all 7 layers"     (col-ref cls-c 4) 4.0 1e-5)
+
+;;; its[5] = 0x21 with tgl=1: mean=1.5, cos(λ)=1/√2 ≈ 0.70711 → 1.5/√2
+(assert-near "cls[5] tgl=1.0"          (col-ref cls-c 5) (/ 1.5 (sqrtf 2.0)) 1e-5)
+
+;;; ── Inner-barrel tests (layers 0-2 only) ────────────────────────────────
+
+;;; its[3] = 0x321: inner layers 0=1,1=2,2=3 → mean=2.0 (same as all-layers here)
+(assert-near "icls[3] inner l0=1,l1=2,l2=3" (col-ref icls-c 3) 2.0 1e-5)
+
+;;; its[4] = 0x87654321: inner layers 0=1,1=2,2=3 → sum=6,cnt=3 → mean=2.0 (not 29/7)
+(assert-near "icls[4] inner barrel only"     (col-ref icls-c 4) 2.0 1e-5)
+
+;;; its[1] = 0x0F: only layer 0 hit → inner mean = 15.0 (same as full)
+(assert-near "icls[1] l0=15 inner"          (col-ref icls-c 1) 15.0 1e-5)
+
+;;; ── done ─────────────────────────────────────────────────────────────────
+(print "All its-clsize tests passed.")
+(exit 0)

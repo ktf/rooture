@@ -180,6 +180,8 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   if (strcmp(s, "bor")  == 0) binop = "|";
   if (strcmp(s, "bxor") == 0) binop = "^";
   if (strcmp(s, "rem")  == 0) binop = "%";
+  if (strcmp(s, "bshr") == 0) binop = ">>";
+  if (strcmp(s, "bshl") == 0) binop = "<<";
   if (binop && v->count >= 3) {
     std::string result = rut_to_cpp_expr(v->cell[1], ctx);
     for (int i = 2; i < v->count; i++)
@@ -194,6 +196,14 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   // (to-int expr) → (int)(expr)
   if (strcmp(s, "to-int") == 0 && v->count == 2)
     return "(int)(" + rut_to_cpp_expr(v->cell[1], ctx) + ")";
+
+  // (to-float expr) → (float)(expr)
+  if (strcmp(s, "to-float") == 0 && v->count == 2)
+    return "(float)(" + rut_to_cpp_expr(v->cell[1], ctx) + ")";
+
+  // (to-double expr) → (double)(expr)
+  if (strcmp(s, "to-double") == 0 && v->count == 2)
+    return "(double)(" + rut_to_cpp_expr(v->cell[1], ctx) + ")";
 
   // (bnot expr)
   if (strcmp(s, "bnot") == 0 && v->count == 2)

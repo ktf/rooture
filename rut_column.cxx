@@ -128,11 +128,27 @@ static const char* col_dtype_name(int d) {
 }
 
 // ---------------------------------------------------------------------------
+// col_promote_fp16_to_f32 — promote only FP16 → FLOAT32; all other dtypes
+// returned unchanged (zero allocation).  Used by col-map-ptr, col-filter-ptr,
+// col-zip-ptr, col-reduce-ptr so that integer columns still reach the
+// CROSS_DISPATCH path with their original dtype intact.
+static RutColumnPtr col_promote_fp16_to_f32(const RutColumnPtr& c) {
+  if (c->dtype != COL_FLOAT16) return c;
+  size_t n   = c->n;
+  float* out = (float*)col_alloc(n ? n * sizeof(float) : sizeof(float));
+  if (!out) return c;
+  auto* in = (_Float16*)c->data;
+  for (size_t i = 0; i < n; i++) out[i] = (float)in[i];
+  auto r = std::make_shared<RutColumn>();
+  r->dtype = COL_FLOAT32; r->n = n; r->data = out;
+  return r;
+}
+
 // col_promote_to_f32 — convert any column to float32 using arithmetic
 // conversion.  COL_FLOAT32 is returned unchanged (zero allocation).
 // COL_FLOAT16 uses the _Float16 cast.  All integer and double types use a
 // simple element-wise (float) cast so that, e.g., INT32(-1) → -1.0f (not NaN).
-// Used by col-kernel inputs (all declared const float*) and col-jit-fn.
+// Used by col-kernel inputs (all declared const float*).
 // ---------------------------------------------------------------------------
 static RutColumnPtr col_promote_to_f32(const RutColumnPtr& c) {
   if (c->dtype == COL_FLOAT32) return c;
@@ -439,7 +455,7 @@ static lval* builtin_jitfn_ptr(lenv* /*e*/, lval* a) {
 // ---------------------------------------------------------------------------
 // out_dtype == -1 means "same as input dtype"
 static lval* col_map_impl(void* fp, RutColumnPtr& in_col, int out_dtype = -1) {
-  RutColumnPtr promoted = col_promote_to_f32(in_col);  // no-op if not FP16
+  RutColumnPtr promoted = col_promote_fp16_to_f32(in_col);  // no-op if not FP16
   size_t n      = promoted->n;
   int    idtype = promoted->dtype;
   int    odtype = (out_dtype < 0) ? idtype : out_dtype;
@@ -489,7 +505,7 @@ static lval* col_map_impl(void* fp, RutColumnPtr& in_col, int out_dtype = -1) {
 }
 
 static lval* col_filter_impl(void* fp, RutColumnPtr& in_col) {
-  RutColumnPtr promoted = col_promote_to_f32(in_col);  // no-op if not FP16
+  RutColumnPtr promoted = col_promote_fp16_to_f32(in_col);  // no-op if not FP16
   size_t n     = promoted->n;
   int    dtype = promoted->dtype;
   size_t esz   = col_dtype_size(dtype);
@@ -526,7 +542,7 @@ static lval* col_filter_impl(void* fp, RutColumnPtr& in_col) {
 }
 
 static lval* col_reduce_impl(void* fp, lval* init, RutColumnPtr& col) {
-  RutColumnPtr promoted = col_promote_to_f32(col);  // no-op if not FP16
+  RutColumnPtr promoted = col_promote_fp16_to_f32(col);  // no-op if not FP16
   size_t n     = promoted->n;
   int    dtype = promoted->dtype;
   lval*  result = nullptr;
@@ -561,7 +577,7 @@ static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx) {
   // Promote any FP16 inputs to float32 (zero-cost for non-FP16 columns).
   std::vector<RutColumnPtr> cols(ncols);
   for (int i = 0; i < ncols; i++)
-    cols[i] = col_promote_to_f32(col_of(a->cell[first_col_idx + i]));
+    cols[i] = col_promote_fp16_to_f32(col_of(a->cell[first_col_idx + i]));
   size_t n   = cols[0]->n;
   int  dtype = cols[0]->dtype;
   size_t esz = col_dtype_size(dtype);

@@ -1,0 +1,92 @@
+;;; examples/its_clsize.rut
+;;;
+;;; ITS mean cluster size × cos(λ) — helper library for nuclei analyses.
+;;;
+;;; fITSClusterSizes (UInt_t) encodes 7 × 4-bit nibbles:
+;;;   bits [4L .. 4L+3] = cluster size of ITS layer L (0 = no hit, 1-15 = size)
+;;;
+;;; The analysis variable ⟨ITS cluster size⟩ × cos(λ) discriminates Z=2 nuclei
+;;; (He3, He4) from MIP tracks: cluster size scales as Z², so helium leaves
+;;; ~4× larger clusters than pions/protons at the same β.
+;;;
+;;; λ = atan(tgl) is the track dip angle; cos(λ) = 1/sqrt(1 + tgl²) corrects
+;;; for the longer path length of inclined tracks.
+;;;
+;;; Usage:
+;;;   (load "examples/its_clsize.rut")
+;;;   (= {its-c}  (load-branch ap tree "fITSClusterSizes"))
+;;;   (= {tgl-c}  (load-branch ap tree "fTgl"))
+;;;   (= {cls-c}  (col-its-cls-size its-c tgl-c))          ;;; all 7 layers
+;;;   (= {icls-c} (col-its-inner-cls-size its-c tgl-c))    ;;; inner barrel only
+
+(load stdlib.rut)
+
+;;; ── JIT decode functions ──────────────────────────────────────────────────
+;;;
+;;; Unrolled over 7 layers (fixed constant) — pure SSA, no loop-carried
+;;; dependencies, all 7 extractions are independent and can be computed
+;;; in parallel by the compiler.
+
+;;; Mean cluster size over all ITS layers with a hit (all 7 layers)
+(def {its-mean-cls-ptr}
+  (jitfn-ptr (jit-fn float (\{{uint32_t its}}
+    {do
+      (= {c0} (to-int (band (bshr its  0) 15)))
+      (= {c1} (to-int (band (bshr its  4) 15)))
+      (= {c2} (to-int (band (bshr its  8) 15)))
+      (= {c3} (to-int (band (bshr its 12) 15)))
+      (= {c4} (to-int (band (bshr its 16) 15)))
+      (= {c5} (to-int (band (bshr its 20) 15)))
+      (= {c6} (to-int (band (bshr its 24) 15)))
+      (= {sum} (+ c0 c1 c2 c3 c4 c5 c6))
+      (= {cnt} (+ (if (> c0 0) {1} {0})
+                  (if (> c1 0) {1} {0})
+                  (if (> c2 0) {1} {0})
+                  (if (> c3 0) {1} {0})
+                  (if (> c4 0) {1} {0})
+                  (if (> c5 0) {1} {0})
+                  (if (> c6 0) {1} {0})))
+      (if (> cnt 0) {(/ (* 1.0f sum) cnt)} {0.0f})}))))
+
+;;; Mean cluster size over inner barrel only (layers 0-2)
+;;; Most discriminating for Z=2: inner ITS sees full Z² signal
+(def {its-inner-cls-ptr}
+  (jitfn-ptr (jit-fn float (\{{uint32_t its}}
+    {do
+      (= {c0} (to-int (band (bshr its  0) 15)))
+      (= {c1} (to-int (band (bshr its  4) 15)))
+      (= {c2} (to-int (band (bshr its  8) 15)))
+      (= {sum} (+ c0 c1 c2))
+      (= {cnt} (+ (if (> c0 0) {1} {0})
+                  (if (> c1 0) {1} {0})
+                  (if (> c2 0) {1} {0})))
+      (if (> cnt 0) {(/ (* 1.0f sum) cnt)} {0.0f})}))))
+
+;;; cos(λ) = 1 / sqrt(1 + tgl²)
+(def {coslam-ptr}
+  (jitfn-ptr (jit-fn float (\{{float tgl}}
+    {(/ 1.0f (sqrtf (+ 1.0f (* tgl tgl))))}))))
+
+(def {mul-ptr}
+  (jitfn-ptr (jit-fn float (\{{float a} {float b}} {(* a b)}))))
+
+;;; ── Public API ────────────────────────────────────────────────────────────
+
+;;; (col-its-cls-size its-col tgl-col) → float column
+;;; ⟨cluster size⟩ × cos(λ), all 7 ITS layers
+(def {col-its-cls-size}
+  (\ {its-col tgl-col} {do
+    (col-zip-ptr mul-ptr
+      (col-map-ptr its-mean-cls-ptr  its-col "float")
+      (col-map-ptr coslam-ptr        tgl-col))}))
+
+;;; (col-its-inner-cls-size its-col tgl-col) → float column
+;;; ⟨cluster size⟩ × cos(λ), inner barrel (layers 0-2) only
+(def {col-its-inner-cls-size}
+  (\ {its-col tgl-col} {do
+    (col-zip-ptr mul-ptr
+      (col-map-ptr its-inner-cls-ptr its-col "float")
+      (col-map-ptr coslam-ptr        tgl-col))}))
+
+(provide {col-its-cls-size col-its-inner-cls-size
+          its-mean-cls-ptr its-inner-cls-ptr coslam-ptr mul-ptr})
