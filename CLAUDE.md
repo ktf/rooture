@@ -278,3 +278,7 @@ in separate files within each skill's folder and referenced from `SKILL.md`.
 
 - `alice-datasets` — tree names, file paths, and branch names for known local datasets
   (LHC15o, Run 3 AO2D). **Read this before running any example that loads AO2D data.**
+
+- `col-kernel-perf` — when to use `col-kernel` vs `col-group-sum` / `col-fill-h1`.
+  Decision rule, benchmark numbers (LHC15o), API pitfalls. Read before implementing
+  any scatter-accumulate loop or per-centrality histogram filling.

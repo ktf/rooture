@@ -1,0 +1,174 @@
+;;; examples/bench_col_kernel_histo.rut
+;;;
+;;; Benchmark: col-kernel (4 int histograms, 1 pass) vs
+;;;            4x (col-and + col-mask + col-fill-h1)
+;;; for dN/dη per centrality class — the inner loop of dndeta_cent.rut.
+;;;
+;;; Method 1 (current approach):
+;;;   for each centrality class: col-and qual+cent, col-mask eta, col-fill-h1
+;;;   = 4 col-and + 4 col-mask + 4 col-fill-h1(TH1::Fill) = many passes + TH1 overhead
+;;;
+;;; Method 2 (col-kernel):
+;;;   single pass over (eta, mc0..mc3): scatter into 4 int[16] arrays
+;;;
+;;; Setup:
+;;;   (load "examples/datasets/lhc15o_245349.rut")
+;;;   (load "examples/bench_col_kernel_histo.rut")
+
+(load stdlib.rut)
+
+(def {ap}        (nth 0 lhc15o-245349-paths))
+(def {tf}        "DF_2453490008951090619")
+(def {trk-name}  "O2track")
+(def {coll-name} "O2collision_001")
+(def {cent-name} "O2centrun2v0m")
+(def {n-reps}    200)
+
+;;; η histogram: 16 bins in [-0.8, 0.8], bin width = 0.1
+(def {n-bins}  16)
+(def {eta-lo}  (- 0.0 0.8))
+(def {eta-hi}  0.8)
+(def {inv-bw}  10.0f)   ;;; 1 / 0.1
+
+;;; ── Load branches ────────────────────────────────────────────────────────
+(= {s1pt-c}  (load-branch ap (concat tf "/" trk-name) "fSigned1Pt"))
+(= {tgl-c}   (load-branch ap (concat tf "/" trk-name) "fTgl"))
+(= {cidx-c}  (load-branch ap (concat tf "/" trk-name) "fIndexCollisions"))
+(= {pv-z-c}  (load-branch ap (concat tf "/" coll-name) "fPosZ"))
+(= {cent-c}  (load-branch ap (concat tf "/" cent-name) "fCentRun2V0M"))
+
+(print "Tracks:" (col-length s1pt-c) "  Collisions:" (col-length pv-z-c))
+
+;;; ── JIT functions ────────────────────────────────────────────────────────
+(def {eta-ptr}
+  (jitfn-ptr (jit-fn float (\{{float tgl}} {asinhf tgl}))))
+
+(def {ptok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float q1pt}}
+    {(if (< (fabsf q1pt) (/ 1.0f 0.15f)) {1.0f} {0.0f})}))))
+
+(def {vzok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float vz}}
+    {(if (< (fabsf vz) 10.0f) {1.0f} {0.0f})}))))
+
+(def {etaok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float eta}}
+    {(if (< (fabsf eta) 0.8f) {1.0f} {0.0f})}))))
+
+(def {c0-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c  0.0f) (< c 10.0f)) {1.0f} {0.0f})}))))
+(def {c1-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 10.0f) (< c 30.0f)) {1.0f} {0.0f})}))))
+(def {c2-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 30.0f) (< c 50.0f)) {1.0f} {0.0f})}))))
+(def {c3-ptr} (jitfn-ptr (jit-fn float (\{{float c}} {(if (band (>= c 50.0f) (< c 80.0f)) {1.0f} {0.0f})}))))
+
+;;; ── Derived columns ──────────────────────────────────────────────────────
+(= {eta-c}   (col-map-ptr eta-ptr   tgl-c))
+(= {ptok-c}  (col-map-ptr ptok-ptr  s1pt-c))
+(= {etaok-c} (col-map-ptr etaok-ptr eta-c))
+(= {vzok-c}  (col-map-ptr vzok-ptr  pv-z-c))
+(= {evsel-c} (col-gather  vzok-c    cidx-c))
+(= {cent-tk} (col-gather  cent-c    cidx-c))   ;;; centrality per track
+
+;;; base quality: evsel + pT > 0.15 GeV/c + |η| < 0.8
+(= {qual-c}  (col-and evsel-c ptok-c etaok-c))
+
+;;; per-track centrality class masks (combined with quality)
+(= {mc0-c}   (col-and qual-c (col-map-ptr c0-ptr cent-tk)))
+(= {mc1-c}   (col-and qual-c (col-map-ptr c1-ptr cent-tk)))
+(= {mc2-c}   (col-and qual-c (col-map-ptr c2-ptr cent-tk)))
+(= {mc3-c}   (col-and qual-c (col-map-ptr c3-ptr cent-tk)))
+
+(def {sum-ptr} (jitfn-ptr (jit-fn float (\{{float a} {float b}} {(+ a b)}))))
+(print "Tracks passing c0 (0-10%):"  (col-reduce-ptr sum-ptr 0.0 mc0-c))
+(print "Tracks passing c1 (10-30%):" (col-reduce-ptr sum-ptr 0.0 mc1-c))
+(print "Tracks passing c2 (30-50%):" (col-reduce-ptr sum-ptr 0.0 mc2-c))
+(print "Tracks passing c3 (50-80%):" (col-reduce-ptr sum-ptr 0.0 mc3-c))
+
+;;; ── Method 1: 4x (col-and + col-mask + col-fill-h1) ─────────────────────
+(def {th0} (doto (new TH1F "bh0" ";#eta;dN/d#eta" n-bins eta-lo eta-hi) {SetDirectory 0}))
+(def {th1} (doto (new TH1F "bh1" ";#eta;dN/d#eta" n-bins eta-lo eta-hi) {SetDirectory 0}))
+(def {th2} (doto (new TH1F "bh2" ";#eta;dN/d#eta" n-bins eta-lo eta-hi) {SetDirectory 0}))
+(def {th3} (doto (new TH1F "bh3" ";#eta;dN/d#eta" n-bins eta-lo eta-hi) {SetDirectory 0}))
+
+(def {sw1} (doto (new TStopwatch) {Start}))
+(dotimes {_} n-reps {do
+  (doto th0 {Reset})
+  (doto th1 {Reset})
+  (doto th2 {Reset})
+  (doto th3 {Reset})
+  (col-fill-h1 th0 (col-mask mc0-c eta-c))
+  (col-fill-h1 th1 (col-mask mc1-c eta-c))
+  (col-fill-h1 th2 (col-mask mc2-c eta-c))
+  (col-fill-h1 th3 (col-mask mc3-c eta-c))})
+(.Stop sw1)
+(= {t1} (.RealTime sw1))
+(print "4x (col-mask + col-fill-h1):" t1 "s  (" (/ (* t1 1000.0) n-reps) "ms/rep)")
+
+;;; ── Method 2: col-kernel, no guard (all tracks) ─────────────────────────
+(def {dndeta-fn}
+  (col-kernel
+    (\{{col eta} {col mc0} {col mc1} {col mc2} {col mc3}}
+      {{out int k0 n-bins 0}
+       {out int k1 n-bins 0}
+       {out int k2 n-bins 0}
+       {out int k3 n-bins 0}})
+    (\{i} {do
+      (= {b} (to-int (floor (* (- (eta i) eta-lo) inv-bw))))
+      (if (band (>= b 0) (< b n-bins)) {do
+        (if (> (mc0 i) 0.5f) {do (scatter! k0 b (+ (k0 b) 1))} {})
+        (if (> (mc1 i) 0.5f) {do (scatter! k1 b (+ (k1 b) 1))} {})
+        (if (> (mc2 i) 0.5f) {do (scatter! k2 b (+ (k2 b) 1))} {})
+        (if (> (mc3 i) 0.5f) {do (scatter! k3 b (+ (k3 b) 1))} {})} {})})))
+
+;;; ── Method 3: col-kernel, qual guard (skip failing tracks early) ──────────
+(def {dndeta-fn3}
+  (col-kernel
+    (\{{col eta} {col qual} {col mc0} {col mc1} {col mc2} {col mc3}}
+      {{out int k0 n-bins 0}
+       {out int k1 n-bins 0}
+       {out int k2 n-bins 0}
+       {out int k3 n-bins 0}})
+    (\{i} {do
+      (if (> (qual i) 0.5f) {do
+        (= {b} (to-int (floor (* (- (eta i) eta-lo) inv-bw))))
+        (if (band (>= b 0) (< b n-bins)) {do
+          (if (> (mc0 i) 0.5f) {do (scatter! k0 b (+ (k0 b) 1))} {})
+          (if (> (mc1 i) 0.5f) {do (scatter! k1 b (+ (k1 b) 1))} {})
+          (if (> (mc2 i) 0.5f) {do (scatter! k2 b (+ (k2 b) 1))} {})
+          (if (> (mc3 i) 0.5f) {do (scatter! k3 b (+ (k3 b) 1))} {})} {})} {})})))
+
+(def {sw2} (doto (new TStopwatch) {Start}))
+(dotimes {_} n-reps {
+  = {ks} (dndeta-fn eta-c mc0-c mc1-c mc2-c mc3-c)})
+(.Stop sw2)
+(= {t2} (.RealTime sw2))
+(print "col-kernel (no guard):       " t2 "s  (" (/ (* t2 1000.0) n-reps) "ms/rep)")
+(print "Speedup vs M1:" (/ t1 t2) "x")
+
+(def {sw3} (doto (new TStopwatch) {Start}))
+(dotimes {_} n-reps {
+  = {ks3} (dndeta-fn3 eta-c qual-c mc0-c mc1-c mc2-c mc3-c)})
+(.Stop sw3)
+(= {t3} (.RealTime sw3))
+(print "col-kernel (qual guard):     " t3 "s  (" (/ (* t3 1000.0) n-reps) "ms/rep)")
+(print "Speedup vs M1:" (/ t1 t3) "x")
+
+;;; ── Verify results match ─────────────────────────────────────────────────
+(= {ks} (dndeta-fn3 eta-c qual-c mc0-c mc1-c mc2-c mc3-c))
+(= {k0} (col-cast-f32 (nth 0 ks)))
+(= {k1} (col-cast-f32 (nth 1 ks)))
+(= {k2} (col-cast-f32 (nth 2 ks)))
+(= {k3} (col-cast-f32 (nth 3 ks)))
+
+(print "--- Verification (total counts) ---")
+(print "kernel c0:" (col-reduce-ptr sum-ptr 0.0 k0) "  TH1F c0:" (.GetEntries th0))
+(print "kernel c1:" (col-reduce-ptr sum-ptr 0.0 k1) "  TH1F c1:" (.GetEntries th1))
+(print "kernel c2:" (col-reduce-ptr sum-ptr 0.0 k2) "  TH1F c2:" (.GetEntries th2))
+(print "kernel c3:" (col-reduce-ptr sum-ptr 0.0 k3) "  TH1F c3:" (.GetEntries th3))
+
+(print "--- Per-bin check (c0, first 4 bins) ---")
+(dotimes {b} 4 {
+  print "bin" b
+    "kernel=" (col-ref k0 b)
+    "TH1F="   (.GetBinContent th0 (+ b 1))})
+
+(provide {dndeta-fn dndeta-fn3 ks})
