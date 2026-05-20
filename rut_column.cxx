@@ -995,6 +995,43 @@ static lval* builtin_col_group_sum(lenv* /*e*/, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
+// (col-group-count idx-col) → int32 column
+//
+// Count occurrences per group: out[g] = number of i where idx[i] == g.
+// Negative idx entries are skipped (O2 sentinel for ambiguous collision).
+// Output length = max(idx) + 1.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_group_count(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-group-count", a, 1);
+  LASSERT_TYPE("col-group-count", a, 0, LVAL_COLUMN);
+
+  auto& idxs = col_of(a->cell[0]);
+  LASSERT(a, idxs->dtype == COL_INT32,
+          "col-group-count: idx column must be int32");
+
+  size_t   n = idxs->n;
+  int32_t* g = (int32_t*)idxs->data;
+
+  int32_t gmax = -1;
+  for (size_t i = 0; i < n; i++)
+    if (g[i] > gmax) gmax = g[i];
+
+  size_t    ng  = (gmax < 0) ? 0 : (size_t)gmax + 1;
+  size_t    esz = ng ? ng * sizeof(int32_t) : sizeof(int32_t);
+  int32_t*  out = (int32_t*)col_alloc(esz);
+  if (!out) { lval_del(a); return lval_err("col-group-count: out of memory"); }
+  for (size_t i = 0; i < ng; i++) out[i] = 0;
+
+  for (size_t i = 0; i < n; i++)
+    if (g[i] >= 0) out[(size_t)g[i]]++;
+
+  lval_del(a);
+  auto c = std::make_shared<RutColumn>();
+  c->dtype = COL_INT32; c->n = ng; c->data = out;
+  return lval_column(std::move(c));
+}
+
+// ---------------------------------------------------------------------------
 // (col-fill-h1 hist col) → nil
 // Fills a TH1 histogram directly from a column buffer — no interpreter
 // overhead per element.  Safe to call from a future thread provided the
@@ -1739,6 +1776,7 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "col-zip",        builtin_col_zip);
   lenv_add_builtin(e, "col-zip-ptr",    builtin_col_zip_ptr);
   lenv_add_builtin(e, "col-group-sum",    builtin_col_group_sum);
+  lenv_add_builtin(e, "col-group-count",  builtin_col_group_count);
   lenv_add_builtin(e, "col-fill-h1",      builtin_col_fill_h1);
   lenv_add_builtin(e, "col-fill-mean-h1", builtin_col_fill_mean_h1);
   lenv_add_builtin(e, "col-fill-h2",    builtin_col_fill_h2);
@@ -1753,6 +1791,78 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "col-fill-minv2-h1", builtin_col_fill_minv2_h1);
   lenv_add_builtin(e, "col-fill-minv3-h1", builtin_col_fill_minv3_h1);
   lenv_add_builtin(e, "jitfn-ptr",         builtin_jitfn_ptr);
+
+  // Register the col-kernel call dispatcher (needs RutColumn access).
+  g_kerneljitfn_dispatch = [](lval* fn, lval* args) -> lval* {
+    KernelMeta* meta = (KernelMeta*)fn->obj;
+    int n_inputs  = meta->n_inputs;
+    int n_outputs = (int)meta->outputs.size();
+    typedef void(*DispFn)(size_t, void**);
+    DispFn dispatch = (DispFn)meta->dispatch;
+
+    if (args->count != n_inputs) {
+      lval_del(args);
+      return lval_err("col-kernel '%s': expected %d column args, got %d",
+                      fn->sym, n_inputs, args->count);
+    }
+    // Validate and auto-promote inputs to float32.
+    std::vector<RutColumnPtr> promoted(n_inputs);
+    for (int i = 0; i < n_inputs; i++) {
+      if (args->cell[i]->type != LVAL_COLUMN) {
+        lval_del(args);
+        return lval_err("col-kernel '%s': argument %d must be a Column", fn->sym, i);
+      }
+      promoted[i] = col_promote_to_f32(col_of(args->cell[i]));
+    }
+
+    // All inputs must have the same length (n = input length for the loop).
+    size_t n = (n_inputs > 0) ? promoted[0]->n : 0;
+    for (int i = 1; i < n_inputs; i++) {
+      if (promoted[i]->n != n) {
+        lval_del(args);
+        return lval_err("col-kernel '%s': column length mismatch at argument %d", fn->sym, i);
+      }
+    }
+
+    // Allocate output buffers (fixed size from KernelMeta, dtype-aware).
+    std::vector<void*> out_ptrs(n_outputs);
+    for (int j = 0; j < n_outputs; j++) {
+      size_t esz  = col_dtype_size(meta->outputs[j].dtype);
+      size_t nsz  = meta->outputs[j].size;
+      out_ptrs[j] = col_alloc(nsz * esz);
+      if (!out_ptrs[j]) {
+        for (int k = 0; k < j; k++) free(out_ptrs[k]);
+        lval_del(args);
+        return lval_err("col-kernel '%s': out of memory for output %d", fn->sym, j);
+      }
+    }
+
+    // Build void** arg array: [out0, ..., in0, ...]
+    std::vector<void*> arg_ptrs(n_outputs + n_inputs);
+    for (int j = 0; j < n_outputs; j++) arg_ptrs[j] = out_ptrs[j];
+    for (int i = 0; i < n_inputs; i++)  arg_ptrs[n_outputs + i] = promoted[i]->data;
+
+    dispatch(n, arg_ptrs.data());
+    lval_del(args);
+
+    // Return single column or Q-expr of columns.
+    if (n_outputs == 1) {
+      auto c = std::make_shared<RutColumn>();
+      c->dtype = meta->outputs[0].dtype;
+      c->n     = meta->outputs[0].size;
+      c->data  = out_ptrs[0];
+      return lval_column(std::move(c));
+    }
+    lval* result = lval_qexpr();
+    for (int j = 0; j < n_outputs; j++) {
+      auto c = std::make_shared<RutColumn>();
+      c->dtype = meta->outputs[j].dtype;
+      c->n     = meta->outputs[j].size;
+      c->data  = out_ptrs[j];
+      lval_add(result, lval_column(std::move(c)));
+    }
+    return result;
+  };
 
   // Register the col-jit-fn call dispatcher (needs RutColumn access).
   g_coljitfn_dispatch = [](lval* fn, lval* args) -> lval* {

@@ -62,7 +62,7 @@ const TSLanguage* tree_sitter_rooture();
 enum { LVAL_ERR, LVAL_NUM, LVAL_FLOAT, LVAL_FLOAT32, LVAL_SYM, LVAL_STR,
        LVAL_FUN, LVAL_TOBJ, LVAL_TMETHOD, LVAL_SEXPR, LVAL_QEXPR,
        LVAL_JITFN, LVAL_ATOM, LVAL_FUTURE, LVAL_PROMISE, LVAL_COLUMN,
-       LVAL_COLJITFN };
+       LVAL_COLJITFN, LVAL_KERNELJITFN };
 
 // ---------------------------------------------------------------------------
 // Core structs — forward declared so lbuiltin can reference lval/lenv
@@ -236,9 +236,23 @@ lval* lval_lambda(lval* formals, lval* body);
 // col-jit-fn: sym=kernel_name, num=n_inputs, count=n_outputs, obj=dispatch_ptr
 lval* lval_coljitfn(const char* name, int n_inputs, int n_outputs, void* dispatch_ptr);
 
-// Dispatch callback — set by rut_column.cxx so rut_lang.cxx stays column-free.
+// KernelMeta — heap-allocated metadata for LVAL_KERNELJITFN (owned by lval->obj)
+struct KernelOutSpec { int dtype; size_t size; };
+struct KernelMeta {
+    void*  dispatch;   // void(*)(size_t __n, void** __args)
+    int    n_inputs;
+    std::vector<KernelOutSpec> outputs;
+};
+
+// col-kernel: sym=kernel_name, num=n_inputs, obj=KernelMeta*
+lval* lval_kerneljitfn(const char* name, KernelMeta* meta);
+
+// Dispatch callbacks — set by rut_column.cxx so rut_lang.cxx stays column-free.
 typedef lval* (*ColJitFnDispatch)(lval* fn, lval* args);
 extern ColJitFnDispatch g_coljitfn_dispatch;
+
+typedef lval* (*KernelJitFnDispatch)(lval* fn, lval* args);
+extern KernelJitFnDispatch g_kerneljitfn_dispatch;
 lval* lval_atom(lval* init);
 lval* lval_future_new(RutFuturePtr rf);
 lval* lval_promise_new();

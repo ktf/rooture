@@ -262,11 +262,11 @@
 
 ; col-and: combine N float32 mask columns with logical AND in one expression.
 ; Each column must be a float32 mask (0.0 = fail, non-zero = pass).
-; Equivalent to N-1 nested (col-zip-ptr mul-ptr ...) calls but readable.
-(def {_col-and-mul-fn}  (jit-fn float (\{{float a} {float b}} {(* a b)})))
-(def {_col-and-mul-ptr} (jitfn-ptr _col-and-mul-fn))
+; Uses col-jit-fn (prefix __rut_cjit_) to avoid polluting the jit-fn counter
+; (__rut_jit_) relied upon by deterministic tests.
+(def {_col-and-fn} (col-jit-fn "float" (\{{col a} {col b}} {(* a b)})))
 (fun {col-and & cols} {
-  foldl (\ {acc c} {col-zip-ptr _col-and-mul-ptr acc c}) (fst cols) (tail cols)
+  foldl _col-and-fn (fst cols) (tail cols)
 })
 
 ;;; Threading
