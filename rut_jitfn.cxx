@@ -28,7 +28,8 @@ struct JitCtx {
   lenv* env;                          // closure env — LVAL_NUM/FLOAT literals folded
   int n_outputs = 0;                  // 0 = scalar jit-fn; N = col-jit-fn loop outputs
   bool kernel_mode = false;           // true inside col-kernel bodies
-  std::map<std::string, KernelOutInfo> kernel_outs;  // output name → metadata
+  std::map<std::string, KernelOutInfo> kernel_outs;      // output name → metadata (for lookup)
+  std::vector<std::string>             kernel_out_order;  // insertion order (for code-gen)
 };
 
 // Returns true if v contains no side-effects (assignments, loops, method
@@ -821,6 +822,7 @@ lval* builtin_col_kernel(lenv* e, lval* a) {
     info.size_val = size_int;
     info.init     = init_cpp;
     ctx.kernel_outs[out_name] = info;
+    ctx.kernel_out_order.push_back(out_name);
     meta->outputs.push_back({ dtype, size_int });
   }
 
@@ -838,17 +840,18 @@ lval* builtin_col_kernel(lenv* e, lval* a) {
   std::string name = "__rut_kernel_" + std::to_string(g_kernel_counter++);
   std::string dispatch_name = name + "_dispatch";
 
-  // Build kernel signature: outputs first, then inputs
+  // Build kernel signature: outputs first (in insertion order), then inputs
   std::string kernel_sig = "void " + name + "(size_t __n";
-  for (auto& [oname, oi] : ctx.kernel_outs)
-    kernel_sig += ", " + oi.cpp_type + "* __restrict__ " + oname;
+  for (auto& oname : ctx.kernel_out_order)
+    kernel_sig += ", " + ctx.kernel_outs.at(oname).cpp_type + "* __restrict__ " + oname;
   for (auto& iname : input_names)
     kernel_sig += ", const float* __restrict__ " + iname;
   kernel_sig += ")";
 
-  // Output init block and main loop
+  // Output init block and main loop (insertion order)
   std::string inits;
-  for (auto& [oname, oi] : ctx.kernel_outs) {
+  for (auto& oname : ctx.kernel_out_order) {
+    auto& oi = ctx.kernel_outs.at(oname);
     inits += "  const size_t " + oname + "_n = " + std::to_string(oi.size_val) + ";\n";
     inits += "  for (size_t __k = 0; __k < " + oname + "_n; __k++) "
            + oname + "[__k] = " + oi.init + ";\n";
@@ -864,8 +867,8 @@ lval* builtin_col_kernel(lenv* e, lval* a) {
   std::string disp_sig  = "void " + dispatch_name + "(size_t __n, void** __args)";
   std::string disp_call = "  " + name + "(__n";
   int arg_idx = 0;
-  for (auto& [oname, oi] : ctx.kernel_outs)
-    disp_call += ", (" + oi.cpp_type + "*)__args[" + std::to_string(arg_idx++) + "]";
+  for (auto& oname : ctx.kernel_out_order)
+    disp_call += ", (" + ctx.kernel_outs.at(oname).cpp_type + "*)__args[" + std::to_string(arg_idx++) + "]";
   for (int j = 0; j < (int)input_names.size(); j++)
     disp_call += ", (const float*)__args[" + std::to_string(arg_idx++) + "]";
   disp_call += ");\n";

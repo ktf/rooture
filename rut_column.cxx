@@ -128,16 +128,33 @@ static const char* col_dtype_name(int d) {
 }
 
 // ---------------------------------------------------------------------------
-// col_promote_to_f32 — if col is COL_FLOAT16, return a new float32 column;
-// otherwise return the same shared_ptr unchanged (zero extra allocation).
-// Called at the entry of every compute path so FP16 is storage-only.
+// col_promote_to_f32 — convert any column to float32 using arithmetic
+// conversion.  COL_FLOAT32 is returned unchanged (zero allocation).
+// COL_FLOAT16 uses the _Float16 cast.  All integer and double types use a
+// simple element-wise (float) cast so that, e.g., INT32(-1) → -1.0f (not NaN).
+// Used by col-kernel inputs (all declared const float*) and col-jit-fn.
 // ---------------------------------------------------------------------------
 static RutColumnPtr col_promote_to_f32(const RutColumnPtr& c) {
-  if (c->dtype != COL_FLOAT16) return c;
-  size_t n    = c->n;
-  float* out  = (float*)col_alloc(n ? n * sizeof(float) : sizeof(float));
-  _Float16* in = (_Float16*)c->data;
-  for (size_t i = 0; i < n; i++) out[i] = (float)in[i];
+  if (c->dtype == COL_FLOAT32) return c;
+  size_t n   = c->n;
+  float* out = (float*)col_alloc(n ? n * sizeof(float) : sizeof(float));
+  if (!out) return c;  // OOM: return original, caller will fail later
+#define PROMOTE(CType) { auto* in = (CType*)c->data; for (size_t i=0;i<n;i++) out[i]=(float)in[i]; }
+  switch (c->dtype) {
+    case COL_FLOAT16: { auto* in = (_Float16*)c->data; for (size_t i=0;i<n;i++) out[i]=(float)in[i]; break; }
+    case COL_FLOAT64: PROMOTE(double);    break;
+    case COL_INT64:   PROMOTE(int64_t);  break;
+    case COL_UINT64:  PROMOTE(uint64_t); break;
+    case COL_INT32:   PROMOTE(int32_t);  break;
+    case COL_UINT32:  PROMOTE(uint32_t); break;
+    case COL_INT16:   PROMOTE(int16_t);  break;
+    case COL_UINT16:  PROMOTE(uint16_t); break;
+    case COL_INT8:    PROMOTE(int8_t);   break;
+    case COL_UINT8:   PROMOTE(uint8_t);  break;
+    case COL_BOOL:    PROMOTE(char);     break;
+    default: free(out); return c;
+  }
+#undef PROMOTE
   auto r = std::make_shared<RutColumn>();
   r->dtype = COL_FLOAT32; r->n = n; r->data = out;
   return r;

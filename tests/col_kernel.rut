@@ -1,0 +1,64 @@
+;;; tests/col_kernel.rut — regression tests for (col-kernel ...) builtin
+;;;
+;;; Verifies that col-kernel generates a correct scatter-gather kernel:
+;;;   - output column has the declared dtype (int) and size
+;;;   - scatter writes with bounds checking work correctly
+;;;   - indexed reads (data i) work correctly
+;;;   - closure variables are constant-folded (xmin, inv-bw, nbins)
+;;;
+;;; Input: x = [1, 2, 3, 4] float32 (from /tmp/_rut_f16test.root)
+;;; Histogram: nbins=10, xmin=0, inv-bw=2.0 (2 bins per unit)
+;;;   x=1 → bin 3, x=2 → bin 5, x=3 → bin 7, x=4 → bin 9
+;;; Output column: int counts[12] (nbins+2 = overflow + nbins + underflow)
+
+(load stdlib.rut)
+
+(def {assert-eq} (\{label got expected} {
+  if (== got expected)
+    {print label "PASS"}
+    {do
+      (print label "FAIL  got:" got "  expected:" expected)
+      (exit 1)}}))
+
+;;; ── load test data ───────────────────────────────────────────────────────────
+;;; The file is created by col_f16.rut; run that test first if needed.
+(= {data} (load-branch "/tmp/_rut_f16test.root" "T" "x"))
+(assert-eq "col-length 4"  (col-length data) 4)
+
+;;; ── define the histogram kernel ──────────────────────────────────────────────
+(def {xmin}   0.0)
+(def {inv-bw} 2.0)
+(def {nbins}  10)
+
+(def {histo-fn}
+  (col-kernel
+    (\{{col data}}
+      {out int counts (+ nbins 2) 0})
+    (\{i} {do
+      (= {b} (+ 1 (to-int (floor (* (- (data i) xmin) inv-bw)))))
+      (scatter! counts b (+ (counts b) 1))})))
+
+;;; ── run and check ────────────────────────────────────────────────────────────
+(= {counts} (histo-fn data))
+
+(assert-eq "col-dtype int"   (col-dtype counts) "int")
+(assert-eq "col-length 12"   (col-length counts) 12)
+
+;;; x=1 → b = 1 + floor((1-0)*2) = 1+2 = 3
+(assert-eq "bin 3 count=1"   (col-ref counts 3) 1)
+;;; x=2 → b = 1 + floor((2-0)*2) = 1+4 = 5
+(assert-eq "bin 5 count=1"   (col-ref counts 5) 1)
+;;; x=3 → b = 1 + floor((3-0)*2) = 1+6 = 7
+(assert-eq "bin 7 count=1"   (col-ref counts 7) 1)
+;;; x=4 → b = 1 + floor((4-0)*2) = 1+8 = 9
+(assert-eq "bin 9 count=1"   (col-ref counts 9) 1)
+
+;;; empty bins
+(assert-eq "bin 0 count=0"   (col-ref counts 0) 0)
+(assert-eq "bin 1 count=0"   (col-ref counts 1) 0)
+(assert-eq "bin 4 count=0"   (col-ref counts 4) 0)
+(assert-eq "bin 11 count=0"  (col-ref counts 11) 0)
+
+;;; ── done ─────────────────────────────────────────────────────────────────────
+(print "All col-kernel tests passed.")
+(exit 0)

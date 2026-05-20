@@ -1,0 +1,137 @@
+;;; examples/bench_col_kernel_qvec.rut
+;;;
+;;; Benchmark: col-kernel (single pass, 6 float outputs) vs 6x col-group-sum
+;;; for Q-vector accumulation (flow v2 inner loop).
+;;;
+;;; Setup:
+;;;   (load "examples/datasets/lhc15o_245349.rut")
+;;;   (load "examples/bench_col_kernel_qvec.rut")
+
+(load stdlib.rut)
+
+(def {ap}        (nth 0 lhc15o-245349-paths))
+(def {tf}        "DF_2453490008951090619")
+(def {trk-name}  "O2track")
+(def {coll-name} "O2collision_001")
+(def {eta-gap}   0.5f)
+(def {n-reps}    200)
+
+;;; ── Load branches ────────────────────────────────────────────────────────
+(= {s1pt-c}  (load-branch ap (concat tf "/" trk-name) "fSigned1Pt"))
+(= {alpha-c} (load-branch ap (concat tf "/" trk-name) "fAlpha"))
+(= {snp-c}   (load-branch ap (concat tf "/" trk-name) "fSnp"))
+(= {tgl-c}   (load-branch ap (concat tf "/" trk-name) "fTgl"))
+(= {cidx-c}  (load-branch ap (concat tf "/" trk-name) "fIndexCollisions"))
+(= {pv-z-c}  (load-branch ap (concat tf "/" coll-name) "fPosZ"))
+
+(def {n-coll} (col-length pv-z-c))
+(print "Tracks:" (col-length s1pt-c) "  Collisions:" n-coll)
+
+;;; ── Derived columns (shared by both methods) ────────────────────────────
+
+(def {phi-ptr}
+  (jitfn-ptr (jit-fn float (\{{float alpha} {float snp}}
+    {(+ alpha (asinf snp))}))))
+
+(def {eta-ptr}
+  (jitfn-ptr (jit-fn float (\{{float tgl}}
+    {asinhf tgl}))))
+
+(def {ptok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float q1pt}} {do
+    (= {pt} (if (== q1pt 0.0f) {0.0f} {(/ 1.0f (fabsf q1pt))}))
+    (if (band (> pt 0.2f) (< pt 5.0f)) {1.0f} {0.0f})}))))
+
+(def {vzok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float vz}}
+    {(if (< (fabsf vz) 10.0f) {1.0f} {0.0f})}))))
+
+(def {fwd-ptr}
+  (jitfn-ptr (jit-fn float (\{{float eta}}
+    {(if (> eta eta-gap) {1.0f} {0.0f})}))))
+
+(def {bwd-ptr}
+  (jitfn-ptr (jit-fn float (\{{float eta}}
+    {(if (< eta (- 0.0f eta-gap)) {1.0f} {0.0f})}))))
+
+(def {cos2-ptr}
+  (jitfn-ptr (jit-fn float (\{{float phi}} {cosf (* 2.0f phi)}))))
+
+(def {sin2-ptr}
+  (jitfn-ptr (jit-fn float (\{{float phi}} {sinf (* 2.0f phi)}))))
+
+(def {ones-ptr}
+  (jitfn-ptr (jit-fn float (\{{float x}} {1.0f}))))
+
+(= {phi-c}   (col-zip-ptr phi-ptr  alpha-c snp-c))
+(= {eta-c}   (col-map-ptr eta-ptr  tgl-c))
+(= {ptok-c}  (col-map-ptr ptok-ptr s1pt-c))
+(= {vzok-c}  (col-map-ptr vzok-ptr pv-z-c))
+(= {evsel-c} (col-gather  vzok-c   cidx-c))
+(= {qual-c}  (col-and evsel-c ptok-c))
+(= {fwd-c}   (col-and qual-c (col-map-ptr fwd-ptr eta-c)))
+(= {bwd-c}   (col-and qual-c (col-map-ptr bwd-ptr eta-c)))
+(= {cos2-c}  (col-map-ptr cos2-ptr phi-c))
+(= {sin2-c}  (col-map-ptr sin2-ptr phi-c))
+(= {ones-c}  (col-map-ptr ones-ptr s1pt-c))
+
+;;; ── Method 1: 6x col-group-sum ──────────────────────────────────────────
+(def {sw1} (doto (new TStopwatch) {Start}))
+(dotimes {_} n-reps {do
+  (= {qre-a-1} (col-group-sum cos2-c fwd-c cidx-c))
+  (= {qim-a-1} (col-group-sum sin2-c fwd-c cidx-c))
+  (= {ma-1}    (col-group-sum ones-c fwd-c cidx-c))
+  (= {qre-b-1} (col-group-sum cos2-c bwd-c cidx-c))
+  (= {qim-b-1} (col-group-sum sin2-c bwd-c cidx-c))
+  (= {mb-1}    (col-group-sum ones-c bwd-c cidx-c))})
+(.Stop sw1)
+(= {t1} (.RealTime sw1))
+(print "6x col-group-sum      :" t1 "s  (" (/ (* t1 1000.0) n-reps) "ms/rep)")
+
+;;; ── Method 2: col-kernel, 6 float outputs ───────────────────────────────
+(def {qvec-fn}
+  (col-kernel
+    (\{{col cidx} {col cos2} {col sin2} {col fwd} {col bwd}}
+      {{out float qre-a n-coll 0.0f}
+       {out float qim-a n-coll 0.0f}
+       {out float ma    n-coll 0.0f}
+       {out float qre-b n-coll 0.0f}
+       {out float qim-b n-coll 0.0f}
+       {out float mb    n-coll 0.0f}})
+    (\{i} {do
+      (= {c} (to-int (cidx i)))
+      (if (> (fwd i) 0.5f) {do
+        (scatter! qre-a c (+ (qre-a c) (cos2 i)))
+        (scatter! qim-a c (+ (qim-a c) (sin2 i)))
+        (scatter! ma    c (+ (ma    c) 1.0f))} {})
+      (if (> (bwd i) 0.5f) {do
+        (scatter! qre-b c (+ (qre-b c) (cos2 i)))
+        (scatter! qim-b c (+ (qim-b c) (sin2 i)))
+        (scatter! mb    c (+ (mb    c) 1.0f))} {})})))
+
+(def {sw2} (doto (new TStopwatch) {Start}))
+(dotimes {_} n-reps {
+  = {qvecs} (qvec-fn cidx-c cos2-c sin2-c fwd-c bwd-c)})
+(.Stop sw2)
+(= {t2} (.RealTime sw2))
+(print "col-kernel (6 outputs):" t2 "s  (" (/ (* t2 1000.0) n-reps) "ms/rep)")
+(print "Speedup:" (/ t1 t2) "x")
+
+;;; ── Verify results match ────────────────────────────────────────────────
+(= {qvecs}   (qvec-fn cidx-c cos2-c sin2-c fwd-c bwd-c))
+(= {qre-a-2} (nth 0 qvecs))
+(= {qim-a-2} (nth 1 qvecs))
+(= {ma-2}    (nth 2 qvecs))
+(= {qre-b-2} (nth 3 qvecs))
+(= {qim-b-2} (nth 4 qvecs))
+(= {mb-2}    (nth 5 qvecs))
+
+(print "--- Verification (first 4 collisions) ---")
+(dotimes {ci} (min 4 (col-length ma-1)) {
+  do
+  (print "coll" ci
+    "  ma:"    (col-ref ma-1    ci) "vs" (col-ref ma-2    ci)
+    "  mb:"    (col-ref mb-1    ci) "vs" (col-ref mb-2    ci)
+    "  qre_a:" (col-ref qre-a-1 ci) "vs" (col-ref qre-a-2 ci))})
+
+(provide {qvec-fn qvecs})
