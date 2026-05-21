@@ -554,6 +554,9 @@ lval* builtin_jit_fn(lenv* e, lval* a) {
   }
   sig += ")";
 
+  // Pre-scan for (= {name} ...) bindings so local variables shadow
+  // any same-named values in the closure environment.
+  collect_locals(body_node, ctx);
   std::string body = rut_to_cpp_stmt(body_node, "  ", returns_value, ctx);
   std::string code = sig + " {\n" + body + "}\n";
 
