@@ -1,0 +1,183 @@
+;;; examples/pid_nuclei.rut
+;;;
+;;; TPC + TOF PID for Z=2 light nuclei: ³He and ⁴He (and their anti-particles).
+;;;
+;;; Physics:
+;;;   The TPC signal for a charge-Z nucleus is Z²×BB(βγ), where βγ = p_rig/m
+;;;   and p_rig is the magnetic rigidity = p/|Z|.  The tracker reconstructs
+;;;   rigidity and stores it as if Z=1, so fSigned1Pt = 1/p_rig_T and the
+;;;   tracking momentum equals p_rig (not the full physical momentum p = Z×p_rig).
+;;;
+;;;   Anti-nuclei: fSigned1Pt < 0 (negative curvature).
+;;;
+;;;   For TOF: fTOFExpMom stores the rigidity at the TOF surface, so the actual
+;;;   momentum used in the expected-time formula must be multiplied by Z=2.
+;;;
+;;; Requires pid_tpc.rut to have been loaded (for bb0..bb4, bb-res, nsigma-max, tof-c,
+;;; tof-ok-ptr, and pid-m-* mass constants).
+;;;
+;;; Usage:
+;;;   (load "examples/pid_tpc.rut")          ;;; or load after setting CCDB params
+;;;   (load "examples/pid_nuclei.rut")
+;;;   ;;; per time-frame:
+;;;   (= {masks} (pid-nuclei-masks sig-c pinner-c tofchi2-c tofp-c length-c time-c timeres-c))
+;;;   (= {he3-mask} (nth 0 masks))
+;;;   (= {he4-mask} (nth 1 masks))
+;;;   ;;; continuous nσ for plots / sideband studies:
+;;;   (= {nsig-he3-c} (col-zip-ptr nsig-tpc-he3-ptr sig-c pinner-c))
+
+(load stdlib.rut)
+(load examples/pid_tpc.rut)
+
+;;; ── Nuclei masses (GeV/c²) ───────────────────────────────────────────────
+(def {pid-m-he3} 2.80892)    ;;; ³He nucleus
+(def {pid-m-he4} 3.72738)    ;;; ⁴He nucleus (alpha particle)
+
+;;; ── TPC nσ — continuous values ───────────────────────────────────────────
+;;; Return the raw nσ_TPC value (float, not a mask).
+;;; pinner = momentum at inner TPC wall = rigidity for Z=2 tracks.
+;;; Z²=4 scaling applied to both expected signal and resolution.
+;;; Returns 9999.0 when the BB kinematics are outside the safe range.
+
+(def {nsig-tpc-he3-fn}
+  (jit-fn float (\{{float sig} {float pinner}}
+    {do
+      (= {bg}    (/ pinner pid-m-he3))
+      (= {safe}  (> bg 0.05))
+      (= {bg_s}  (if safe {bg}   {1.0}))
+      (= {beta}  (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}    (pow beta bb3))
+      (= {lnt}   (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}  (if safe {(* 4.0 (/ (* (- (- bb1 aa) lnt) bb0) aa))} {9999.0}))
+      (= {sigma} (* bb-res exp_))
+      (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0})})))
+
+(def {nsig-tpc-he4-fn}
+  (jit-fn float (\{{float sig} {float pinner}}
+    {do
+      (= {bg}    (/ pinner pid-m-he4))
+      (= {safe}  (> bg 0.05))
+      (= {bg_s}  (if safe {bg}   {1.0}))
+      (= {beta}  (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}    (pow beta bb3))
+      (= {lnt}   (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}  (if safe {(* 4.0 (/ (* (- (- bb1 aa) lnt) bb0) aa))} {9999.0}))
+      (= {sigma} (* bb-res exp_))
+      (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0})})))
+
+;;; ── TPC PID masks ────────────────────────────────────────────────────────
+;;; Returns 1.0 if |nσ_TPC| < nsigma-max, else 0.0.
+
+(def {pid-he3-fn}
+  (jit-fn float (\{{float sig} {float pinner}}
+    {do
+      (= {bg}    (/ pinner pid-m-he3))
+      (= {safe}  (> bg 0.05))
+      (= {bg_s}  (if safe {bg}   {1.0}))
+      (= {beta}  (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}    (pow beta bb3))
+      (= {lnt}   (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}  (if safe {(* 4.0 (/ (* (- (- bb1 aa) lnt) bb0) aa))} {9999.0}))
+      (= {sigma} (* bb-res exp_))
+      (= {nsig}  (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+(def {pid-he4-fn}
+  (jit-fn float (\{{float sig} {float pinner}}
+    {do
+      (= {bg}    (/ pinner pid-m-he4))
+      (= {safe}  (> bg 0.05))
+      (= {bg_s}  (if safe {bg}   {1.0}))
+      (= {beta}  (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
+      (= {aa}    (pow beta bb3))
+      (= {lnt}   (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
+      (= {exp_}  (if safe {(* 4.0 (/ (* (- (- bb1 aa) lnt) bb0) aa))} {9999.0}))
+      (= {sigma} (* bb-res exp_))
+      (= {nsig}  (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
+      (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
+
+;;; ── Function pointers ────────────────────────────────────────────────────
+(def {nsig-tpc-he3-ptr} (jitfn-ptr nsig-tpc-he3-fn))
+(def {nsig-tpc-he4-ptr} (jitfn-ptr nsig-tpc-he4-fn))
+(def {pid-he3-ptr}      (jitfn-ptr pid-he3-fn))
+(def {pid-he4-ptr}      (jitfn-ptr pid-he4-fn))
+
+;;; ── TOF expected times for He3/He4 ──────────────────────────────────────
+;;; Input p = fTOFExpMom = rigidity at TOF surface.
+;;; Actual momentum = Z × p_rig = 2 × p.
+
+(def {tof-texp-he3-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do
+      (= {pa}   (* 2.0 p))
+      (= {bg}   (/ pa pid-m-he3))
+      (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+      (/ length (* beta tof-c))})))
+
+(def {tof-texp-he4-fn}
+  (jit-fn float (\{{float p} {float length}}
+    {do
+      (= {pa}   (* 2.0 p))
+      (= {bg}   (/ pa pid-m-he4))
+      (= {beta} (/ bg (sqrtf (+ 1.0f (* bg bg)))))
+      (/ length (* beta tof-c))})))
+
+(def {tof-texp-he3-ptr} (jitfn-ptr tof-texp-he3-fn))
+(def {tof-texp-he4-ptr} (jitfn-ptr tof-texp-he4-fn))
+
+;;; ── TOF mass² ────────────────────────────────────────────────────────────
+;;; mass² = p_actual² × (1/β² − 1) = (2×p_rig)² × ((t×c/L)² − 1)
+;;; Returns −999.0 for tracks with no TOF hit (chi2 < 0).
+;;; Use for candidate mass-hypothesis plots; the Z=2 mass² for He4 ≈ 13.9 (GeV/c²)².
+
+(def {mass2-he-fn}
+  (jit-fn float (\{{float tofp} {float length} {float time} {float chi2}}
+    {do
+      (= {has-tof} (>= chi2 0.0f))
+      (= {p2}      (* 4.0 (* tofp tofp)))
+      (= {safe-l}  (if (> length 0.0f) {length} {1.0f}))
+      (= {btinv}   (/ (* time tof-c) safe-l))
+      (= {m2}      (* p2 (- (* btinv btinv) 1.0f)))
+      (if has-tof {m2} {(- 0.0f 999.0f)})})))
+
+(def {mass2-he-ptr} (jitfn-ptr mass2-he-fn))
+
+;;; ── Combined nuclei PID masks ────────────────────────────────────────────
+;;; (pid-nuclei-masks sig-c pinner-c tofchi2-c tofp-c length-c time-c timeres-c)
+;;;   → list {he3-mask he4-mask}
+;;;
+;;; sig-c      — fTPCSignal
+;;; pinner-c   — momentum at inner TPC wall (= rigidity for Z=2)
+;;; tofchi2-c  — fTOFChi2 (< 0 = no TOF hit; passes TOF by default)
+;;; tofp-c     — fTOFExpMom (rigidity at TOF surface)
+;;; length-c   — fLength (track length in cm)
+;;; time-c     — fTrackTime (measured TOF arrival time in ns)
+;;; timeres-c  — fTrackTimeRes (TOF time resolution in ns)
+;;;
+;;; Note: anti-particle selection (fSigned1Pt < 0) is NOT applied here —
+;;; apply it separately as a column mask before calling this function.
+(def {pid-nuclei-masks}
+  (\ {sig-c pinner-c tofchi2-c tofp-c length-c time-c timeres-c}
+    {do
+      (= {tpc-he3} (col-zip-ptr pid-he3-ptr sig-c pinner-c))
+      (= {tpc-he4} (col-zip-ptr pid-he4-ptr sig-c pinner-c))
+
+      (= {texp-he3} (col-zip-ptr tof-texp-he3-ptr tofp-c length-c))
+      (= {texp-he4} (col-zip-ptr tof-texp-he4-ptr tofp-c length-c))
+
+      (= {tof-he3} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-he3 timeres-c))
+      (= {tof-he4} (col-zip-ptr tof-ok-ptr tofchi2-c time-c texp-he4 timeres-c))
+
+      (list
+        (col-and tpc-he3 tof-he3)
+        (col-and tpc-he4 tof-he4))}))
+
+(provide {pid-nuclei-masks
+          pid-m-he3 pid-m-he4
+          nsig-tpc-he3-fn nsig-tpc-he4-fn
+          nsig-tpc-he3-ptr nsig-tpc-he4-ptr
+          pid-he3-fn pid-he4-fn
+          pid-he3-ptr pid-he4-ptr
+          tof-texp-he3-fn tof-texp-he4-fn
+          tof-texp-he3-ptr tof-texp-he4-ptr
+          mass2-he-fn mass2-he-ptr})
