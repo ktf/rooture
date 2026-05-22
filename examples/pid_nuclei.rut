@@ -33,24 +33,65 @@
 (def {pid-m-he3} 2.80892)    ;;; ³He nucleus
 (def {pid-m-he4} 3.72738)    ;;; ⁴He nucleus (alpha particle)
 
+;;; ── He3 dedicated BB parametrisation ────────────────────────────────────
+;;;
+;;; From O2Physics NucleiTask / HeNucleiTask:
+;;;   double bb(bg, kp1, kp2, kp3, kp4, kp5) {
+;;;     beta = bg/sqrt(1+bg²);  aa = beta^kp4;
+;;;     return (kp2 - aa - log(kp3 + (1/bg)^kp5)) * kp1 / aa; }
+;;;   bbHe3(mom) = bb(mom/2.80839, -321.34, 0.6539, 1.591, 0.8225, 2.363)
+;;;
+;;; Input: mom = ACTUAL momentum = Z × rigidity = 2 × fTPCInnerParam.
+;;; This gives ~260 a.u. at minimum ionising (bg >> 1) for He3 (Z²=4 × ~65).
+;;; Resolution: reuses bb-res from pid_tpc.rut (CCDB general value ~0.046).
+;;;
+;;; He4: no dedicated parametrisation available; falls back to Z²×proton BB.
+
+;;; ── He3 dedicated BB parametrisation (inlined into each jit-fn) ─────────
+;;;
+;;; From O2Physics NucleiTask:
+;;;   bbHe3(mom) = bb(mom/2.80839, -321.34, 0.6539, 1.591, 0.8225, 2.363)
+;;;   where bb(bg, kp1..5): beta=bg/sqrt(1+bg²); aa=beta^kp4;
+;;;         result = (kp2 - aa - log(kp3 + (1/bg)^kp5)) * kp1 / aa
+;;; Input mom = actual He3 momentum = 2 × fTPCInnerParam (Z × rigidity).
+;;; Gives ~260 a.u. at minimum ionising. Resolution: bb-res from pid_tpc.rut.
+;;;
+;;; He4: no dedicated parametrisation; uses Z²×proton BB (may have offset).
+
+;;; Standalone expected-signal function (for BB curve overlays etc.)
+(def {bb-he3-fn}
+  (jit-fn float (\{{float mom}}
+    {do
+      (= {bg}   (/ mom 2.80839f))
+      (= {safe} (> bg 0.05f))
+      (= {bg_s} (if safe {bg} {1.0f}))
+      (= {beta} (/ bg_s (sqrtf (+ 1.0f (* bg_s bg_s)))))
+      (= {aa}   (powf beta 0.8225f))
+      (= {lnt}  (logf (+ 1.591f (powf (/ 1.0f bg_s) 2.363f))))
+      (if safe
+        {(/ (* (- (- 0.6539f aa) lnt) (- 0.0f 321.34f)) aa)}
+        {9999.0f})})))
+
 ;;; ── TPC nσ — continuous values ───────────────────────────────────────────
-;;; Return the raw nσ_TPC value (float, not a mask).
-;;; pinner = momentum at inner TPC wall = rigidity for Z=2 tracks.
-;;; Z²=4 scaling applied to both expected signal and resolution.
-;;; Returns 9999.0 when the BB kinematics are outside the safe range.
+;;; pinner = fTPCInnerParam = rigidity = p_actual/Z.
+;;; He3: actual momentum = 2 × pinner; dedicated BB used (formula inlined).
+;;; He4: actual momentum = 2 × pinner; falls back to Z²×proton BB.
+;;; Returns 9999.0 when BB kinematics are outside the safe range.
 
 (def {nsig-tpc-he3-fn}
   (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}    (/ pinner pid-m-he3))
-      (= {safe}  (> bg 0.05))
-      (= {bg_s}  (if safe {bg}   {1.0}))
-      (= {beta}  (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
-      (= {aa}    (pow beta bb3))
-      (= {lnt}   (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
-      (= {exp_}  (if safe {(* 4.0 (/ (* (- (- bb1 aa) lnt) bb0) aa))} {9999.0}))
+      (= {bg}   (/ (* 2.0f pinner) 2.80839f))
+      (= {safe} (> bg 0.05f))
+      (= {bg_s} (if safe {bg} {1.0f}))
+      (= {beta} (/ bg_s (sqrtf (+ 1.0f (* bg_s bg_s)))))
+      (= {aa}   (powf beta 0.8225f))
+      (= {lnt}  (logf (+ 1.591f (powf (/ 1.0f bg_s) 2.363f))))
+      (= {exp_} (if safe
+        {(/ (* (- (- 0.6539f aa) lnt) (- 0.0f 321.34f)) aa)}
+        {9999.0f}))
       (= {sigma} (* bb-res exp_))
-      (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0})})))
+      (if (> exp_ 1.0f) {(/ (- sig exp_) sigma)} {9999.0f})})))
 
 (def {nsig-tpc-he4-fn}
   (jit-fn float (\{{float sig} {float pinner}}
@@ -71,15 +112,17 @@
 (def {pid-he3-fn}
   (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}    (/ pinner pid-m-he3))
-      (= {safe}  (> bg 0.05))
-      (= {bg_s}  (if safe {bg}   {1.0}))
-      (= {beta}  (/ bg_s (sqrt (+ 1.0 (* bg_s bg_s)))))
-      (= {aa}    (pow beta bb3))
-      (= {lnt}   (log (+ bb2 (pow (/ 1.0 bg_s) bb4))))
-      (= {exp_}  (if safe {(* 4.0 (/ (* (- (- bb1 aa) lnt) bb0) aa))} {9999.0}))
+      (= {bg}   (/ (* 2.0f pinner) 2.80839f))
+      (= {safe} (> bg 0.05f))
+      (= {bg_s} (if safe {bg} {1.0f}))
+      (= {beta} (/ bg_s (sqrtf (+ 1.0f (* bg_s bg_s)))))
+      (= {aa}   (powf beta 0.8225f))
+      (= {lnt}  (logf (+ 1.591f (powf (/ 1.0f bg_s) 2.363f))))
+      (= {exp_} (if safe
+        {(/ (* (- (- 0.6539f aa) lnt) (- 0.0f 321.34f)) aa)}
+        {9999.0f}))
       (= {sigma} (* bb-res exp_))
-      (= {nsig}  (if (> exp_ 1.0) {(/ (- sig exp_) sigma)} {9999.0}))
+      (= {nsig}  (if (> exp_ 1.0f) {(/ (- sig exp_) sigma)} {9999.0f}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
 
 (def {pid-he4-fn}
@@ -98,6 +141,7 @@
 
 ;;; ── Function pointers ────────────────────────────────────────────────────
 (def {nsig-tpc-he3-ptr} (jitfn-ptr nsig-tpc-he3-fn))
+(def {bb-he3-ptr}       (jitfn-ptr bb-he3-fn))
 (def {nsig-tpc-he4-ptr} (jitfn-ptr nsig-tpc-he4-fn))
 (def {pid-he3-ptr}      (jitfn-ptr pid-he3-fn))
 (def {pid-he4-ptr}      (jitfn-ptr pid-he4-fn))
@@ -137,8 +181,14 @@
       (= {p2}      (* 4.0 (* tofp tofp)))
       (= {safe-l}  (if (> length 0.0f) {length} {1.0f}))
       (= {btinv}   (/ (* time tof-c) safe-l))
-      (= {m2}      (* p2 (- (* btinv btinv) 1.0f)))
-      (if has-tof {m2} {(- 0.0f 999.0f)})})))
+      ;;; Require physical 1/β: btinv ∈ (0.9, 7.0) — rejects bad TOF associations
+      ;;; (spurious hits have time >> L/c or time ≤ 0, giving btinv outside this range)
+      (= {m2} (* p2 (- (* btinv btinv) 1.0f)))
+      (if (< chi2 0.0f)
+        {(- 0.0f 999.0f)}
+        {(if (< btinv 0.9f)
+          {(- 0.0f 999.0f)}
+          {(if (> btinv 7.0f) {(- 0.0f 999.0f)} {m2})})})})))
 
 (def {mass2-he-ptr} (jitfn-ptr mass2-he-fn))
 
@@ -174,6 +224,7 @@
 
 (provide {pid-nuclei-masks
           pid-m-he3 pid-m-he4
+          bb-he3-fn bb-he3-ptr
           nsig-tpc-he3-fn nsig-tpc-he4-fn
           nsig-tpc-he3-ptr nsig-tpc-he4-ptr
           pid-he3-fn pid-he4-fn

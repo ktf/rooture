@@ -1,0 +1,169 @@
+;;; examples/tracksel.rut
+;;;
+;;; Track selection helpers: DCA-to-PV propagation and quality cut functions.
+;;; Shared by spectra_tpc.rut, nuclei_search.rut, and other analyses.
+;;;
+;;; Environment variables (set before loading to override defaults):
+;;;   bz           — solenoid field in Tesla (default 0.5)
+;;;   flat-dca-mode — 0 = pT-parameterised MIP DCA (default), 1 = flat ±2.4/3.2 cm
+;;;
+;;; Usage:
+;;;   (default {bz} 0.5)
+;;;   (default {flat-dca-mode} 0)
+;;;   (load "examples/tracksel.rut")
+;;;   ;;; per time-frame:
+;;;   (= {dca} (propagate-to-dca fx-c fy-c fz-c snp-c tgl-c q1pt-c alp-c pvX-c pvY-c pvZ-c))
+;;;   (= {dcaxy-c} (nth 0 dca))
+;;;   (= {dcaz-c}  (nth 1 dca))
+
+(load stdlib.rut)
+
+(default {bz}            0.5)    ;;; solenoid field in Tesla
+(default {flat-dca-mode} 0)      ;;; 0 = pT-parameterised, 1 = flat
+
+;;; ── propagate-to-dca ─────────────────────────────────────────────────────
+;;;
+;;; Closed-form of O2 TrackParametrization::propagateParamToDCA.
+;;; Returns {dcaXY dcaZ} in cm.  bz is captured from the environment at
+;;; load time and constant-folded into the generated kernel.
+;;;
+;;; Inputs (all per-track float columns):
+;;;   fX fY fZ fSnp fTgl fQ1Pt fAlpha — track parameters in local α frame
+;;;   pvX pvY pvZ                     — primary vertex (gathered to per-track)
+
+(def {propagate-to-dca}
+  (col-jit-fn {float float}
+    (\{{col fX} {col fY} {col fZ} {col fSnp} {col fTgl} {col fQ1Pt} {col fAlpha}
+       {col pvX} {col pvY} {col pvZ}}
+      {do
+        ;;; signed curvature: q/pT × B × (−B2C);  B2C = 0.299792458e-3
+        (= {crv}   (* fQ1Pt bz -2.99792458e-4f))
+
+        ;;; rotate PV into local (alpha) frame
+        (= {sn}    (sinf fAlpha))
+        (= {cs}    (cosf fAlpha))
+        (= {xv}    (+ (* pvX cs) (* pvY sn)))
+        (= {yv}    (- (* pvY cs) (* pvX sn)))
+
+        ;;; track position relative to PV in local frame
+        (= {x0}    (- fX xv))
+        (= {y0}    (- fY yv))
+
+        ;;; cos(phi_track) = sqrt(1 − snp²)
+        (= {csp}   (sqrtf (fabsf (- 1.0f (* fSnp fSnp)))))
+
+        ;;; extra rotation angle to align track-vertex direction with x-axis
+        (= {denom} (+ (* crv y0) csp))
+        (= {tgfv}  (if (> (fabsf denom) 1e-8f)
+          {(/ (- fSnp (* crv x0)) denom)}
+          {0.0f}))
+        (= {sn2}   (/ tgfv (sqrtf (+ 1.0f (* tgfv tgfv)))))
+        (= {cs2}   (if (> (fabsf tgfv) 1e-8f) {(/ sn2 tgfv)} {1.0f}))
+
+        ;;; vertex and track in doubly-rotated frame
+        (= {yv2}   (- (* yv cs2) (* xv sn2)))
+        (= {x2}    (+ (* x0 cs2) (* y0 sn2)))
+        (= {y2}    (- (* y0 cs2) (* x0 sn2)))
+        (= {snp2}  (- (* fSnp cs2) (* csp sn2)))
+
+        ;;; propagation arc: dx_prop = −x2  →  x2rp = −crv×x2
+        (= {x2rp}  (* (- 0.0f crv) x2))
+        (= {f1}    snp2)
+        (= {f2}    (+ f1 x2rp))
+        (= {r1}    (sqrtf (fabsf (- 1.0f (* f1 f1)))))
+        (= {r2}    (sqrtf (fabsf (- 1.0f (* f2 f2)))))
+        (= {dy2dx} (/ (+ f1 f2) (+ r1 r2)))
+
+        ;;; XY DCA: y_after − yv2 = y2 − x2×dy2dx
+        (= {dcaXY} (- y2 (* x2 dy2dx)))
+
+        ;;; Z DCA via arc or linear formula from propagateParamTo
+        (= {arcz}  (> (fabsf x2rp) 0.05f))
+        (= {arg_z} (- (* r1 f2) (* r2 f1)))
+        (= {arg_c} (if (> arg_z  1.0f) {1.0f}
+                    {(if (< arg_z -1.0f) {-1.0f} {arg_z})}))
+        (= {rot0}  (asinf arg_c))
+        (= {rot}   (if (> (+ (* f1 f1) (* f2 f2)) 1.0f)
+                    {(if (< (* f1 f2) 0.0f)
+                      {(if (> f2 0.0f)
+                        {(- 3.14159265f rot0)}
+                        {(- (- 0.0f 3.14159265f) rot0)})}
+                      {rot0})}
+                    {rot0}))
+        (= {dz_arc} (* (/ fTgl crv) rot))
+        (= {dz_lin} (* (- 0.0f x2) (+ r2 (* f2 dy2dx)) fTgl))
+        (= {dz}    (if arcz {dz_arc} {dz_lin}))
+
+        ;;; Z DCA: z_after_propagation − pvZ
+        (= {dcaZ}  (- (+ fZ dz) pvZ))
+
+        {dcaXY dcaZ}})))
+
+;;; ── Quality cut JIT functions ─────────────────────────────────────────────
+
+(def {sub-ptr}
+  (jitfn-ptr (jit-fn float (\{{float a} {float b}} {(- a b)}))))
+
+;;; |η| < 0.8
+(def {eta-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float tgl}}
+    {(if (< (fabsf (asinhf tgl)) 0.8f) {1.0f} {0.0f})}))))
+
+;;; nCls ≥ 70 (mutable threshold stored in a TArrayI)
+(def {min-cls-box} (new TArrayI 1))
+(.SetAt min-cls-box 70 0)
+
+(def {cls-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float ncls}}
+    {(if (>= ncls (.GetAt min-cls-box 0)) {1.0f} {0.0f})}))))
+
+;;; ITS: ≥1 cluster AND chi2/cluster < 36
+(def {its-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float itsmap} {float itschi2}}
+    {(if (> itsmap 0.5f)
+      {(if (< itschi2 36.0f) {1.0f} {0.0f})}
+      {0.0f})}))))
+
+;;; TPC chi2/cluster < 4
+(def {tpcchi2-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float chi2}}
+    {(if (< chi2 4.0f) {1.0f} {0.0f})}))))
+
+;;; TPC crossed rows ≥ 70 AND crossed/findable ≥ 0.8
+(def {crows-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float ncrows} {float nfind}}
+    {(if (>= ncrows 70.0f)
+      {(if (> nfind 0.5f)
+        {(if (>= (/ ncrows nfind) 0.8f) {1.0f} {0.0f})}
+        {0.0f})}
+      {0.0f})}))))
+
+;;; DCA primary-track selection:
+;;;   flat-dca-mode 0 (default): pT-parameterised, matching isGlobalTrack()
+;;;     |dcaXY| < 0.0105 + 0.035 / pT^1.1   |dcaZ| < 2.0 cm
+;;;   flat-dca-mode 1: flat (reproduces old behaviour)
+;;;     |dcaXY| < 2.4 cm,  |dcaZ| < 3.2 cm
+(def {dca-ok-ptr}
+  (if (== flat-dca-mode 1)
+    {jitfn-ptr (jit-fn float (\{{float dxy} {float dz} {float pt}}
+      {(if (< (fabsf dxy) 2.4f)
+        {(if (< (fabsf dz) 3.2f) {1.0f} {0.0f})}
+        {0.0f})}))}
+    {jitfn-ptr (jit-fn float (\{{float dxy} {float dz} {float pt}}
+      {(if (< (fabsf dxy) (+ 0.0105f (/ 0.0350f (powf (fabsf pt) 1.1f))))
+        {(if (< (fabsf dz) 2.0f) {1.0f} {0.0f})}
+        {0.0f})}))}))
+
+;;; Flat DCA cuts for primary nuclei (Z=2):
+;;;   |dcaXY| < 0.1 cm,  |dcaZ| < 1.0 cm  (no pT dependence — He3/He4 are primary)
+(def {dca-nuc-ptr}
+  (jitfn-ptr (jit-fn float (\{{float dxy} {float dz}}
+    {(if (< (fabsf dxy) 0.1f)
+      {(if (< (fabsf dz) 1.0f) {1.0f} {0.0f})}
+      {0.0f})}))))
+
+(provide {propagate-to-dca
+          sub-ptr eta-ok-ptr
+          min-cls-box cls-ok-ptr its-ok-ptr
+          tpcchi2-ok-ptr crows-ok-ptr
+          dca-ok-ptr dca-nuc-ptr})

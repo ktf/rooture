@@ -1,0 +1,310 @@
+;;; examples/nuclei_filtered.rut
+;;;
+;;; Anti-³He and anti-⁴He search on pre-filtered O2nucleitable AO2D files.
+;;;
+;;; The NucleiTable is produced by the O2Physics NucleiTask and stores one
+;;; flat tree per timeframe (O2nucleitable) with DCA, TOF β, and event
+;;; vertex already merged per track — no DCA propagation needed.
+;;;
+;;; Branch layout:
+;;;   fPt               — signed pT (GeV/c); fPt < 0 → anti-particle
+;;;   fEta, fPhi        — kinematics
+;;;   fTPCInnerParam    — rigidity at inner TPC wall (GeV/c, always positive)
+;;;   fTPCsignal        — TPC dE/dx (a.u.)
+;;;   fBeta             — TOF β (= v/c); 0.0001 sentinel = no TOF hit
+;;;   fZvertex          — primary vertex Z (cm)
+;;;   fNContrib         — vertex contributors
+;;;   fDCAxy, fDCAz     — DCA to PV (cm), pre-computed
+;;;   fTPCchi2          — TPC chi2/cluster
+;;;   fTPCfindableCls   — TPC findable clusters
+;;;   fTPCcrossedRows   — TPC crossed rows
+;;;   fTPCnCls          — TPC found clusters
+;;;   fITSclusterSizes  — Run 3 ITS packed nibbles (4 bits × 7 layers)
+;;;   fITSchi2          — ITS chi2/cluster
+;;;
+;;; Usage:
+;;;   (def {aod-paths} (list "/path/to/AO2D-filtered.root"))
+;;;   (load "examples/nuclei_filtered.rut")
+;;;   (run)
+
+(load stdlib.rut)
+
+;;; ── Optional: fetch TPC BB parameters from CCDB ──────────────────────────
+(default {ccdb-pid-ts}      0)
+(default {ccdb-pid-url}     "http://localhost:8888")
+(default {ccdb-pid-headers} {})
+(if (> ccdb-pid-ts 0)
+  {do
+    (print "Fetching TPC BB params from CCDB for ts=" ccdb-pid-ts)
+    (= {_bb-url} (concat ccdb-pid-url "/Analysis/PID/TPC/BetheBloch/" (str ccdb-pid-ts)))
+    (= {_bb-f}   (deref (fetch-url _bb-url ccdb-pid-headers)))
+    (= {_bb-obj} (tfile-get _bb-f "ccdb_object"))
+    (= {_par}    (tobj-member _bb-obj "mPar"))
+    (def {bb0}   (* (nth 5 _par) (nth 0 _par)))
+    (def {bb1}   (nth 1 _par))
+    (def {bb2}   (nth 2 _par))
+    (def {bb3}   (nth 3 _par))
+    (def {bb4}   (nth 4 _par))
+    (def {bb-res} (/ (nth 6 _par) (nth 5 _par)))
+    (print "CCDB BB params: bb0=" bb0 "bb1=" bb1 "bb2=" bb2
+           "bb3=" bb3 "bb4=" bb4 "bb-res=" bb-res)}
+  {})
+
+(load examples/pid_nuclei.rut)
+(load examples/its_clsize.rut)
+
+(if (== aod-paths "aod-paths") {
+  do
+  (print "ERROR: define aod-paths before loading nuclei_filtered.rut")
+  (def {aod-paths} {})
+} {})
+
+;;; Tree name — single flat tree per timeframe
+(default {nuc-tree} "O2nucleitable")
+
+;;; ── Scan timeframes ───────────────────────────────────────────────────────
+(.SetValue gEnv "XNet.RequestTimeout" 30)
+(.SetValue gEnv "XNet.ConnectTimeout" 10)
+(def {tf-pairs}
+  (do
+    (= {acc} {})
+    (dotimes {pi} (len aod-paths) {
+      do
+      (= {path} (nth pi aod-paths))
+      (print "Opening" (+ pi 1) "/" (len aod-paths) ":" path)
+      (= {f} (::Open TFile path))
+      (if (== f 0)
+        {print "WARNING: could not open" path}
+        {if (.IsZombie f)
+          {print "WARNING: zombie" path}
+          {do
+            (= {keys} (.GetListOfKeys f))
+            (dotimes {i} (.GetEntries keys) {
+              do
+              (= {k} (.At keys i))
+              (if (== (.GetClassName k) "TDirectoryFile")
+                {= {acc} (join acc (list (list path (.GetName k))))}
+                {})})}})})
+    acc))
+(print "Timeframes:" (len tf-pairs))
+
+;;; ── JIT helpers ───────────────────────────────────────────────────────────
+
+;;; Anti-particle flag: fPt < 0
+(def {anti-fn}    (jitfn-ptr (jit-fn float (\{{float pt}}  {if (< pt 0.0f) {1.0f} {0.0f}}))))
+
+;;; TOF mass² from β: m² = (Z×pinner)² × (1/β² − 1); Z=2
+;;; β sentinel 0.0001 → no TOF → return −999
+(def {mass2-beta-fn}
+  (jitfn-ptr (jit-fn float (\{{float pinner} {float beta}}
+    {(if (< beta 0.01f)
+      {(- 0.0f 999.0f)}
+      {(* (* 4.0f (* pinner pinner))
+          (- (/ 1.0f (* beta beta)) 1.0f))})}))))
+
+;;; tgl = sinh(η) — needed for ITS cluster size cos(λ) correction
+(def {sinh-fn}
+  (jitfn-ptr (jit-fn float (\{{float eta}} {(sinhf eta)}))))
+
+;;; tag-and-filter sentinels
+(def {tag9k-fn}   (jitfn-ptr (jit-fn float (\{{float v} {float m}} {if (> m 0.5f) {v}     {9999.0f}}))))
+(def {keep9k-fn}  (jitfn-ptr (jit-fn bool  (\{{float x}}           {(< x 9998.0f)}))))
+(def {keep-m2-fn} (jitfn-ptr (jit-fn bool  (\{{float x}}           {(> x (- 0.0f 998.0f))}))))
+(def {tag-neg-fn} (jitfn-ptr (jit-fn float (\{{float v} {float m}} {if (> m 0.5f) {v} {(- 0.0f 1.0f)}}))))
+
+;;; ── Quality cut JIT functions ─────────────────────────────────────────────
+;;; (DCA and vertex are pre-computed in the table)
+
+;;; |η| < 0.8
+(def {eta-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float eta}}
+    {(if (< (fabsf eta) 0.8f) {1.0f} {0.0f})}))))
+
+;;; nCls ≥ 70
+(def {cls-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float ncls}}
+    {(if (>= ncls 70.0f) {1.0f} {0.0f})}))))
+
+;;; TPC chi2/cluster < 4
+(def {tpcchi2-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float chi2}}
+    {(if (< chi2 4.0f) {1.0f} {0.0f})}))))
+
+;;; TPC crossed rows ≥ 70 AND crossed/findable ≥ 0.8
+(def {crows-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float ncrows} {float nfind}}
+    {(if (>= ncrows 70.0f)
+      {(if (> nfind 0.5f)
+        {(if (>= (/ ncrows nfind) 0.8f) {1.0f} {0.0f})}
+        {0.0f})}
+      {0.0f})}))))
+
+;;; Flat DCA cuts for primary nuclei: |dcaXY| < 0.1 cm, |dcaZ| < 1.0 cm
+(def {dca-nuc-ptr}
+  (jitfn-ptr (jit-fn float (\{{float dxy} {float dz}}
+    {(if (< (fabsf dxy) 0.1f)
+      {(if (< (fabsf dz) 1.0f) {1.0f} {0.0f})}
+      {0.0f})}))))
+
+;;; |Zvtx| < 10 cm AND nContrib ≥ 1
+(def {evsel-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float zvtx} {float ncontr}}
+    {(if (< (fabsf zvtx) 10.0f)
+      {(if (> ncontr 0.5f) {1.0f} {0.0f})}
+      {0.0f})}))))
+
+;;; ── Histograms ────────────────────────────────────────────────────────────
+(def {h-nsig-he3} (new TH1F "h_nsig3"
+  "anti-^{3}He n#sigma_{TPC};n#sigma_{TPC}^{^{3}He};counts"
+  200 (- 0.0 10.0) 10.0))
+(def {h-nsig-he4} (new TH1F "h_nsig4"
+  "anti-^{4}He n#sigma_{TPC};n#sigma_{TPC}^{^{4}He};counts"
+  200 (- 0.0 10.0) 10.0))
+
+(def {h-m2-he3} (new TH1F "h_m2_3"
+  "anti-^{3}He (TPC+TOF): m^{2};m^{2} (GeV/c^{2})^{2};counts"
+  220 (- 0.0 5.0) 20.0))
+(def {h-m2-he4} (new TH1F "h_m2_4"
+  "anti-^{4}He (TPC+TOF): m^{2};m^{2} (GeV/c^{2})^{2};counts"
+  220 (- 0.0 10.0) 20.0))
+
+(def {h-cls-he3} (new TH1F "h_cls3"
+  "anti-^{3}He TPC: ITS #LTcls#GT#timescos(#lambda);#LTcls#GT#timescos(#lambda);counts"
+  60 0.0 12.0))
+(def {h-cls-he4} (new TH1F "h_cls4"
+  "anti-^{4}He TPC: ITS #LTcls#GT#timescos(#lambda);#LTcls#GT#timescos(#lambda);counts"
+  60 0.0 12.0))
+
+(def {h-dedx} (new TH2F "h_dedx_nuc"
+  "Anti-tracks: dE/dx vs |p_{rig}|;|p_{rig}| (GeV/c);TPC signal (a.u.)"
+  120 0.0 6.0 200 0.0 2000.0))
+
+;;; ── run ───────────────────────────────────────────────────────────────────
+(def {run}
+  (\ {} {do
+    (dotimes {ti} (len tf-pairs) {
+      do
+      (= {pair}     (nth ti tf-pairs))
+      (= {aod-path} (nth 0 pair))
+      (= {tf}       (nth 1 pair))
+      (print "  TF" (+ ti 1) "/" (len tf-pairs))
+
+      ;;; Load branches
+      (= {pt-c}     (load-branch aod-path (concat tf "/" nuc-tree) "fPt"))
+      (= {eta-c}    (load-branch aod-path (concat tf "/" nuc-tree) "fEta"))
+      (= {pinner-c} (load-branch aod-path (concat tf "/" nuc-tree) "fTPCInnerParam"))
+      (= {sig-c}    (load-branch aod-path (concat tf "/" nuc-tree) "fTPCsignal"))
+      (= {beta-c}   (load-branch aod-path (concat tf "/" nuc-tree) "fBeta"))
+      (= {zvtx-c}   (load-branch aod-path (concat tf "/" nuc-tree) "fZvertex"))
+      (= {ncon-c}   (load-branch aod-path (concat tf "/" nuc-tree) "fNContrib"))
+      (= {dcaxy-c}  (load-branch aod-path (concat tf "/" nuc-tree) "fDCAxy"))
+      (= {dcaz-c}   (load-branch aod-path (concat tf "/" nuc-tree) "fDCAz"))
+      (= {tpcchi2-c}(load-branch aod-path (concat tf "/" nuc-tree) "fTPCchi2"))
+      (= {find-c}   (load-branch aod-path (concat tf "/" nuc-tree) "fTPCfindableCls"))
+      (= {crows-c}  (load-branch aod-path (concat tf "/" nuc-tree) "fTPCcrossedRows"))
+      (= {ncls-c}   (load-branch aod-path (concat tf "/" nuc-tree) "fTPCnCls"))
+      (= {its-c}    (load-branch aod-path (concat tf "/" nuc-tree) "fITSclusterSizes"))
+
+      ;;; Derived columns
+      (= {anti-c}   (col-map-ptr anti-fn pt-c))
+      (= {tgl-c}    (col-map-ptr sinh-fn eta-c))
+      (= {cls-c}    (col-its-cls-size its-c tgl-c))
+      (= {mass2-c}  (col-zip-ptr mass2-beta-fn pinner-c beta-c))
+
+      ;;; Quality mask
+      (= {m-ev}    (col-zip-ptr evsel-ok-ptr zvtx-c (col-cast-f32 ncon-c)))
+      (= {m-eta}   (col-map-ptr eta-ok-ptr eta-c))
+      (= {m-cls}   (col-map-ptr cls-ok-ptr (col-cast-f32 ncls-c)))
+      (= {m-tpcq}  (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
+      (= {m-crows} (col-zip-ptr crows-ok-ptr
+                     (col-cast-f32 crows-c) (col-cast-f32 find-c)))
+      (= {m-dca}   (col-zip-ptr dca-nuc-ptr dcaxy-c dcaz-c))
+      (= {qual-c}  (col-and m-ev (col-and m-eta
+                     (col-and m-cls (col-and m-tpcq
+                       (col-and m-crows m-dca))))))
+
+      ;;; Combined selection: anti + quality
+      (= {sel-c}   (col-and anti-c qual-c))
+
+      ;;; TPC PID masks for selected anti-tracks
+      (= {tpc3-c}  (col-and (col-zip-ptr pid-he3-ptr sig-c pinner-c) sel-c))
+      (= {tpc4-c}  (col-and (col-zip-ptr pid-he4-ptr sig-c pinner-c) sel-c))
+
+      ;;; nσ_TPC for all selected anti-tracks
+      (col-fill-h1 h-nsig-he3
+        (col-filter-ptr keep9k-fn
+          (col-zip-ptr tag9k-fn (col-zip-ptr nsig-tpc-he3-ptr sig-c pinner-c) sel-c)))
+      (col-fill-h1 h-nsig-he4
+        (col-filter-ptr keep9k-fn
+          (col-zip-ptr tag9k-fn (col-zip-ptr nsig-tpc-he4-ptr sig-c pinner-c) sel-c)))
+
+      ;;; TOF mass² for TPC candidates (filter no-TOF sentinel −999)
+      (col-fill-h1 h-m2-he3
+        (col-filter-ptr keep-m2-fn
+          (col-filter-ptr keep9k-fn (col-zip-ptr tag9k-fn mass2-c tpc3-c))))
+      (col-fill-h1 h-m2-he4
+        (col-filter-ptr keep-m2-fn
+          (col-filter-ptr keep9k-fn (col-zip-ptr tag9k-fn mass2-c tpc4-c))))
+
+      ;;; ITS cluster size for TPC candidates
+      (col-fill-h1 h-cls-he3
+        (col-filter-ptr keep9k-fn (col-zip-ptr tag9k-fn cls-c tpc3-c)))
+      (col-fill-h1 h-cls-he4
+        (col-filter-ptr keep9k-fn (col-zip-ptr tag9k-fn cls-c tpc4-c)))
+
+      ;;; dE/dx 2D overview (all selected anti-tracks)
+      (col-fill-h2 h-dedx
+        (col-zip-ptr tag-neg-fn pinner-c sel-c)
+        (col-zip-ptr tag-neg-fn sig-c    sel-c))})
+
+    ;;; Summary
+    (print "He3 nsig entries:"      (.GetEntries h-nsig-he3))
+    (print "He4 nsig entries:"      (.GetEntries h-nsig-he4))
+    (print "He3 mass² (TPC+TOF):"   (.GetEntries h-m2-he3))
+    (print "He4 mass² (TPC+TOF):"   (.GetEntries h-m2-he4))
+    (do
+      (= {b1} (.FindBin h-nsig-he3 (- 0.0 3.0)))
+      (= {b2} (.FindBin h-nsig-he3 3.0))
+      (print "He3 TPC candidates (|nσ|<3):" (.Integral h-nsig-he3 b1 b2))
+      (print "He4 TPC candidates (|nσ|<3):" (.Integral h-nsig-he4 b1 b2)))
+
+    ;;; Draw — nσ canvas
+    (= {c-nsig} (new TCanvas "c_nsig_nuc" "n#sigma_{TPC} nuclei" 1000 500))
+    (.Divide c-nsig 2 1)
+    (.cd c-nsig 1)
+    (.SetLogy (.GetPad c-nsig 1) 1)
+    (doto h-nsig-he3 {SetLineColor 2} {SetLineWidth 2} {Draw "hist"})
+    (.cd c-nsig 2)
+    (.SetLogy (.GetPad c-nsig 2) 1)
+    (doto h-nsig-he4 {SetLineColor 4} {SetLineWidth 2} {Draw "hist"})
+    (.Update c-nsig)
+
+    ;;; Draw — TOF mass² canvas
+    (= {c-m2} (new TCanvas "c_m2_nuc" "TOF m^{2} nuclei" 1000 500))
+    (.Divide c-m2 2 1)
+    (.cd c-m2 1)
+    (doto h-m2-he3 {SetLineColor 2} {SetLineWidth 2} {Draw "hist"})
+    (.cd c-m2 2)
+    (doto h-m2-he4 {SetLineColor 4} {SetLineWidth 2} {Draw "hist"})
+    (.Update c-m2)
+
+    ;;; Draw — ITS cluster size canvas
+    (= {c-cls} (new TCanvas "c_cls_nuc" "ITS #LTcls#GT#timescos(#lambda) nuclei" 1000 500))
+    (.Divide c-cls 2 1)
+    (.cd c-cls 1)
+    (doto h-cls-he3 {SetLineColor 2} {SetLineWidth 2} {Draw "hist"})
+    (.cd c-cls 2)
+    (doto h-cls-he4 {SetLineColor 4} {SetLineWidth 2} {Draw "hist"})
+    (.Update c-cls)
+
+    ;;; Draw — dE/dx 2D
+    (= {c-dedx} (new TCanvas "c_dedx_nuc" "dE/dx anti-tracks" 800 600))
+    (.SetLogz c-dedx 1)
+    (.Draw h-dedx "colz")
+    (.Update c-dedx)}))
+
+(provide {run tf-pairs
+          h-nsig-he3 h-nsig-he4
+          h-m2-he3   h-m2-he4
+          h-cls-he3  h-cls-he4
+          h-dedx})

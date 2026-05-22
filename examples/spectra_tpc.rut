@@ -46,7 +46,7 @@
 (default {extra-tree} "O2trackextra_002")
 (default {coll-tree}  "O2collision_001")
 (default {bc-tree}    "O2bc_001")
-(def {bz} 0.5)   ;;; solenoid field in Tesla
+(default {bz} 0.5)   ;;; solenoid field in Tesla
 
 ;;; ITS cluster branch name:
 ;;;   "fITSClusterMap"   — Run2 local files (uint8 bitmask, 1 bit per layer)
@@ -64,6 +64,7 @@
 (default {tvx-bit}   -1)      ;;; -1 = skip TVX (fTriggerMask not filled in all datasets)
 (default {pvz-cut}   10.0)
 (load examples/eventsel.rut)
+(load examples/tracksel.rut)
 
 ;;; ── Optional: fetch BB parameters from CCDB ─────────────────────────────
 ;;; Set ccdb-pid-ts to any Unix timestamp in ms (or 1 to use CCDB's default).
@@ -133,106 +134,6 @@
     (.SetValue gEnv "XNet.ConnectTimeout" 10)
     (def {tf-pairs} {})})
 
-;;; ── propagate-to-dca ─────────────────────────────────────────────────────
-;;;
-;;; Closed-form of TrackParametrization::propagateParamToDCA (O2 GPU track).
-;;; The O2 code calls rotateParam + propagateParamTo internally.  This
-;;; col-jit-fn inlines both into a single pass with no heap allocation.
-;;;
-;;; Variable correspondence with O2 propagateParamTo(xv, b):
-;;;   dx_prop  = -x2        (propagation distance from track to vertex)
-;;;   x2r_prop = crv*dx_prop (arc parameter)
-;;;   f1 = snp2, f2 = snp2 + x2r_prop = snp2 - crv*x2
-;;;   dy2dx = (f1+f2)/(r1+r2)
-;;;   dcaXY = y_after - yv2  = (y2+yv2) + dx_prop*dy2dx - yv2
-;;;         = y2 - x2*dy2dx
-;;;
-;;; B2C = -0.299792458e-3
-;;; crv = fQ1Pt * bz * B2C  (bz captured from outer env, constant-folded)
-
-(def {propagate-to-dca}
-  (col-jit-fn {float float}
-    (\{{col fX} {col fY} {col fZ} {col fSnp} {col fTgl} {col fQ1Pt} {col fAlpha}
-       {col pvX} {col pvY} {col pvZ}}
-      {do
-        ;;; signed curvature
-        (= {crv}   (* fQ1Pt bz -2.99792458e-4f))
-
-        ;;; sin/cos of sector angle; rotate PV into local (alpha) frame
-        (= {sn}    (sinf fAlpha))
-        (= {cs}    (cosf fAlpha))
-        (= {xv}    (+ (* pvX cs) (* pvY sn)))
-        (= {yv}    (- (* pvY cs) (* pvX sn)))
-
-        ;;; track position relative to PV in local frame
-        (= {x0}    (- fX xv))
-        (= {y0}    (- fY yv))
-
-        ;;; cos(phi_track)
-        (= {csp}   (sqrtf (fabsf (- 1.0f (* fSnp fSnp)))))
-
-        ;;; rotation angle to align track-vertex direction with x-axis
-        (= {denom} (+ (* crv y0) csp))
-        (= {tgfv}  (if (> (fabsf denom) 1e-8f)
-          {(/ (- fSnp (* crv x0)) denom)}
-          {0.0f}))
-
-        ;;; sin2: sin of extra rotation
-        (= {sn2}   (/ tgfv (sqrtf (+ 1.0f (* tgfv tgfv)))))
-        ;;; cs2: use sn2/tgfv (O2 formula, more stable than sqrt(1-sn2^2))
-        (= {cs2}   (if (> (fabsf tgfv) 1e-8f) {(/ sn2 tgfv)} {1.0f}))
-
-        ;;; vertex in new (doubly-rotated) frame — used for Z DCA only
-        (= {yv2}   (- (* yv cs2) (* xv sn2)))
-
-        ;;; track displacement in new frame (relative to vertex)
-        (= {x2}    (+ (* x0 cs2) (* y0 sn2)))
-        (= {y2}    (- (* y0 cs2) (* x0 sn2)))
-
-        ;;; rotated snp2 = snp*cos(extra_rotation) - csp*sin(extra_rotation)
-        (= {snp2}  (- (* fSnp cs2) (* csp sn2)))
-
-        ;;; ── Translate propagateParamTo(xv2, b) ──────────────────────────
-        ;;; dx_prop = xv2 - mX_after_rotate = -x2  (vertex is at x = mX_new + x2)
-        ;;; x2r_prop = crv * dx_prop = -crv*x2
-        (= {x2rp}  (* (- 0.0f crv) x2))   ;;; -crv*x2
-        (= {f1}    snp2)
-        (= {f2}    (+ f1 x2rp))            ;;; snp2 - crv*x2
-        (= {r1}    (sqrtf (fabsf (- 1.0f (* f1 f1)))))
-        (= {r2}    (sqrtf (fabsf (- 1.0f (* f2 f2)))))
-        (= {dy2dx} (/ (+ f1 f2) (+ r1 r2)))
-
-        ;;; XY DCA: y_after_propagation - yv2
-        ;;; y_after = (y2 + yv2) + dx_prop*dy2dx = (y2+yv2) - x2*dy2dx
-        ;;; dca[0] = y_after - yv2 = y2 - x2*dy2dx
-        (= {dcaXY} (- y2 (* x2 dy2dx)))
-
-        ;;; Z DCA: use arc or linear formula from propagateParamTo
-        (= {arcz}  (> (fabsf x2rp) 0.05f))
-        (= {arg_z} (- (* r1 f2) (* r2 f1)))
-        ;;; clamp arg_z to [-1,1] before asinf
-        (= {arg_c} (if (> arg_z  1.0f) {1.0f}
-                    {(if (< arg_z -1.0f) {-1.0f} {arg_z})}))
-        (= {rot0}  (asinf arg_c))
-        ;;; large-rotation correction (O2: if f1^2+f2^2>1 and f1*f2<0)
-        (= {rot}   (if (> (+ (* f1 f1) (* f2 f2)) 1.0f)
-                    {(if (< (* f1 f2) 0.0f)
-                      {(if (> f2 0.0f)
-                        {(- 3.14159265f rot0)}
-                        {(- (- 0.0f 3.14159265f) rot0)})}
-                      {rot0})}
-                    {rot0}))
-        ;;; arc dz = tgl/crv * rot;  use crv directly (|x2rp|>0.05 ⟹ crv≠0)
-        (= {dz_arc} (* (/ fTgl crv) rot))
-        ;;; linear dz = dx_prop * (r2 + f2*dy2dx) * tgl  (dx_prop = -x2)
-        (= {dz_lin} (* (- 0.0f x2) (+ r2 (* f2 dy2dx)) fTgl))
-        (= {dz}    (if arcz {dz_arc} {dz_lin}))
-
-        ;;; Z DCA: z_after_propagation - pvZ
-        (= {dcaZ}  (- (+ fZ dz) pvZ))
-
-        {dcaXY dcaZ}})))
-
 ;;; ── Auxiliary jit-fns ────────────────────────────────────────────────────
 
 (def {pt-ptr}
@@ -246,68 +147,6 @@
       {(/ (sqrtf (+ 1.0f (* tgl tgl))) (fabsf s1pt))})})))
 
 ;;; η = asinh(tgl); mask: |η| < 0.8
-(def {eta-ok-ptr}
-  (jitfn! "eta-ok" float (\{{float tgl}}
-    {(if (< (fabsf (asinhf tgl)) 0.8f) {1.0f} {0.0f})})))
-
-(def {sub-ptr}
-  (jitfn! "sub" float (\{{float a} {float b}} {(- a b)})))
-
-;;; DCA primary-track selection.
-;;;
-;;; flat-dca-mode 0 (default): pT-parameterised cut matching isGlobalTrack()
-;;;   |dcaXY| < 0.0105 + 0.035 / pT^1.1   (tight at low pT, rejects Λ→pπ secondaries)
-;;;   |dcaZ|  < 2.0 cm
-;;;
-;;; flat-dca-mode 1: flat track-quality-only cuts (reproduces the secondary contamination
-;;;   that was present before the pT-parameterised cut was introduced)
-;;;   |dcaXY| < 2.4 cm,  |dcaZ| < 3.2 cm
-;;;
-;;; Set before loading to reproduce the old behaviour, e.g. to generate before/after plots:
-;;;   (def {flat-dca-mode} 1)
-;;;   (load "examples/spectra_tpc.rut")
-(default {flat-dca-mode} 0)
-(def {dca-ok-ptr}
-  (if (== flat-dca-mode 1)
-    {jitfn! "dca-ok-flat" float (\{{float dxy} {float dz} {float pt}}
-      {(if (< (fabsf dxy) 2.4f)
-        {(if (< (fabsf dz) 3.2f) {1.0f} {0.0f})}
-        {0.0f})})}
-    {jitfn! "dca-ok-pt" float (\{{float dxy} {float dz} {float pt}}
-      {(if (< (fabsf dxy) (+ 0.0105f (/ 0.0350f (powf (fabsf pt) 1.1f))))
-        {(if (< (fabsf dz) 2.0f) {1.0f} {0.0f})}
-        {0.0f})})}))
-
-;;; mutable nCls threshold
-(def {min-cls-box} (new TArrayI 1))
-(.SetAt min-cls-box 70 0)
-
-(def {cls-ok-ptr}
-  (jitfn! "cls-ok" float (\{{float ncls}}
-    {(if (>= ncls (.GetAt min-cls-box 0)) {1.0f} {0.0f})})))
-
-;;; global track quality cuts matching isGlobalTrack()
-;;; ITS: at least 1 cluster AND ITS chi2/cluster < 36
-(def {its-ok-ptr}
-  (jitfn! "its-ok" float (\{{float itsmap} {float itschi2}}
-    {(if (> itsmap 0.5f)
-      {(if (< itschi2 36.0f) {1.0f} {0.0f})}
-      {0.0f})})))
-
-;;; TPC chi2/cluster < 4
-(def {tpcchi2-ok-ptr}
-  (jitfn! "tpcchi2-ok" float (\{{float chi2}}
-    {(if (< chi2 4.0f) {1.0f} {0.0f})})))
-
-;;; TPC crossed rows >= 70 AND crossed/findable >= 0.8
-(def {crows-ok-ptr}
-  (jitfn! "crows-ok" float (\{{float ncrows} {float nfind}}
-    {(if (>= ncrows 70.0f)
-      {(if (> nfind 0.5f)
-        {(if (>= (/ ncrows nfind) 0.8f) {1.0f} {0.0f})}
-        {0.0f})}
-      {0.0f})})))
-
 ;;; ── Spectra analysis ────────────────────────────────────────────────────
 ;;; Call (run) to execute. Skipped automatically when raa-mode=1.
 (fun {run} {do
