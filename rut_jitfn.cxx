@@ -279,8 +279,24 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   // General direct C/C++ function call: (fn arg1 arg2 ...) → fn(arg1, arg2, ...)
   // This lets col-jit-fn bodies call any C function visible in the Cling session,
   // e.g. (cosf x), (atan2f y x), (sqrtf x), (fmaxf a b).
+  //
+  // If `fn` is a jit-fn value in the closure environment, use its actual C++ name
+  // (e.g. __rut_jitfn_5) instead of the Lisp identifier.  This allows one jit-fn
+  // to call another without inlining:
+  //   (def {helper} (jit-fn float (\{{float x}} {...})))
+  //   (def {outer}  (jit-fn float (\{{float x}} {(helper x)})))  ← works
   {
-    std::string call = to_cpp_id(s) + "(";
+    std::string fn_cpp = to_cpp_id(s);
+    if (ctx.env) {
+      lval tmp; tmp.type = LVAL_SYM; tmp.sym = const_cast<char*>(s);
+      lval* found = lenv_get(ctx.env, &tmp);
+      if (found) {
+        if (found->type == LVAL_JITFN)
+          fn_cpp = std::string(found->sym);  // the declared C++ name, e.g. __rut_jitfn_5
+        lval_del(found);
+      }
+    }
+    std::string call = fn_cpp + "(";
     for (int i = 1; i < v->count; i++) {
       if (i > 1) call += ", ";
       call += rut_to_cpp_expr(v->cell[i], ctx);

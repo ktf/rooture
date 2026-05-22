@@ -81,15 +81,7 @@
 (def {nsig-tpc-he3-fn}
   (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}   (/ (* 2.0f pinner) 2.80839f))
-      (= {safe} (> bg 0.05f))
-      (= {bg_s} (if safe {bg} {1.0f}))
-      (= {beta} (/ bg_s (sqrtf (+ 1.0f (* bg_s bg_s)))))
-      (= {aa}   (powf beta 0.8225f))
-      (= {lnt}  (logf (+ 1.591f (powf (/ 1.0f bg_s) 2.363f))))
-      (= {exp_} (if safe
-        {(/ (* (- (- 0.6539f aa) lnt) (- 0.0f 321.34f)) aa)}
-        {9999.0f}))
+      (= {exp_}  (bb-he3-fn (* 2.0f pinner)))
       (= {sigma} (* bb-res exp_))
       (if (> exp_ 1.0f) {(/ (- sig exp_) sigma)} {9999.0f})})))
 
@@ -112,15 +104,7 @@
 (def {pid-he3-fn}
   (jit-fn float (\{{float sig} {float pinner}}
     {do
-      (= {bg}   (/ (* 2.0f pinner) 2.80839f))
-      (= {safe} (> bg 0.05f))
-      (= {bg_s} (if safe {bg} {1.0f}))
-      (= {beta} (/ bg_s (sqrtf (+ 1.0f (* bg_s bg_s)))))
-      (= {aa}   (powf beta 0.8225f))
-      (= {lnt}  (logf (+ 1.591f (powf (/ 1.0f bg_s) 2.363f))))
-      (= {exp_} (if safe
-        {(/ (* (- (- 0.6539f aa) lnt) (- 0.0f 321.34f)) aa)}
-        {9999.0f}))
+      (= {exp_}  (bb-he3-fn (* 2.0f pinner)))
       (= {sigma} (* bb-res exp_))
       (= {nsig}  (if (> exp_ 1.0f) {(/ (- sig exp_) sigma)} {9999.0f}))
       (if (< (fabs nsig) nsigma-max) {1.0f} {0.0f})})))
