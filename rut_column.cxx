@@ -573,17 +573,21 @@ static lval* col_reduce_impl(void* fp, lval* init, RutColumnPtr& col) {
   return result;
 }
 
-static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx) {
+// out_dtype == -1 means "same as input dtype"
+static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx,
+                          int out_dtype = -1) {
   // Promote any FP16 inputs to float32 (zero-cost for non-FP16 columns).
   std::vector<RutColumnPtr> cols(ncols);
   for (int i = 0; i < ncols; i++)
     cols[i] = col_promote_fp16_to_f32(col_of(a->cell[first_col_idx + i]));
-  size_t n   = cols[0]->n;
-  int  dtype = cols[0]->dtype;
-  size_t esz = col_dtype_size(dtype);
-  void* out  = col_alloc(n * esz);
+  size_t n      = cols[0]->n;
+  int    idtype = cols[0]->dtype;
+  int    odtype = (out_dtype < 0) ? idtype : out_dtype;
+  size_t oesz   = col_dtype_size(odtype);
+  void*  out    = col_alloc(n * oesz);
   if (!out) return lval_err("col-zip: out of memory");
 
+// Same-type ZIP: inputs and return are all T.
 #define ZIP2(T) do { \
     auto f=(T(*)(T,T))fp; T* pa=(T*)cols[0]->data; \
     T* pb=(T*)cols[1]->data; T* po=(T*)out; \
@@ -598,26 +602,69 @@ static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx) {
     T* pd=(T*)cols[3]->data; T* po=(T*)out; \
     for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i],pc[i],pd[i]); } while(0)
 #define DISPATCH_ZIP(T) switch(ncols){case 2:ZIP2(T);break;case 3:ZIP3(T);break;case 4:ZIP4(T);break;}
-  switch (dtype) {
-    case COL_FLOAT32: DISPATCH_ZIP(float);    break;
-    case COL_FLOAT64: DISPATCH_ZIP(double);   break;
-    case COL_INT64:   DISPATCH_ZIP(int64_t);  break;
-    case COL_UINT64:  DISPATCH_ZIP(uint64_t); break;
-    case COL_INT32:   DISPATCH_ZIP(int32_t);  break;
-    case COL_UINT32:  DISPATCH_ZIP(uint32_t); break;
-    case COL_INT16:   DISPATCH_ZIP(int16_t);  break;
-    case COL_UINT16:  DISPATCH_ZIP(uint16_t); break;
-    case COL_INT8:    DISPATCH_ZIP(int8_t);   break;
-    case COL_UINT8:   DISPATCH_ZIP(uint8_t);  break;
-    case COL_BOOL:    DISPATCH_ZIP(char);     break;
-    default: free(out); return lval_err("col-zip: unsupported dtype");
+// Cross-type ZIP: inputs are Tin, return is Tout.
+#define XZIP2(Tin,Tout) do { \
+    auto f=(Tout(*)(Tin,Tin))fp; Tin* pa=(Tin*)cols[0]->data; \
+    Tin* pb=(Tin*)cols[1]->data; Tout* po=(Tout*)out; \
+    for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i]); } while(0)
+#define XZIP3(Tin,Tout) do { \
+    auto f=(Tout(*)(Tin,Tin,Tin))fp; Tin* pa=(Tin*)cols[0]->data; \
+    Tin* pb=(Tin*)cols[1]->data; Tin* pc=(Tin*)cols[2]->data; Tout* po=(Tout*)out; \
+    for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i],pc[i]); } while(0)
+#define XZIP4(Tin,Tout) do { \
+    auto f=(Tout(*)(Tin,Tin,Tin,Tin))fp; Tin* pa=(Tin*)cols[0]->data; \
+    Tin* pb=(Tin*)cols[1]->data; Tin* pc=(Tin*)cols[2]->data; \
+    Tin* pd=(Tin*)cols[3]->data; Tout* po=(Tout*)out; \
+    for (size_t i=0;i<n;i++) po[i]=f(pa[i],pb[i],pc[i],pd[i]); } while(0)
+#define XDISPATCH(Tin,Tout) switch(ncols){case 2:XZIP2(Tin,Tout);break;case 3:XZIP3(Tin,Tout);break;case 4:XZIP4(Tin,Tout);break;}
+#define CROSS_DISPATCH_ZIP(Tin) \
+    switch(odtype){ \
+      case COL_FLOAT32: XDISPATCH(Tin,float);    break; \
+      case COL_FLOAT64: XDISPATCH(Tin,double);   break; \
+      case COL_INT32:   XDISPATCH(Tin,int32_t);  break; \
+      case COL_UINT32:  XDISPATCH(Tin,uint32_t); break; \
+      default: free(out); return lval_err("col-zip: unsupported output dtype for cross-type"); \
+    }
+
+  if (odtype == idtype) {
+    switch (idtype) {
+      case COL_FLOAT32: DISPATCH_ZIP(float);    break;
+      case COL_FLOAT64: DISPATCH_ZIP(double);   break;
+      case COL_INT64:   DISPATCH_ZIP(int64_t);  break;
+      case COL_UINT64:  DISPATCH_ZIP(uint64_t); break;
+      case COL_INT32:   DISPATCH_ZIP(int32_t);  break;
+      case COL_UINT32:  DISPATCH_ZIP(uint32_t); break;
+      case COL_INT16:   DISPATCH_ZIP(int16_t);  break;
+      case COL_UINT16:  DISPATCH_ZIP(uint16_t); break;
+      case COL_INT8:    DISPATCH_ZIP(int8_t);   break;
+      case COL_UINT8:   DISPATCH_ZIP(uint8_t);  break;
+      case COL_BOOL:    DISPATCH_ZIP(char);     break;
+      default: free(out); return lval_err("col-zip: unsupported dtype");
+    }
+  } else {
+    switch (idtype) {
+      case COL_FLOAT32: CROSS_DISPATCH_ZIP(float);    break;
+      case COL_FLOAT64: CROSS_DISPATCH_ZIP(double);   break;
+      case COL_INT32:   CROSS_DISPATCH_ZIP(int32_t);  break;
+      case COL_UINT32:  CROSS_DISPATCH_ZIP(uint32_t); break;
+      case COL_INT16:   CROSS_DISPATCH_ZIP(int16_t);  break;
+      case COL_UINT16:  CROSS_DISPATCH_ZIP(uint16_t); break;
+      case COL_INT8:    CROSS_DISPATCH_ZIP(int8_t);   break;
+      case COL_UINT8:   CROSS_DISPATCH_ZIP(uint8_t);  break;
+      default: free(out); return lval_err("col-zip: unsupported input dtype for cross-type");
+    }
   }
 #undef ZIP2
 #undef ZIP3
 #undef ZIP4
 #undef DISPATCH_ZIP
+#undef XZIP2
+#undef XZIP3
+#undef XZIP4
+#undef XDISPATCH
+#undef CROSS_DISPATCH_ZIP
   auto c = std::make_shared<RutColumn>();
-  c->dtype = dtype; c->n = n; c->data = out;
+  c->dtype = odtype; c->n = n; c->data = out;
   return lval_column(std::move(c));
 }
 
@@ -953,11 +1000,24 @@ static lval* builtin_col_zip(lenv* /*e*/, lval* a) {
   lval_del(a);
   return r;
 }
+// (col-zip-ptr ptr col1 col2 [col3 [col4]] ["typename"])
+// Optional trailing string specifies output dtype (e.g. "float") for cross-type dispatch.
 static lval* builtin_col_zip_ptr(lenv* /*e*/, lval* a) {
-  LASSERT(a, a->count >= 3 && a->count <= 5,
-          "'col-zip-ptr' expects 3–5 arguments (ptr + 2–4 columns), got %i", a->count);
+  LASSERT(a, a->count >= 3 && a->count <= 6,
+          "'col-zip-ptr' expects 3–6 arguments (ptr + 2–4 cols [+ type]), got %i", a->count);
   LASSERT_TYPE("col-zip-ptr", a, 0, LVAL_NUM);
-  int ncols = a->count - 1;
+  // Detect optional trailing output-type string.
+  int out_dtype = -1;
+  int total = a->count;
+  if (a->cell[total - 1]->type == LVAL_STR) {
+    out_dtype = col_dtype_from_name(a->cell[total - 1]->str);
+    LASSERT(a, out_dtype >= 0,
+            "col-zip-ptr: unknown output type '%s'", a->cell[total - 1]->str);
+    total--;  // columns are a->cell[1..total-1]
+  }
+  int ncols = total - 1;
+  LASSERT(a, ncols >= 2 && ncols <= 4,
+          "'col-zip-ptr' expects 2–4 column arguments, got %d", ncols);
   for (int i = 1; i <= ncols; i++)
     LASSERT(a, a->cell[i]->type == LVAL_COLUMN,
             "'col-zip-ptr' argument %d must be a Column", i);
@@ -965,7 +1025,7 @@ static lval* builtin_col_zip_ptr(lenv* /*e*/, lval* a) {
     LASSERT(a, col_of(a->cell[i])->n == col_of(a->cell[1])->n,
             "'col-zip-ptr' all columns must have the same length");
   void* fp = (void*)a->cell[0]->num;
-  lval* r = col_zip_impl(fp, ncols, a, 1);
+  lval* r = col_zip_impl(fp, ncols, a, 1, out_dtype);
   lval_del(a);
   return r;
 }

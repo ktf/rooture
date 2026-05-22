@@ -109,34 +109,38 @@
   (jitfn-ptr (jit-fn float (\{{float tgl}}
     {(if (< (fabsf (asinhf tgl)) 0.8f) {1.0f} {0.0f})}))))
 
-;;; nCls ≥ 70 (mutable threshold stored in a TArrayI)
+;;; nCls ≥ 70: findable - fmin (uint8; C++ promotes to int)
 (def {min-cls-box} (new TArrayI 1))
 (.SetAt min-cls-box 70 0)
 
 (def {cls-ok-ptr}
-  (jitfn-ptr (jit-fn float (\{{float ncls}}
-    {(if (>= ncls (.GetAt min-cls-box 0)) {1.0f} {0.0f})}))))
+  (jitfn-ptr (jit-fn float (\{{uint8_t findable} {uint8_t fmin}}
+    {(if (>= (- findable fmin) (.GetAt min-cls-box 0)) {1.0f} {0.0f})}))))
 
-;;; ITS: ≥1 cluster AND chi2/cluster < 36
-(def {its-ok-ptr}
-  (jitfn-ptr (jit-fn float (\{{float itsmap} {float itschi2}}
-    {(if (> itsmap 0.5f)
-      {(if (< itschi2 36.0f) {1.0f} {0.0f})}
-      {0.0f})}))))
+;;; ITS cluster map (uint8) and chi2/cluster (float) — different types, separate fns
+(def {itsmap-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{uint8_t itsmap}}
+    {(if (> itsmap 0) {1.0f} {0.0f})}))))
+
+(def {itschi2-ok-ptr}
+  (jitfn-ptr (jit-fn float (\{{float itschi2}}
+    {(if (< itschi2 36.0f) {1.0f} {0.0f})}))))
 
 ;;; TPC chi2/cluster < 4
 (def {tpcchi2-ok-ptr}
   (jitfn-ptr (jit-fn float (\{{float chi2}}
     {(if (< chi2 4.0f) {1.0f} {0.0f})}))))
 
-;;; TPC crossed rows ≥ 70 AND crossed/findable ≥ 0.8
+;;; TPC crossed rows ≥ 70 AND crossed/findable ≥ 0.8 (uint8; ratio via float)
 (def {crows-ok-ptr}
-  (jitfn-ptr (jit-fn float (\{{float ncrows} {float nfind}}
-    {(if (>= ncrows 70.0f)
-      {(if (> nfind 0.5f)
-        {(if (>= (/ ncrows nfind) 0.8f) {1.0f} {0.0f})}
-        {0.0f})}
-      {0.0f})}))))
+  (jitfn-ptr (jit-fn float (\{{uint8_t findable} {uint8_t fcrows_minus}}
+    {do
+      (= {ncrows} (- findable fcrows_minus))
+      (if (>= ncrows 70)
+        {(if (> findable 0)
+          {(if (>= ncrows (* 0.8f findable)) {1.0f} {0.0f})}
+          {0.0f})}
+        {0.0f})}))))
 
 ;;; DCA primary-track selection:
 ;;;   flat-dca-mode 0 (default): pT-parameterised, matching isGlobalTrack()
@@ -164,6 +168,7 @@
 
 (provide {propagate-to-dca
           sub-ptr eta-ok-ptr
-          min-cls-box cls-ok-ptr its-ok-ptr
+          min-cls-box cls-ok-ptr
+          itsmap-ok-ptr itschi2-ok-ptr
           tpcchi2-ok-ptr crows-ok-ptr
           dca-ok-ptr dca-nuc-ptr})

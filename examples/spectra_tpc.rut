@@ -273,19 +273,16 @@
   (= {dcaxy-c} (nth 0 dca))
   (= {dcaz-c}  (nth 1 dca))
 
-  ;;; nCls = fTPCNClsFindable - fTPCNClsFindableMinusFound
-  ;;; nCrossedRows = fTPCNClsFindable - fTPCNClsFindableMinusCrossedRows
-  (= {ncls-c}   (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fmin-c)))
-  (= {ncrows-c} (col-zip-ptr sub-ptr (col-cast-f32 find-c) (col-cast-f32 fcrows-c)))
   (= {pt-c}     (col-map-ptr pt-ptr q1pt-c))
   (= {p-c}      (col-zip-ptr p-ptr q1pt-c tgl-c))
   (= {m-eta}    (col-map-ptr eta-ok-ptr tgl-c))
 
   ;;; quality mask: event sel AND eta AND nCls AND DCA AND global track cuts
-  (= {m-cls}   (col-map-ptr cls-ok-ptr ncls-c))
-  (= {m-its}   (col-zip-ptr its-ok-ptr (col-cast-f32 itsmap-c) (col-cast-f32 itschi2-c)))
-  (= {m-tpcq}  (col-map-ptr tpcchi2-ok-ptr (col-cast-f32 tpcchi2-c)))
-  (= {m-crows} (col-zip-ptr crows-ok-ptr ncrows-c (col-cast-f32 find-c)))
+  (= {m-cls}   (col-zip-ptr cls-ok-ptr find-c fmin-c "float"))
+  (= {m-its}   (col-and (col-map-ptr itsmap-ok-ptr itsmap-c "float")
+                        (col-map-ptr itschi2-ok-ptr itschi2-c)))
+  (= {m-tpcq}  (col-map-ptr tpcchi2-ok-ptr tpcchi2-c))
+  (= {m-crows} (col-zip-ptr crows-ok-ptr find-c fcrows-c "float"))
   (= {m-dca}   (col-zip-ptr dca-ok-ptr dcaxy-c dcaz-c pt-c))
   (= {mask}    (col-and m-ev m-eta m-cls m-dca m-its m-tpcq m-crows))
 
