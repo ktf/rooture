@@ -1,0 +1,84 @@
+;;; rotating_cube.rut
+;;;
+;;; A Rubik's-cube-style rotating cube in TEve — solid 5x5x5 grid.
+;;; Run interactively: (load ~/src/rooture/examples/rotating_cube.rut)
+
+(load stdlib.rut)
+
+(.Load gSystem "libGeom")
+(.Load gSystem "libEve")
+
+;;; Create TEve with the GL viewer
+(def {eve} (::Create TEveManager 1 "V"))
+
+;;; Parameters: 5 cubes per side, spacing = 1/3 of cube size
+(def {n} 5)
+(def {s} 2.)
+(def {gap} (* s (/ 2. 3.)))
+(def {step} (+ (* 2. s) gap))
+
+;;; Offset so the whole assembly is centered at origin
+(def {offset} (* -0.5 (* (- n 1) step)))
+
+;;; Helper to create one small cube at position (cx, cy, cz)
+(fun {make-cube cx cy cz color} {do
+  (= {box} (new TEveBox "sub"))
+  (.SetVertex box 0 (- cx s) (+ cy s) (- cz s))
+  (.SetVertex box 1 (+ cx s) (+ cy s) (- cz s))
+  (.SetVertex box 2 (+ cx s) (- cy s) (- cz s))
+  (.SetVertex box 3 (- cx s) (- cy s) (- cz s))
+  (.SetVertex box 4 (- cx s) (+ cy s) (+ cz s))
+  (.SetVertex box 5 (+ cx s) (+ cy s) (+ cz s))
+  (.SetVertex box 6 (+ cx s) (- cy s) (+ cz s))
+  (.SetVertex box 7 (- cx s) (- cy s) (+ cz s))
+  (.SetMainColor box color)
+  (.SetMainTransparency box 0)
+  (.AddElement eve box)
+})
+
+(fun {range a b} {
+  if (== a b)
+    {nil}
+    {join (list a) (range (+ a 1) b)}
+})
+
+;;; Color based on which face the cube is on (outermost layer gets face color,
+;;; interior cubes get white)
+(def {last} (- n 1))
+
+(fun {cube-color i j k} {
+  if (== k 0)    {2}      ; bottom: red
+  {if (== k last) {5}      ; top: yellow
+  {if (== i 0)    {3}      ; left: green
+  {if (== i last) {4}      ; right: blue
+  {if (== j 0)    {7}      ; front: cyan
+  {if (== j last) {6}      ; back: magenta
+  {0}}}}}}                  ; interior: white
+})
+
+;;; Full 5x5x5 grid
+(map (\{i} {
+  map (\{j} {
+    map (\{k} {do
+      (= {cx} (+ offset (* i step)))
+      (= {cy} (+ offset (* j step)))
+      (= {cz} (+ offset (* k step)))
+      (make-cube cx cy cz (cube-color i j k))
+    }) (range 0 n)
+  }) (range 0 n)
+}) (range 0 n))
+
+(.Redraw3D eve 1)
+
+;;; Center the view and enable auto-rotation
+(def {viewer} (.GetDefaultGLViewer eve))
+(.ResetCurrentCamera viewer)
+
+(def {ar} (.GetAutoRotator viewer))
+(.SetDt ar 0.01)
+(.SetWPhi ar 0.5)
+(.SetWTheta ar 0.0)
+(.SetATheta ar 0.0)
+(.Start ar)
+
+(print "Rotating cube running. Close the GL window to stop.")

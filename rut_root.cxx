@@ -1109,14 +1109,11 @@ lval *builtin_new(lenv *e, lval* a) {
       void* obj = (void*)gInterpreter->Calc(expr.c_str(), &ec);
       if (!obj || ec != TInterpreter::kNoError)
         return lval_err("Constructor failed for '%s'", className.c_str());
-      TClass* real_cls = cls->InheritsFrom(TObject::Class())
-          ? ((TObject*)obj)->IsA() : cls;
-      return lval_tobj(obj, real_cls ? real_cls : cls);
+      return lval_tobj(obj, cls);
     }
   }
   std::string args = lval_to_cpp_arg(e, a, 1);
   lval_del(a);
-
   // Try direct args first; if that fails (e.g. pointer where reference
   // expected), retry with TOBJ pointer args dereferenced: ((T*)p) → (*((T*)p))
   // Cache the working form per (className, arg-type-pattern) to avoid
@@ -1154,12 +1151,7 @@ lval *builtin_new(lenv *e, lval* a) {
   }
   if (!obj)
     return lval_err("Constructor failed for '%s'", className.c_str());
-  // Use IsA() for TObject-derived classes — no Cling call needed, works correctly
-  // for subclasses (e.g. new TBranch → TBranchElement::IsA()).
-  // For non-TObject types fall back to the declared class.
-  TClass* real_cls = cls->InheritsFrom(TObject::Class())
-      ? ((TObject*)obj)->IsA() : cls;
-  return lval_tobj(obj, real_cls ? real_cls : cls);
+  return lval_tobj(obj, cls);
 }
 
 // Invokes a method
