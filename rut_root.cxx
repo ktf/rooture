@@ -38,7 +38,10 @@ struct CachedMethodCall {
   TClass*                       ptr_ret_cls;  // valid when is_ptr_return
   std::vector<ParamKind>        param_kinds;  // per-parameter SetParam overload
 };
-static std::unordered_map<std::string, CachedMethodCall> g_method_cache;
+// Heap-allocated and deliberately leaked to avoid static destruction order
+// crash: TMethodCall::~TMethodCall touches Cling, which is already torn down
+// by the time static destructors run during exit().
+static auto& g_method_cache = *new std::unordered_map<std::string, CachedMethodCall>();
 
 void rut_method_cache_clear() { g_method_cache.clear(); }
 
