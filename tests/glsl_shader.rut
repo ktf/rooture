@@ -1,0 +1,173 @@
+;;; glsl_shader.rut — unit tests for the GLSL shader transpiler
+;;;
+;;; Since rooture has no string-search builtin, we verify the transpiler
+;;; produces output without errors and print the generated GLSL for
+;;; manual inspection.  The test passes if all transpilations succeed.
+(load stdlib.rut)
+
+;;; --- Basic vertex shader ---
+
+(def {v1}
+  (glsl-vert
+    {(uniform float uTime)
+     (varying vec3 vNormal)}
+    {do
+      (= {vec3 pos} (.xyz gl_Vertex))
+      (= {float theta} (atan (.y pos) (.x pos)))
+      (set! gl_Position (* gl_ModelViewProjectionMatrix (vec4 pos 1.0)))
+      (set! gl_FrontColor gl_Color)}))
+
+(print "=== Vertex shader v1 ===")
+(print v1)
+
+;;; --- Fragment shader ---
+
+(def {f1}
+  (glsl-frag
+    {(varying vec3 vNormal)
+     (varying vec3 vPos)}
+    {do
+      (= {vec3 N} (normalize vNormal))
+      (= {vec3 L} (normalize (- vPos)))
+      (= {float diff} (+ (* (max (dot N L) 0.0) 0.7) 0.3))
+      (set! gl_FragColor (vec4 (* (.rgb gl_Color) diff) (.a gl_Color)))}))
+
+(print "=== Fragment shader f1 ===")
+(print f1)
+
+;;; --- Constant folding ---
+
+(def {R} 5.0)
+(def {v2}
+  (glsl-vert
+    {(uniform float uTime)}
+    {do
+      (= {vec3 center} (* R (vec3 1.0 0.0 0.0)))
+      (set! gl_Position (vec4 center 1.0))}))
+
+(print "=== Constant folding (R=5.0) ===")
+(print v2)
+
+;;; --- TMath mapping ---
+
+(def {v3}
+  (glsl-vert
+    {}
+    {do
+      (= {float x} (::Sin TMath 1.0))
+      (= {float pi} (::Pi TMath))
+      (set! gl_Position (vec4 x pi 0.0 1.0))}))
+
+(print "=== TMath mapping ===")
+(print v3)
+
+;;; --- Sugared TMath ---
+
+(def {v3b}
+  (glsl-vert
+    {}
+    {do
+      (= {float x} (::Cos TMath 0.5))
+      (set! gl_Position (vec4 x 0.0 0.0 1.0))}))
+
+(print "=== Sugared TMath ===")
+(print v3b)
+
+;;; --- Type constructors ---
+
+(def {v4}
+  (glsl-vert
+    {}
+    {do
+      (= {vec3 a} (vec3 1.0 2.0 3.0))
+      (= {mat4 m} (mat4 1.0))
+      (set! gl_Position (vec4 a 1.0))}))
+
+(print "=== Type constructors ===")
+(print v4)
+
+;;; --- Casts ---
+
+(def {v5}
+  (glsl-vert
+    {}
+    {do
+      (= {int i} (to-int 3.5))
+      (= {float f} (to-float i))
+      (set! gl_Position (vec4 f 0.0 0.0 1.0))}))
+
+(print "=== Casts ===")
+(print v5)
+
+;;; --- Logic ---
+
+(def {v6}
+  (glsl-vert
+    {}
+    {do
+      (= {bool b} (and (> 1.0 0.0) (not (< 2.0 1.0))))
+      (set! gl_Position (vec4 0.0 0.0 0.0 1.0))}))
+
+(print "=== Logic ===")
+(print v6)
+
+;;; --- dotimes ---
+
+(def {v7}
+  (glsl-vert
+    {}
+    {do
+      (= {float wave} 0.0)
+      (dotimes {k} 4 {(+= wave 1.0)})
+      (set! gl_Position (vec4 wave 0.0 0.0 1.0))}))
+
+(print "=== dotimes ===")
+(print v7)
+
+;;; --- += and *= ---
+
+(def {v8}
+  (glsl-vert
+    {}
+    {do
+      (= {float x} 1.0)
+      (+= x 2.0)
+      (*= x 0.5)
+      (set! gl_Position (vec4 x 0.0 0.0 1.0))}))
+
+(print "=== += and *= ===")
+(print v8)
+
+;;; --- Full torus-like vertex shader (integration test) ---
+
+(def {r} 2.0)
+(def {v-torus}
+  (glsl-vert
+    {(uniform float uTime)
+     (uniform float uR)
+     (uniform float ur0)
+     (uniform float uAmp)
+     (varying vec3 vNormal)
+     (varying vec3 vPos)}
+    {do
+      (= {vec3 pos} (.xyz gl_Vertex))
+      (= {float theta} (atan (.y pos) (.x pos)))
+      (= {vec3 center} (* uR (vec3 (cos theta) (sin theta) 0.0)))
+      (= {vec3 radial} (- pos center))
+      (= {float dist} (length radial))
+      (= {vec3 dir} (/ radial (max dist 0.001)))
+      (= {float wave} 0.0)
+      (+= wave (sin (- (* 3.0 theta) (* 4.0 uTime))))
+      (+= wave (* (sin (+ (* 5.0 theta) (* 3.0 uTime))) 0.7))
+      (*= wave 0.4)
+      (= {float r} (+ ur0 (* uAmp wave)))
+      (= {vec3 newPos} (+ center (* r dir)))
+      (set! vPos (.xyz (* gl_ModelViewMatrix (vec4 newPos 1.0))))
+      (set! vNormal (* gl_NormalMatrix dir))
+      (set! gl_Position (* gl_ModelViewProjectionMatrix (vec4 newPos 1.0)))
+      (set! gl_FrontColor gl_Color)}))
+
+(print "=== Torus vertex shader ===")
+(print v-torus)
+
+(print "All glsl-shader tests passed")

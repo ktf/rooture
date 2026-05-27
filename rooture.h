@@ -329,5 +329,7 @@ void lenv_add_builtins_jitfn(lenv* e);
 void rut_file_cache_clear();    // close all cached TFiles (main thread)
 void rut_method_cache_clear();  // destroy TMethodCall cache while gCling is alive
 void lenv_add_builtins_column(lenv* e);
+void lenv_add_builtins_gl(lenv* e);
+void lenv_add_builtins_shader(lenv* e);
 void lenv_add_builtins_net(lenv* e);
 void lenv_add_builtins(lenv* e);

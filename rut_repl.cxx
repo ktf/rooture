@@ -109,6 +109,8 @@ void lenv_add_builtins(lenv* e) {
   lenv_add_builtins_root(e);
   lenv_add_builtins_jitfn(e);
   lenv_add_builtins_column(e);
+  lenv_add_builtins_gl(e);
+  lenv_add_builtins_shader(e);
   lenv_add_builtins_net(e);
 }
 

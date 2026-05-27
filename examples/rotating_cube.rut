@@ -51,13 +51,13 @@
 (def {last} (- n 1))
 
 (fun {cube-color i j k} {
-  if (== k 0)    {2}
-  {if (== k last) {5}
-  {if (== i 0)    {3}
-  {if (== i last) {4}
-  {if (== j 0)    {7}
-  {if (== j last) {6}
-  {0}}}}}}
+  if (== k 0)    {+ 2 0}
+  {if (== k last) {+ 5 0}
+  {if (== i 0)    {+ 3 0}
+  {if (== i last) {+ 4 0}
+  {if (== j 0)    {+ 7 0}
+  {if (== j last) {+ 6 0}
+  {+ 0 0}}}}}}
 })
 
 ;;; Full 5x5x5 grid
@@ -71,6 +71,59 @@
     }) (range 0 n)
   }) (range 0 n)
 }) (range 0 n))
+
+;;; ---------------------------------------------------------------
+;;; Torus via TEveTriangleSet, placed to the right of the cube
+;;; ---------------------------------------------------------------
+(def {nR} 36)          ; major divisions
+(def {nr} 18)          ; minor divisions
+(def {R} 25.)          ; major radius
+(def {r} 8.)           ; minor radius
+(def {tx} 50.)         ; torus center x offset
+
+(def {pi2} (* 2. (::Pi TMath)))
+(def {nVerts} (* nR nr))
+(def {nTris}  (* (* nR nr) 2))
+
+(def {torus} (new TEveTriangleSet nVerts nTris 1 0))
+
+;;; Set vertices
+(map (\{i} {
+  map (\{j} {do
+    (= {theta} (* pi2 (/ (* 1. i) nR)))
+    (= {phi}   (* pi2 (/ (* 1. j) nr)))
+    (= {cp} (::Cos TMath phi))
+    (= {sp} (::Sin TMath phi))
+    (= {ct} (::Cos TMath theta))
+    (= {st} (::Sin TMath theta))
+    (= {vx} (+ tx (* (+ R (* r cp)) ct)))
+    (= {vy} (* (+ R (* r cp)) st))
+    (= {vz} (* r sp))
+    (.SetVertex torus (+ (* i nr) j) vx vy vz)
+  }) (range 0 nr)
+}) (range 0 nR))
+
+;;; Set triangles (two per quad, index computed from i,j)
+(map (\{i} {
+  map (\{j} {do
+    (= {i1} (if (== i (- nR 1)) {(+ 0 0)} {(+ i 1)}))
+    (= {j1} (if (== j (- nr 1)) {(+ 0 0)} {(+ j 1)}))
+    (= {v00} (+ (* i nr) j))
+    (= {v10} (+ (* i1 nr) j))
+    (= {v11} (+ (* i1 nr) j1))
+    (= {v01} (+ (* i nr) j1))
+    (= {tidx} (* (+ (* i nr) j) 2))
+    (.SetTriangle torus tidx v00 v10 v11)
+    (.SetTriangle torus (+ tidx 1) v00 v11 v01)
+  }) (range 0 nr)
+}) (range 0 nR))
+
+(.GenerateTriangleNormals torus)
+(.SetMainColor torus 28)
+(.SetMainTransparency torus 0)
+(.AddElement eve torus)
+
+;;; ---------------------------------------------------------------
 
 (.Redraw3D eve 1)
 

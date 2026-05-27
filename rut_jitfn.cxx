@@ -180,6 +180,7 @@ static std::string rut_to_cpp_expr(lval* v, const JitCtx& ctx) {
   if (strcmp(s, "bor")  == 0) binop = "|";
   if (strcmp(s, "bxor") == 0) binop = "^";
   if (strcmp(s, "rem")  == 0) binop = "%";
+  if (strcmp(s, "%")    == 0) binop = "%";
   if (strcmp(s, "bshr") == 0) binop = ">>";
   if (strcmp(s, "bshl") == 0) binop = "<<";
   if (binop && v->count >= 3) {

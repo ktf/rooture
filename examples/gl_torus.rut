@@ -95,49 +95,45 @@
 ;;; constructive/destructive interference patterns on the GPU.
 ;;; ---------------------------------------------------------------
 
-(def {vert-src} "
-  uniform float uTime;
-  uniform float uR;
-  uniform float ur0;
-  uniform float uAmp;
-  varying vec3 vNormal;
-  varying vec3 vPos;
-  void main() {
-    vec3 pos = gl_Vertex.xyz;
-    float theta = atan(pos.y, pos.x);
-    vec3 center = uR * vec3(cos(theta), sin(theta), 0.0);
-    vec3 radial = pos - center;
-    float dist = length(radial);
-    vec3 dir = radial / max(dist, 0.001);
+(def {vert-src}
+  (glsl-vert
+    {(uniform float uTime)
+     (uniform float uR)
+     (uniform float ur0)
+     (uniform float uAmp)
+     (varying vec3 vNormal)
+     (varying vec3 vPos)}
+    {do
+      (= {vec3 pos} (.xyz gl_Vertex))
+      (= {float theta} (atan (.y pos) (.x pos)))
+      (= {vec3 center} (* uR (vec3 (cos theta) (sin theta) 0.0)))
+      (= {vec3 radial} (- pos center))
+      (= {float dist} (length radial))
+      (= {vec3 dir} (/ radial (max dist 0.001)))
 
-    // Superpose several waves with different frequencies and directions
-    // to produce evolving constructive/destructive interference
-    float wave = 0.0;
-    wave += sin( 3.0 * theta - 4.0  * uTime);          // 3-fold, forward
-    wave += sin( 5.0 * theta + 3.0  * uTime) * 0.7;    // 5-fold, backward
-    wave += sin( 2.0 * theta - 7.0  * uTime) * 0.5;    // 2-fold, fast forward
-    wave += sin( 8.0 * theta + 1.5  * uTime) * 0.4;    // 8-fold, slow backward
-    wave *= 0.4;  // scale combined amplitude
+      (= {float wave} 0.0)
+      (+= wave (sin (- (* 3.0 theta) (* 4.0 uTime))))
+      (+= wave (* (sin (+ (* 5.0 theta) (* 3.0 uTime))) 0.7))
+      (+= wave (* (sin (- (* 2.0 theta) (* 7.0 uTime))) 0.5))
+      (+= wave (* (sin (+ (* 8.0 theta) (* 1.5 uTime))) 0.4))
+      (*= wave 0.4)
 
-    float r = ur0 + uAmp * wave;
-    vec3 newPos = center + r * dir;
-    vPos = (gl_ModelViewMatrix * vec4(newPos, 1.0)).xyz;
-    vNormal = gl_NormalMatrix * dir;
-    gl_Position = gl_ModelViewProjectionMatrix * vec4(newPos, 1.0);
-    gl_FrontColor = gl_Color;
-  }
-")
+      (= {float r} (+ ur0 (* uAmp wave)))
+      (= {vec3 newPos} (+ center (* r dir)))
+      (set! vPos (.xyz (* gl_ModelViewMatrix (vec4 newPos 1.0))))
+      (set! vNormal (* gl_NormalMatrix dir))
+      (set! gl_Position (* gl_ModelViewProjectionMatrix (vec4 newPos 1.0)))
+      (set! gl_FrontColor gl_Color)}))
 
-(def {frag-src} "
-  varying vec3 vNormal;
-  varying vec3 vPos;
-  void main() {
-    vec3 N = normalize(vNormal);
-    vec3 L = normalize(-vPos);
-    float diff = max(dot(N, L), 0.0) * 0.7 + 0.3;
-    gl_FragColor = vec4(gl_Color.rgb * diff, gl_Color.a);
-  }
-")
+(def {frag-src}
+  (glsl-frag
+    {(varying vec3 vNormal)
+     (varying vec3 vPos)}
+    {do
+      (= {vec3 N} (normalize vNormal))
+      (= {vec3 L} (normalize (- vPos)))
+      (= {float diff} (+ (* (max (dot N L) 0.0) 0.7) 0.3))
+      (set! gl_FragColor (vec4 (* (.rgb gl_Color) diff) (.a gl_Color)))}))
 
 (gl-shader mesh vert-src frag-src)
 (gl-set-float mesh "uR"     R)

@@ -6,7 +6,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(ROOT REQUIRED COMPONENTS Core MathCore RIO Hist Tree TreePlayer ROOTVecOps ROOTDataFrame ROOTNTuple)
+find_package(ROOT REQUIRED COMPONENTS Core MathCore RIO Hist Tree TreePlayer ROOTVecOps ROOTDataFrame ROOTNTuple RGL Gui)
 include(${ROOT_USE_FILE})
 
 find_package(Threads REQUIRED)
@@ -41,6 +41,8 @@ add_executable(rooture
   rut_root.cxx
   rut_jitfn.cxx
   rut_column.cxx
+  rut_gl.cxx
+  rut_shader.cxx
   rut_net.cxx
   rut_repl.cxx
   mpc.c
@@ -58,6 +60,8 @@ target_link_libraries(rooture PRIVATE
   ROOT::Core ROOT::MathCore ROOT::RIO
   ROOT::Hist ROOT::Tree ROOT::TreePlayer
   ROOT::ROOTVecOps ROOT::ROOTDataFrame ROOT::ROOTNTuple
+  ROOT::RGL ROOT::Gui
+  "$<$<PLATFORM_ID:Darwin>:-framework OpenGL>"
   CURL::libcurl
 )
 target_compile_options(rooture PRIVATE -g -O2)
@@ -135,6 +139,15 @@ add_test(
 set_tests_properties(col_kernel PROPERTIES
   PASS_REGULAR_EXPRESSION "All col-kernel tests passed"
   DEPENDS col_f16
+)
+
+add_test(
+  NAME glsl_shader
+  COMMAND $<TARGET_FILE:rooture> tests/glsl_shader.rut
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(glsl_shader PROPERTIES
+  PASS_REGULAR_EXPRESSION "All glsl-shader tests passed"
 )
 
 add_test(

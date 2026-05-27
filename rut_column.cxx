@@ -1842,6 +1842,81 @@ static lval* builtin_col_fill_minv3_h1(lenv* /*e*/, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
+// col-interleave — interleave 2–4 same-length, same-dtype columns
+// (col-interleave cx cy cz) → x0 y0 z0 x1 y1 z1 ...
+// ---------------------------------------------------------------------------
+static lval* builtin_col_interleave(lenv* /*e*/, lval* a) {
+  LASSERT(a, a->count >= 2 && a->count <= 4,
+          "'col-interleave' expects 2–4 columns, got %d", a->count);
+  for (int i = 0; i < a->count; i++)
+    LASSERT(a, a->cell[i]->type == LVAL_COLUMN,
+            "'col-interleave' argument %d must be a Column", i);
+  int ncols = a->count;
+  auto& c0 = *(RutColumnPtr*)a->cell[0]->obj;
+  size_t n = c0->n;
+  int dtype = c0->dtype;
+  for (int i = 1; i < ncols; i++) {
+    auto& ci = *(RutColumnPtr*)a->cell[i]->obj;
+    LASSERT(a, ci->n == n,
+            "'col-interleave' all columns must have the same length");
+    LASSERT(a, ci->dtype == dtype,
+            "'col-interleave' all columns must have the same dtype");
+  }
+  size_t esz = col_dtype_size(dtype);
+  auto out = std::make_shared<RutColumn>();
+  out->dtype = dtype;
+  out->n     = n * ncols;
+  out->data  = col_alloc(out->n * esz);
+  char* dst = (char*)out->data;
+  // Gather pointers
+  const char* srcs[4];
+  for (int i = 0; i < ncols; i++)
+    srcs[i] = (const char*)(*(RutColumnPtr*)a->cell[i]->obj)->data;
+  for (size_t k = 0; k < n; k++) {
+    for (int c = 0; c < ncols; c++) {
+      memcpy(dst, srcs[c] + k * esz, esz);
+      dst += esz;
+    }
+  }
+  lval_del(a);
+  return lval_column(std::move(out));
+}
+
+// ---------------------------------------------------------------------------
+// col-gen-tri-grid — generate triangle indices for an nR × nr grid
+// (col-gen-tri-grid nR nr) → int32 column of 6·nR·nr indices
+// Two triangles per quad with wraparound.
+// ---------------------------------------------------------------------------
+static lval* builtin_col_gen_tri_grid(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-gen-tri-grid", a, 2);
+  LASSERT_TYPE("col-gen-tri-grid", a, 0, LVAL_NUM);
+  LASSERT_TYPE("col-gen-tri-grid", a, 1, LVAL_NUM);
+  int nR = (int)a->cell[0]->num;
+  int nr = (int)a->cell[1]->num;
+  lval_del(a);
+  size_t nIdx = (size_t)nR * nr * 6;
+  auto col = std::make_shared<RutColumn>();
+  col->dtype = COL_INT32;
+  col->n     = nIdx;
+  col->data  = col_alloc(nIdx * sizeof(int32_t));
+  int32_t* p = (int32_t*)col->data;
+  size_t cursor = 0;
+  for (int i = 0; i < nR; i++) {
+    int i1 = (i + 1) % nR;
+    for (int j = 0; j < nr; j++) {
+      int j1 = (j + 1) % nr;
+      int v00 = i  * nr + j;
+      int v10 = i1 * nr + j;
+      int v11 = i1 * nr + j1;
+      int v01 = i  * nr + j1;
+      p[cursor++] = v00; p[cursor++] = v10; p[cursor++] = v11;
+      p[cursor++] = v00; p[cursor++] = v11; p[cursor++] = v01;
+    }
+  }
+  return lval_column(std::move(col));
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 void lenv_add_builtins_column(lenv* e) {
@@ -1851,6 +1926,20 @@ void lenv_add_builtins_column(lenv* e) {
     lval_del(a);
     rut_dispatch_work([]{ rut_file_cache_clear(); });
     return lval_sexpr();
+  });
+  // (col-iota n) → column of int32: 0, 1, 2, ..., n-1
+  lenv_add_builtin(e, "col-iota", [](lenv*, lval* a) -> lval* {
+    LASSERT_NUM("col-iota", a, 1);
+    LASSERT_TYPE("col-iota", a, 0, LVAL_NUM);
+    size_t n = (size_t)a->cell[0]->num;
+    lval_del(a);
+    auto col = std::make_shared<RutColumn>();
+    col->dtype = COL_INT32;
+    col->n     = n;
+    col->data  = col_alloc(n * sizeof(int32_t));
+    int32_t* p = (int32_t*)col->data;
+    for (size_t i = 0; i < n; i++) p[i] = (int32_t)i;
+    return lval_column(std::move(col));
   });
   lenv_add_builtin(e, "col-length",     builtin_col_length);
   lenv_add_builtin(e, "col-nrows",      builtin_col_nrows);
@@ -1884,6 +1973,8 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "col-fill-minv2-h1", builtin_col_fill_minv2_h1);
   lenv_add_builtin(e, "col-fill-minv3-h1", builtin_col_fill_minv3_h1);
   lenv_add_builtin(e, "jitfn-ptr",         builtin_jitfn_ptr);
+  lenv_add_builtin(e, "col-interleave",    builtin_col_interleave);
+  lenv_add_builtin(e, "col-gen-tri-grid",  builtin_col_gen_tri_grid);
 
   // Register the col-kernel call dispatcher (needs RutColumn access).
   g_kerneljitfn_dispatch = [](lval* fn, lval* args) -> lval* {

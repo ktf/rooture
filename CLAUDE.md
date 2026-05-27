@@ -282,3 +282,8 @@ in separate files within each skill's folder and referenced from `SKILL.md`.
 - `col-kernel-perf` — when to use `col-kernel` vs `col-group-sum` / `col-fill-h1`.
   Decision rule, benchmark numbers (LHC15o), API pitfalls. Read before implementing
   any scatter-accumulate loop or per-centrality histogram filling.
+
+- `rooture-gl` — native 3D rendering via `glDrawElements` on `TGLSAViewer`,
+  bypassing TEve. Covers `gl-viewer`, `gl-mesh`, `gl-add`, geometry column helpers
+  (`col-interleave`, `col-gen-tri-grid`), and critical pitfalls (output dtype,
+  screenshot limitations). Demo: `examples/gl_torus.rut`.
