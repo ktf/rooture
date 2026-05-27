@@ -69,9 +69,69 @@ Meshes support optional GLSL vertex+fragment shaders for GPU-side animation.
 |---------|-----------|-------------|
 | `gl-shader` | `(gl-shader mesh vert-src frag-src)` | Attach GLSL vertex + fragment shader sources (compiled lazily on first draw) |
 | `gl-set-float` | `(gl-set-float mesh "name" value)` | Set a float uniform on the mesh's shader |
+| `glsl-vert` | `(glsl-vert {decls} {body})` → string | Transpile rooture expressions to a GLSL vertex shader source string |
+| `glsl-frag` | `(glsl-frag {decls} {body})` → string | Transpile rooture expressions to a GLSL fragment shader source string |
 
 A built-in `uTime` uniform is auto-updated from the wall clock (seconds since
 mesh creation) on every frame.  No need to call `gl-set-float` for it.
+
+### Shader transpiler (`glsl-vert` / `glsl-frag`)
+
+**Always use `glsl-vert` / `glsl-frag` instead of raw GLSL strings.**  The
+transpiler (`rut_shader.cxx`) takes rooture expressions and emits GLSL source
+at runtime, returning an `LVAL_STR` for `gl-shader`.
+
+```scheme
+(glsl-vert
+  {(uniform float uTime)          ; declarations: (qualifier type name)
+   (varying vec3 vNormal)}
+  {do                              ; body: rooture statements → GLSL
+    (= {vec3 pos} (.xyz gl_Vertex))
+    (set! gl_Position (* gl_ModelViewProjectionMatrix (vec4 pos 1.0)))})
+```
+
+#### Expression mapping
+
+| Rooture form | GLSL output | Notes |
+|---|---|---|
+| `(.xyz v)` | `v.xyz` | Swizzle — any combo of `xyzwrgbastpq` |
+| `(vec3 a b c)` | `vec3(a, b, c)` | Type constructor (`vec2`–`vec4`, `mat2`–`mat4`, `float`, `int`, `bool`) |
+| `(sin x)`, `(normalize v)` | `sin(x)`, `normalize(v)` | GLSL builtins passed through |
+| `(::Sin TMath x)` | `sin(x)` | TMath→GLSL mapping (Sin, Cos, Abs, Floor, Sqrt, etc.) |
+| `(::Pi TMath)` | `3.14159265358979` | TMath constants become literals |
+| `(= {vec3 pos} e)` | `vec3 pos = e;` | Typed local declaration |
+| `(= {x} e)` | `float x = e;` | Untyped defaults to float |
+| `(set! gl_Position e)` | `gl_Position = e;` | Assignment to existing var / GL global |
+| `(+= wave e)` / `(*= x e)` | `wave += e;` / `x *= e;` | Compound assignment |
+| `(to-int x)` / `(to-float x)` | `int(x)` / `float(x)` | Cast |
+| `(dotimes {k} N {body})` | `for (int k = 0; ...)` | Loop |
+| `(if c {t} {f})` | `if / else` or ternary | Statement or expression context |
+| `(not x)` / `(and a b)` / `(or a b)` | `!(x)` / `&&` / `\|\|` | Logic |
+| Free variable (NUM/FLOAT) | Constant-folded literal | e.g. `(def {R} 5.0)` → `5.0` in GLSL |
+
+#### GLSL 1.20 float literal rule
+
+The fixed-function GL pipeline uses GLSL 1.20, which has **no implicit
+int→float conversion**.  The transpiler ensures all `LVAL_FLOAT` / `LVAL_FLOAT32`
+values always emit with a decimal point (`0.0`, `3.0`, not `0`, `3`).
+`LVAL_NUM` (integer) values emit as plain integers — appropriate for loop
+counters and `dotimes` bounds.
+
+#### Constant folding
+
+Any rooture variable in scope holding `LVAL_NUM`, `LVAL_FLOAT`, or
+`LVAL_FLOAT32` is baked into the GLSL as a literal:
+
+```scheme
+(def {R} 5.0)
+(def {vert-src}
+  (glsl-vert {} {do
+    (= {vec3 c} (* R (vec3 1.0 0.0 0.0)))  ; R → 5.0 in GLSL
+    ...}))
+```
+
+Variables bound to objects or functions are **not** folded — use uniforms for
+runtime values from the CPU side.
 
 ### Shader compilation
 
@@ -82,30 +142,33 @@ locations are resolved at the same time.
 ### Example: traveling wave
 
 ```scheme
-(def {vert-src} "
-  uniform float uTime;
-  uniform float uR;
-  uniform float ur0;
-  uniform float uAmp;
-  varying vec3 vNormal;
-  varying vec3 vPos;
-  void main() {
-    vec3 pos = gl_Vertex.xyz;
-    float theta = atan(pos.y, pos.x);
-    vec3 center = uR * vec3(cos(theta), sin(theta), 0.0);
-    vec3 radial = pos - center;
-    float dist = length(radial);
-    vec3 dir = radial / max(dist, 0.001);
-    float wave = sin(3.0 * theta - 4.0 * uTime)
-               + sin(5.0 * theta + 3.0 * uTime) * 0.7;
-    float r = ur0 + uAmp * wave * 0.5;
-    vec3 newPos = center + r * dir;
-    vPos = (gl_ModelViewMatrix * vec4(newPos, 1.0)).xyz;
-    vNormal = gl_NormalMatrix * dir;
-    gl_Position = gl_ModelViewProjectionMatrix * vec4(newPos, 1.0);
-    gl_FrontColor = gl_Color;
-  }
-")
+(def {vert-src}
+  (glsl-vert
+    {(uniform float uTime)
+     (uniform float uR)
+     (uniform float ur0)
+     (uniform float uAmp)
+     (varying vec3 vNormal)
+     (varying vec3 vPos)}
+    {do
+      (= {vec3 pos} (.xyz gl_Vertex))
+      (= {float theta} (atan (.y pos) (.x pos)))
+      (= {vec3 center} (* uR (vec3 (cos theta) (sin theta) 0.0)))
+      (= {vec3 radial} (- pos center))
+      (= {float dist} (length radial))
+      (= {vec3 dir} (/ radial (max dist 0.001)))
+
+      (= {float wave} 0.0)
+      (+= wave (sin (- (* 3.0 theta) (* 4.0 uTime))))
+      (+= wave (* (sin (+ (* 5.0 theta) (* 3.0 uTime))) 0.7))
+      (*= wave 0.4)
+
+      (= {float r} (+ ur0 (* uAmp wave)))
+      (= {vec3 newPos} (+ center (* r dir)))
+      (set! vPos (.xyz (* gl_ModelViewMatrix (vec4 newPos 1.0))))
+      (set! vNormal (* gl_NormalMatrix dir))
+      (set! gl_Position (* gl_ModelViewProjectionMatrix (vec4 newPos 1.0)))
+      (set! gl_FrontColor gl_Color)}))
 
 (gl-shader mesh vert-src frag-src)
 (gl-set-float mesh "uR"   5.)
