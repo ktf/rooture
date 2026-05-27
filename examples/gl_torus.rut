@@ -1,0 +1,159 @@
+;;; gl_torus.rut
+;;;
+;;; Animated torus via the native GL engine + vertex shader.
+;;; The tube cross-section oscillates sinusoidally — a traveling wave
+;;; that deforms the torus on the GPU each frame.
+
+(load stdlib.rut)
+
+;;; Parameters
+(def {nR} 72)          ; major divisions (around the ring)
+(def {nr} 36)          ; minor divisions (around the tube)
+(def {R} 5.)           ; major radius
+(def {r} 2.)           ; minor radius
+(def {nVerts} (* nR nr))
+
+(def {pi2} (* 2. (::Pi TMath)))
+
+;;; Index column: 0 .. nVerts-1
+(def {idx} (col-iota nVerts))
+
+;;; jit-fn: theta(i) = 2pi * floor(i/nr) / nR
+(def {theta-fn}
+  (jit-fn float (\{{int i}}
+    {(* (/ (* 2.f (::Pi TMath)) nR)
+        (::Floor TMath (/ (* 1.f i) nr)))})))
+(def {theta-ptr} (jitfn-ptr theta-fn))
+
+;;; jit-fn: phi(i) = 2pi * (i % nr) / nr
+(def {phi-fn}
+  (jit-fn float (\{{int i}}
+    {(* (/ (* 2.f (::Pi TMath)) nr)
+        (* 1.f (% i nr)))})))
+(def {phi-ptr} (jitfn-ptr phi-fn))
+
+;;; Compute theta and phi columns (int32 → float32)
+(def {theta} (col-map-ptr theta-ptr idx "float"))
+(def {phi}   (col-map-ptr phi-ptr idx "float"))
+
+;;; Vertex position jit-fns (2-input: theta, phi)
+(def {vx-fn}
+  (jit-fn float (\{{float th} {float ph}}
+    {(* (+ R (* r (::Cos TMath ph))) (::Cos TMath th))})))
+(def {vx-ptr} (jitfn-ptr vx-fn))
+
+(def {vy-fn}
+  (jit-fn float (\{{float th} {float ph}}
+    {(* (+ R (* r (::Cos TMath ph))) (::Sin TMath th))})))
+(def {vy-ptr} (jitfn-ptr vy-fn))
+
+(def {vz-fn}
+  (jit-fn float (\{{float th} {float ph}}
+    {(* r (::Sin TMath ph))})))
+(def {vz-ptr} (jitfn-ptr vz-fn))
+
+;;; Compute xyz columns
+(def {vx} (col-zip-ptr vx-ptr theta phi))
+(def {vy} (col-zip-ptr vy-ptr theta phi))
+(def {vz} (col-zip-ptr vz-ptr theta phi))
+
+;;; Per-vertex normals
+(def {nx-fn}
+  (jit-fn float (\{{float th} {float ph}}
+    {(* (::Cos TMath ph) (::Cos TMath th))})))
+(def {nx-ptr} (jitfn-ptr nx-fn))
+
+(def {ny-fn}
+  (jit-fn float (\{{float th} {float ph}}
+    {(* (::Cos TMath ph) (::Sin TMath th))})))
+(def {ny-ptr} (jitfn-ptr ny-fn))
+
+(def {nz-fn}
+  (jit-fn float (\{{float th} {float ph}}
+    {(::Sin TMath ph)})))
+(def {nz-ptr} (jitfn-ptr nz-fn))
+
+(def {nx} (col-zip-ptr nx-ptr theta phi))
+(def {ny} (col-zip-ptr ny-ptr theta phi))
+(def {nz} (col-zip-ptr nz-ptr theta phi))
+
+;;; Interleave into packed buffers
+(def {vertices} (col-interleave vx vy vz))
+(def {normals}  (col-interleave nx ny nz))
+
+;;; Triangle indices with wraparound
+(def {tri-idx} (col-gen-tri-grid nR nr))
+
+;;; Create GL viewer and mesh
+(def {ctx} (gl-viewer "Torus"))
+(def {mesh} (gl-mesh vertices tri-idx normals))
+
+;;; ---------------------------------------------------------------
+;;; Vertex shader: superposed traveling waves on the tube surface.
+;;; Four sine waves with different frequencies and velocities
+;;; (some traveling forward, some backward) produce evolving
+;;; constructive/destructive interference patterns on the GPU.
+;;; ---------------------------------------------------------------
+
+(def {vert-src} "
+  uniform float uTime;
+  uniform float uR;
+  uniform float ur0;
+  uniform float uAmp;
+  varying vec3 vNormal;
+  varying vec3 vPos;
+  void main() {
+    vec3 pos = gl_Vertex.xyz;
+    float theta = atan(pos.y, pos.x);
+    vec3 center = uR * vec3(cos(theta), sin(theta), 0.0);
+    vec3 radial = pos - center;
+    float dist = length(radial);
+    vec3 dir = radial / max(dist, 0.001);
+
+    // Superpose several waves with different frequencies and directions
+    // to produce evolving constructive/destructive interference
+    float wave = 0.0;
+    wave += sin( 3.0 * theta - 4.0  * uTime);          // 3-fold, forward
+    wave += sin( 5.0 * theta + 3.0  * uTime) * 0.7;    // 5-fold, backward
+    wave += sin( 2.0 * theta - 7.0  * uTime) * 0.5;    // 2-fold, fast forward
+    wave += sin( 8.0 * theta + 1.5  * uTime) * 0.4;    // 8-fold, slow backward
+    wave *= 0.4;  // scale combined amplitude
+
+    float r = ur0 + uAmp * wave;
+    vec3 newPos = center + r * dir;
+    vPos = (gl_ModelViewMatrix * vec4(newPos, 1.0)).xyz;
+    vNormal = gl_NormalMatrix * dir;
+    gl_Position = gl_ModelViewProjectionMatrix * vec4(newPos, 1.0);
+    gl_FrontColor = gl_Color;
+  }
+")
+
+(def {frag-src} "
+  varying vec3 vNormal;
+  varying vec3 vPos;
+  void main() {
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(-vPos);
+    float diff = max(dot(N, L), 0.0) * 0.7 + 0.3;
+    gl_FragColor = vec4(gl_Color.rgb * diff, gl_Color.a);
+  }
+")
+
+(gl-shader mesh vert-src frag-src)
+(gl-set-float mesh "uR"     R)
+(gl-set-float mesh "ur0"    r)
+(gl-set-float mesh "uAmp"   0.8)
+
+;;; Add to scene and start animation
+(gl-add ctx mesh 0.2 0.6 0.9 1.0)
+(gl-reset-camera ctx)
+(gl-redraw ctx)
+
+;;; Auto-rotate drives continuous RequestDraw → shader reads wall-clock uTime
+;;; Rotate around a non-z axis so it doesn't mask the wave travel direction
+(gl-auto-rotate ctx 0.008 0.0 0.3 0.0)
+
+(print "Animated torus with vertex shader.")
+(print (concat "  " (str nVerts) " vertices, "
+               (str (* nR nr 2)) " triangles."))
+(print "  Superposed waves with constructive/destructive interference.")
