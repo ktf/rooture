@@ -1,24 +1,126 @@
 ;;; compare_results.rut
 ;;;
-;;; Compare histograms from two AnalysisResults.root files.
-;;; Extracts all projections from CorrelationContainer/StepTHn objects
-;;; and compares them one by one.
+;;; Compare two AnalysisResults.root files element-by-element.
+;;; Reads CorrelationContainer objects using MakeProject-generated
+;;; dictionaries, then uses field / field-at / as-col to navigate
+;;; the StepTHn arrays and compare via column operations.
+;;;
+;;; Usage:
+;;;   (def {file1} "/path/to/AnalysisResults.root")
+;;;   (def {file2} "/path/to/AnalysisResults-2.root")
+;;;   (load "examples/compare_results.rut")
+;;;   (run)
 
 (load stdlib.rut)
 
-(def {f1} (new TFile "/Users/ktf/Downloads/AnalysisResults.root"))
-(def {f2} (new TFile "/Users/ktf/Downloads/AnalysisResults-2.root"))
+(fun {run} {do
 
-;;; First, let's explore what's inside the CorrelationContainer
-(def {ct1} (.Get f1 "correlation-task"))
-(print "=== correlation-task contents ===")
-(.ls ct1)
+  ;;; Generate dictionary from streamer info if needed
+  (def {ftmp} (new TFile file1))
+  (.MakeProject ftmp "/tmp/corrcontainer" "*" "RECREATE+")
+  (.Close ftmp)
+  (. Load gSystem "/tmp/corrcontainer/corrcontainer.so")
 
-;;; Get the CorrelationContainer objects
-(def {same1} (.Get ct1 "sameEvent"))
-(def {mixed1} (.Get ct1 "mixedEvent"))
-(print "\n=== sameEvent class ===")
-(print (.GetName (.IsA same1)))
+  (def {f1} (new TFile file1))
+  (def {f2} (new TFile file2))
 
-;;; Try to see what methods are available
-(.ls same1)
+  ;;; jit-fns for comparison
+  (def {diff-fn} (jit-fn float (\{{float a} {float b}} {(::Abs TMath (- a b))})))
+  (def {diff-ptr} (jitfn-ptr diff-fn))
+  (def {sum-fn} (jit-fn float (\{{float acc} {float x}} {(+ acc x)})))
+  (def {sum-ptr} (jitfn-ptr sum-fn))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Helper: compare a single standard histogram by path
+  ;;; ---------------------------------------------------------------
+  (def {compare-hist} (\ {path} {do
+    (= {h1} (.Get f1 path))
+    (= {h2} (.Get f2 path))
+    (= {i1} (.Integral h1))
+    (= {i2} (.Integral h2))
+    (print (concat path ": " (str i1) " vs " (str i2)
+      (if (== i1 i2) {" IDENTICAL"} {" DIFFERENT"})))
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Helper: compare all steps of a StepTHn between two files
+  ;;; ---------------------------------------------------------------
+  (def {compare-steps} (\ {label ph1 ph2} {do
+    (= {ns} (field mNSteps ph1))
+    (print (concat "\n=== " label " (" (str ns) " steps, "
+      (str (field mNBins ph1)) " bins) ==="))
+    (dotimes {i} ns {do
+      (= {v1} (field-at mValues ph1 i))
+      (= {v2} (field-at mValues ph2 i))
+      (if (== v1 {})
+        {print (concat "  step " (str i) ": empty")}
+        {do
+          (= {c1} (as-col v1))
+          (= {c2} (as-col v2))
+          (= {diffs} (col-zip-ptr diff-ptr c1 c2))
+          (= {total} (col-reduce-ptr sum-ptr 0.0 diffs))
+          (= {s1} (col-reduce-ptr sum-ptr 0.0 c1))
+          (print (concat "  step " (str i) ": sum=" (str s1)
+            " absdiff=" (str total)
+            (if (< total 0.001) {" IDENTICAL"} {" DIFFERENT"})))
+        })
+    })
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Compare standard histograms
+  ;;; ---------------------------------------------------------------
+  (print "=== Standard histograms ===")
+  (def {ct1} (.Get f1 "correlation-task"))
+  (def {ct2} (.Get f2 "correlation-task"))
+
+  ;;; Enumerate all histogram keys in correlation-task
+  (def {keys} (.GetListOfKeys ct1))
+  (def {nk} (.GetEntries keys))
+  (dotimes {i} nk {do
+    (= {key} (.At keys i))
+    (= {cn} (.GetClassName key))
+    (if (or (== cn "TH1F") (== cn "TH1D") (== cn "TH2F") (== cn "TH3F"))
+      {compare-hist (concat "correlation-task/" (.GetName key))}
+      {})
+  })
+
+  ;;; Event selection histograms
+  (compare-hist "eventselection-run2/eventselection/hColCounterAll")
+  (compare-hist "eventselection-run2/eventselection/hColCounterAcc")
+
+  ;;; ---------------------------------------------------------------
+  ;;; Compare CorrelationContainer objects
+  ;;; ---------------------------------------------------------------
+  (def {same1} (.Get ct1 "sameEvent"))
+  (def {same2} (.Get ct2 "sameEvent"))
+  (def {mixed1} (.Get ct1 "mixedEvent"))
+  (def {mixed2} (.Get ct2 "mixedEvent"))
+
+  (compare-steps "sameEvent/mPairHist"
+    (field mPairHist same1) (field mPairHist same2))
+  (compare-steps "sameEvent/mTriggerHist"
+    (field mTriggerHist same1) (field mTriggerHist same2))
+  (compare-steps "sameEvent/mTrackHistEff"
+    (field mTrackHistEfficiency same1) (field mTrackHistEfficiency same2))
+
+  (compare-steps "mixedEvent/mPairHist"
+    (field mPairHist mixed1) (field mPairHist mixed2))
+  (compare-steps "mixedEvent/mTriggerHist"
+    (field mTriggerHist mixed1) (field mTriggerHist mixed2))
+  (compare-steps "mixedEvent/mTrackHistEff"
+    (field mTrackHistEfficiency mixed1) (field mTrackHistEfficiency mixed2))
+
+  ;;; mEventCount (TH2F)
+  (print "\n=== mEventCount (TH2F) ===")
+  (print (concat "  sameEvent: "
+    (str (.Integral (field mEventCount same1))) " vs "
+    (str (.Integral (field mEventCount same2)))))
+  (print (concat "  mixedEvent: "
+    (str (.Integral (field mEventCount mixed1))) " vs "
+    (str (.Integral (field mEventCount mixed2)))))
+
+  (print "\n=== DONE ===")
+})
+
+(provide {run})

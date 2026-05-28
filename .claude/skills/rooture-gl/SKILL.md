@@ -34,6 +34,7 @@ per vertex.
 |---------|-----------|-------------|
 | `col-interleave` | `(col-interleave cx cy cz)` | Interleave 2–4 same-length, same-dtype columns: `x0 y0 z0 x1 y1 z1 ...` |
 | `col-gen-tri-grid` | `(col-gen-tri-grid nR nr)` | Triangle indices for nR×nr grid with wraparound (torus/sphere tessellation). Output: int32 column of 6·nR·nr indices. |
+| `col-gen-box-grid` | `(col-gen-box-grid nX nZ spacing width)` | Generate nX×nZ grid of unit-height boxes. Returns Q-expression `{vertices indices normals}` (3 columns). 8 verts/box, 30 indices/box (5 faces, no bottom), reversed winding for correct backface culling. Extract with `(eval (head box))` / `(tail box)`. |
 
 ## Typical workflow
 
@@ -69,6 +70,7 @@ Meshes support optional GLSL vertex+fragment shaders for GPU-side animation.
 |---------|-----------|-------------|
 | `gl-shader` | `(gl-shader mesh vert-src frag-src)` | Attach GLSL vertex + fragment shader sources (compiled lazily on first draw) |
 | `gl-set-float` | `(gl-set-float mesh "name" value)` | Set a float uniform on the mesh's shader |
+| `gl-set-mat4` | `(gl-set-mat4 mesh "name" {16 floats})` | Set a mat4 uniform (row-major input, transposed to GL column-major) |
 | `glsl-vert` | `(glsl-vert {decls} {body})` → string | Transpile rooture expressions to a GLSL vertex shader source string |
 | `glsl-frag` | `(glsl-frag {decls} {body})` → string | Transpile rooture expressions to a GLSL fragment shader source string |
 
@@ -219,9 +221,17 @@ correctly on screen.  Capturing would require `glReadPixels`.
 ### Viewer defaults
 `gl-viewer` hides the left editor panel automatically for a clean viewport.
 
-## Demo
+## Demos
 
-`examples/gl_torus.rut` — animated torus with 2592 vertices, 5184 triangles,
-per-vertex normals, GLSL vertex shader with four superposed traveling waves
-(constructive/destructive interference), and auto-rotation.  One
-`glDrawElements` call for the entire mesh.
+- `examples/gl_torus.rut` — animated torus with 2592 vertices, 5184 triangles,
+  per-vertex normals, GLSL vertex shader with four superposed traveling waves
+  (constructive/destructive interference), and auto-rotation.
+
+- `examples/gl_equalizer.rut` — 16×16 grid of animated bars driven by wave
+  interference. Uses `col-gen-box-grid` for geometry, cel shading with 4 bands,
+  and white wireframe outlines via second-minimum bar-local UV distance.
+
+- `examples/gl_equalizer_curved.rut` — same equalizer on a bicubic Bézier
+  surface. Control points packed as `mat4` uniforms (`gl-set-mat4`), evaluated
+  in the vertex shader via Bernstein basis vectors. Bars placed using normalized
+  surface tangent frame and grow along the surface normal.

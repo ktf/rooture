@@ -66,6 +66,54 @@ Any unbound symbol becomes a string with the same spelling. `(load stdlib.rut)` 
 
 ---
 
+## Data member access
+
+```scheme
+(field mEventCount obj)          ; access obj->mEventCount (pointer, int, float)
+(.@ mEventCount obj)             ; alias for field
+
+(field-at mValues obj 6)         ; access obj->mValues[6] (indexed pointer array)
+                                 ; returns {} (empty qexpr) for null pointers
+```
+
+`field` / `.@` reads a public data member directly — no parentheses, no method call.
+Handles pointer members (returns TOBJ), integral (returns int), and floating-point
+(returns float) types. Use for classes without getter methods (e.g. MakeProject-generated
+stubs from streamer info).
+
+`field-at` adds array indexing for C-style pointer-array members like `TArray** mValues`.
+
+## Zero-copy column from TArray
+
+```scheme
+(def {col} (as-col tarray-obj))  ; wrap TArrayF/D/I/L64 as a column
+```
+
+`as-col` creates a zero-copy rooture column from a ROOT `TArray` object.
+The column borrows the underlying buffer (no memcpy) and keeps the source
+alive via a shared reference. Supported types:
+
+| TArray type | Column dtype |
+|-------------|-------------|
+| TArrayF     | float       |
+| TArrayD     | double      |
+| TArrayI     | int32       |
+| TArrayL64   | int64       |
+
+Note: `TArray` does not inherit from `TObject`, so `as-col` uses the TClass
+name (not `dynamic_cast`) to determine the type.
+
+### Example: compare StepTHn data between two files
+
+```scheme
+(def {ph1} (field mPairHist container1))
+(def {v1}  (field-at mValues ph1 6))     ; step 6 TArrayF
+(def {c1}  (as-col v1))                  ; zero-copy column, 5.9M floats
+(def {c2}  (as-col (field-at mValues ph2 6)))
+(def {diffs} (col-zip-ptr diff-ptr c1 c2))
+(def {total} (col-reduce-ptr sum-ptr 0.0 diffs))
+```
+
 ## Static method calls
 
 ```scheme
