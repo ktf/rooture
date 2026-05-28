@@ -1,0 +1,24 @@
+;;; compare_results.rut
+;;;
+;;; Compare histograms from two AnalysisResults.root files.
+;;; Extracts all projections from CorrelationContainer/StepTHn objects
+;;; and compares them one by one.
+
+(load stdlib.rut)
+
+(def {f1} (new TFile "/Users/ktf/Downloads/AnalysisResults.root"))
+(def {f2} (new TFile "/Users/ktf/Downloads/AnalysisResults-2.root"))
+
+;;; First, let's explore what's inside the CorrelationContainer
+(def {ct1} (.Get f1 "correlation-task"))
+(print "=== correlation-task contents ===")
+(.ls ct1)
+
+;;; Get the CorrelationContainer objects
+(def {same1} (.Get ct1 "sameEvent"))
+(def {mixed1} (.Get ct1 "mixedEvent"))
+(print "\n=== sameEvent class ===")
+(print (.GetName (.IsA same1)))
+
+;;; Try to see what methods are available
+(.ls same1)
