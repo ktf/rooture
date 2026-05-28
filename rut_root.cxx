@@ -1353,6 +1353,130 @@ lval* builtin_connect(lenv* e, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
+// builtin_field — access a public data member of a ROOT object
+//   (field fieldname obj)  or  (.@ fieldname obj)
+// ---------------------------------------------------------------------------
+
+lval* builtin_field(lenv *e, lval *a) {
+  LASSERT(a, a->count == 2,
+    "Function 'field' needs exactly 2 arguments: <field name> and <object>.");
+  LASSERT_TYPE("field", a, 0, LVAL_STR);
+  LASSERT_TYPE("field", a, 1, LVAL_TOBJ);
+  std::string field_name = a->cell[0]->str;
+  void*   obj_ptr  = a->cell[1]->obj;
+  TClass* obj_cls  = a->cell[1]->cls;
+  std::string class_name = obj_cls ? obj_cls->GetName() : "void";
+  lval_del(a);
+
+  std::string expr = "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->" + field_name;
+  if (g_debug) std::cout << "Cling field: " << expr << std::endl;
+
+  static std::atomic<int> field_n{0};
+  std::string n  = std::to_string(field_n++);
+  std::string al = "__rut_f" + n;
+
+  gInterpreter->ProcessLine(("using " + al + " = decltype(" + expr + ");").c_str());
+  bool ok = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)sizeof(std::conditional_t<std::is_void<" + al + ">::value,char," + al + ">)").c_str());
+  if (!ok)
+    return lval_err("Field '%s' not found on class '%s'", field_name.c_str(), class_name.c_str());
+
+  bool is_ptr = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)std::is_pointer<" + al + ">::value").c_str());
+  if (is_ptr) {
+    std::string var = "__rut_fv" + n;
+    gInterpreter->ProcessLine((al + " " + var + " = " + expr + ";").c_str());
+    void* result = (void*)gInterpreter->Calc(("(Long_t)" + var).c_str());
+    if (!result)
+      return lval_err("Field '%s' is null", field_name.c_str());
+    TClass* ret_cls = (TClass*)gInterpreter->Calc(
+        ("(Long_t)TClass::GetClass(typeid(*" + var + "))").c_str());
+    return lval_tobj(result, ret_cls);
+  }
+
+  // Scalar field
+  bool is_integral = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)std::is_integral<" + al + ">::value").c_str());
+  if (is_integral) {
+    long val = (long)gInterpreter->Calc(("(Long_t)(" + expr + ")").c_str());
+    return lval_num(val);
+  }
+  bool is_float = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)std::is_floating_point<" + al + ">::value").c_str());
+  if (is_float) {
+    double val = (double)gInterpreter->Calc(("(double)(" + expr + ")").c_str());
+    return lval_floating(val);
+  }
+
+  return lval_err("Field '%s': unsupported type", field_name.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// builtin_field_at — indexed access into a pointer-array data member
+//   (field-at fieldname obj index)
+// Evaluates: ((Class*)ptr)->fieldname[index]
+// ---------------------------------------------------------------------------
+
+lval* builtin_field_at(lenv *e, lval *a) {
+  LASSERT(a, a->count == 3,
+    "Function 'field-at' needs 3 arguments: <field name> <object> <index>.");
+  LASSERT_TYPE("field-at", a, 0, LVAL_STR);
+  LASSERT_TYPE("field-at", a, 1, LVAL_TOBJ);
+  LASSERT_TYPE("field-at", a, 2, LVAL_NUM);
+  std::string field_name = a->cell[0]->str;
+  void*   obj_ptr  = a->cell[1]->obj;
+  TClass* obj_cls  = a->cell[1]->cls;
+  long    idx      = a->cell[2]->num;
+  std::string class_name = obj_cls ? obj_cls->GetName() : "void";
+  lval_del(a);
+
+  std::string expr = "((" + class_name + "*)" + ptr_to_hex(obj_ptr) + ")->"
+                   + field_name + "[" + std::to_string(idx) + "]";
+  if (g_debug) std::cout << "Cling field-at: " << expr << std::endl;
+
+  static std::atomic<int> fa_n{0};
+  std::string n  = std::to_string(fa_n++);
+  std::string al = "__rut_fa" + n;
+
+  gInterpreter->ProcessLine(("using " + al + " = decltype(" + expr + ");").c_str());
+  bool ok = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)sizeof(std::conditional_t<std::is_void<" + al + ">::value,char," + al + ">)").c_str());
+  if (!ok)
+    return lval_err("field-at '%s[%ld]' failed on class '%s'", field_name.c_str(), idx, class_name.c_str());
+
+  // Remove reference: decltype of array index is a reference
+  std::string base_al = "std::remove_reference_t<" + al + ">";
+
+  bool is_ptr = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)std::is_pointer<" + base_al + ">::value").c_str());
+  if (is_ptr) {
+    std::string var = "__rut_fav" + n;
+    gInterpreter->ProcessLine((base_al + " " + var + " = " + expr + ";").c_str());
+    void* result = (void*)gInterpreter->Calc(("(Long_t)" + var).c_str());
+    if (!result)
+      return lval_qexpr();  // return empty qexpr for null pointers
+    TClass* ret_cls = (TClass*)gInterpreter->Calc(
+        ("(Long_t)TClass::GetClass(typeid(*" + var + "))").c_str());
+    return lval_tobj(result, ret_cls);
+  }
+
+  bool is_integral = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)std::is_integral<" + base_al + ">::value").c_str());
+  if (is_integral) {
+    long val = (long)gInterpreter->Calc(("(Long_t)(" + expr + ")").c_str());
+    return lval_num(val);
+  }
+  bool is_float = (bool)(Long_t)gInterpreter->Calc(
+      ("(Long_t)std::is_floating_point<" + base_al + ">::value").c_str());
+  if (is_float) {
+    double val = (double)gInterpreter->Calc(("(double)(" + expr + ")").c_str());
+    return lval_floating(val);
+  }
+
+  return lval_err("field-at '%s[%ld]': unsupported element type", field_name.c_str(), idx);
+}
+
+// ---------------------------------------------------------------------------
 // lenv_add_builtins_root
 // ---------------------------------------------------------------------------
 
@@ -1365,6 +1489,9 @@ void lenv_add_builtins_root(lenv* e) {
   lenv_add_builtin(e, "invoke",   builtin_invoke);
   lenv_add_builtin(e, "global",   builtin_global);
   lenv_add_builtin(e, "connect",  builtin_connect);
+  lenv_add_builtin(e, "field",    builtin_field);
+  lenv_add_builtin(e, ".@",       builtin_field);
+  lenv_add_builtin(e, "field-at", builtin_field_at);
   /* Inspection / output */
   lenv_add_builtin(e, "symbols",     builtin_symbols);
   lenv_add_builtin(e, "canvases",    builtin_canvases);

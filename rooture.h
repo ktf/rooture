@@ -291,8 +291,9 @@ enum ColDtype {
 struct RutColumn {
   int    dtype = 0;
   size_t n     = 0;
-  void*  data  = nullptr;   // owned, malloc'd
-  ~RutColumn() { free(data); }
+  void*  data  = nullptr;   // owned (malloc'd) unless parent is set
+  std::shared_ptr<void> parent;  // keeps source alive for borrowed data
+  ~RutColumn() { if (!parent) free(data); }
 };
 using RutColumnPtr = std::shared_ptr<RutColumn>;
 

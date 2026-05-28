@@ -110,6 +110,23 @@ When Cling errors appear:
 - Restructure the probe order so the winning form is tried first.
 - Do not leave known-failing probes in the hot path.
 
+## Never fall back to ProcessLine / Calc — add builtins instead
+
+Whenever you find yourself reaching for `(. ProcessLine gInterpreter "...")`
+or `(. Calc gInterpreter "...")`, **stop and think about how to avoid it**.
+If rooture lacks a native way to express the operation, the right answer is
+to add a new builtin (in C++) that handles it idiomatically. Examples:
+
+- Can't access a data member? → add `field` / `.@` builtin (done).
+- Can't call a free function? → add a builtin or extend `invoke`.
+- Can't cast between types? → add a `cast` builtin.
+
+ProcessLine/Calc are escape hatches of **absolute last resort** for things
+that genuinely cannot be wrapped in a builtin (e.g. declaring a complex
+`TF1` with a custom `double f(double*, double*)` signature). Even then,
+prefer defining a helper function once via ProcessLine and calling it
+natively afterward.
+
 ## Prefer native rooture over ProcessLine
 
 Rooture examples should use **native rooture syntax** as much as possible.
