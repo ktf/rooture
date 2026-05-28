@@ -1,0 +1,139 @@
+;;; gl_equalizer.rut
+;;;
+;;; 3D equalizer: a grid of bars whose heights are driven by
+;;; superposed traveling waves with constructive/destructive
+;;; interference.  Box geometry from col-gen-box-grid, animated
+;;; by a vertex shader.
+
+(load stdlib.rut)
+
+;;; Parameters
+(def {nBars} 16)          ; bars per axis
+(def {barSpacing} 1.2)    ; center-to-center
+(def {barWidth} 0.9)      ; bar face width
+(def {gridSize} (* nBars barSpacing))
+(def {halfGrid} (* 0.5 gridSize))
+
+;;; Generate box geometry — replaces ~70 lines of jit-fn arithmetic
+(def {box}      (col-gen-box-grid nBars nBars barSpacing barWidth))
+(def {vertices} (eval (head box)))
+(def {box}      (tail box))
+(def {indices}  (eval (head box)))
+(def {box}      (tail box))
+(def {normals}  (eval (head box)))
+
+(def {ctx} (gl-viewer "Equalizer"))
+(def {mesh} (gl-mesh vertices indices normals))
+
+;;; ---------------------------------------------------------------
+;;; Vertex shader: top vertices (y=1) get wave height, bottom (y=0)
+;;; stay at ground.  pos.y * height does the selection naturally.
+;;; Bar-local UVs computed from object-space position.
+;;; ---------------------------------------------------------------
+(def {vert-src}
+  (glsl-vert
+    {(uniform float uTime)
+     (uniform float uSpacing)
+     (uniform float uHalf)
+     (uniform float uNBars)
+     (uniform float uBarW)
+     (varying vec3 vPos)
+     (varying float vHeight)
+     (varying float vLocX)
+     (varying float vLocY)
+     (varying float vLocZ)}
+    {do
+      (= {vec3 pos} (.xyz gl_Vertex))
+      (= {float hw} (* uBarW 0.5))
+
+      ;;; which bar cell?
+      (= {float cx} (floor (/ (+ (.x pos) uHalf) uSpacing)))
+      (= {float cz} (floor (/ (+ (.z pos) uHalf) uSpacing)))
+      (set! cx (clamp cx 0.0 (- uNBars 1.0)))
+      (set! cz (clamp cz 0.0 (- uNBars 1.0)))
+
+      ;;; bar center
+      (= {float bcx} (- (* (+ cx 0.5) uSpacing) uHalf))
+      (= {float bcz} (- (* (+ cz 0.5) uSpacing) uHalf))
+
+      ;;; bar-local coords normalized to 0..1
+      (set! vLocX (/ (+ (- (.x pos) bcx) hw) (* 2.0 hw)))
+      (set! vLocY (.y pos))
+      (set! vLocZ (/ (+ (- (.z pos) bcz) hw) (* 2.0 hw)))
+
+      ;;; superposed traveling waves
+      (= {float h} 0.0)
+      (+= h       (sin (+ (* 0.5 bcx) (* 2.0 uTime))))
+      (+= h       (sin (- (* 0.7 bcz) (* 1.5 uTime))))
+      (+= h       (sin (+ (* 0.3 (+ bcx bcz)) (* 3.0 uTime))))
+      (+= h (* 0.6 (sin (- (* 1.1 (- bcx bcz)) (* 2.5 uTime)))))
+      (= {float height} (max (+ 2.5 (* 1.8 h)) 0.05))
+
+      ;;; top verts (y=1) → height; bottom verts (y=0) → 0
+      (= {vec3 newPos} (vec3 (.x pos) (* (.y pos) height) (.z pos)))
+
+      (set! vHeight height)
+      (set! vPos (.xyz (* gl_ModelViewMatrix (vec4 newPos 1.0))))
+      (set! gl_Position (* gl_ModelViewProjectionMatrix (vec4 newPos 1.0)))
+      (set! gl_FrontColor gl_Color)}))
+
+;;; ---------------------------------------------------------------
+;;; Fragment shader: cel shading + white wireframe outlines via
+;;; second-minimum distance to bar-local coordinate edges.
+;;; ---------------------------------------------------------------
+(def {frag-src}
+  (glsl-frag
+    {(varying vec3 vPos)
+     (varying float vHeight)
+     (varying float vLocX)
+     (varying float vLocY)
+     (varying float vLocZ)}
+    {do
+      ;;; cheap normal from screen-space derivatives
+      (= {vec3 N} (normalize (cross (dFdx vPos) (dFdy vPos))))
+      (= {vec3 L} (normalize (- vPos)))
+
+      ;;; cel-shading: quantize diffuse into 4 discrete bands
+      (= {float raw} (abs (dot N L)))
+      (= {float diff} (+ (* (floor (* raw 4.0)) 0.25 0.7) 0.3))
+
+      ;;; distance to nearest edge per axis (0 at edge, 0.5 at center)
+      (= {float dx} (min vLocX (- 1.0 vLocX)))
+      (= {float dy} (min vLocY (- 1.0 vLocY)))
+      (= {float dz} (min vLocZ (- 1.0 vLocZ)))
+
+      ;;; second-minimum: on any face one coord is constant at 0 or 1
+      ;;; (d=0), so outline when the SECOND smallest is also near 0
+      (= {float dMin} (min dx (min dy dz)))
+      (= {float dMax} (max dx (max dy dz)))
+      (= {float dMid} (- (+ dx dy dz) dMin dMax))
+      (= {float lineW} (max (* (fwidth dMid) 1.5) 0.08))
+      (= {float outline} (- 1.0 (smoothstep 0.0 lineW dMid)))
+
+      ;;; color ramp: blue → cyan → green → yellow → red
+      (= {float t} (clamp (/ vHeight 8.0) 0.0 1.0))
+      (= {vec3 lo} (mix (vec3 0.05 0.1 0.7) (vec3 0.0 0.85 0.3) (clamp (* t 3.0) 0.0 1.0)))
+      (= {vec3 baseColor} (mix lo (vec3 1.0 0.2 0.05) (clamp (- (* t 3.0) 1.5) 0.0 1.0)))
+
+      ;;; blend lit color → white at edges
+      (= {vec3 color} (mix (* baseColor diff) (vec3 1.0 1.0 1.0) outline))
+
+      (set! gl_FragColor (vec4 color 1.0))}))
+
+(gl-shader mesh vert-src frag-src)
+(gl-set-float mesh "uSpacing" barSpacing)
+(gl-set-float mesh "uHalf"    halfGrid)
+(gl-set-float mesh "uBarW"    barWidth)
+(gl-set-float mesh "uNBars"   (* 1.0 nBars))
+
+;;; Add to scene
+(gl-add ctx mesh 0.3 0.6 0.9 1.0)
+(gl-reset-camera ctx)
+(gl-redraw ctx)
+
+;;; Slow rotation
+(gl-auto-rotate ctx 0.005 0.0 0.25 0.0)
+
+(print "3D Equalizer")
+(print (concat "  " (str (* nBars nBars)) " bars (" (str nBars) " x " (str nBars) ")"))
+(print "  Wave interference drives bar heights.")

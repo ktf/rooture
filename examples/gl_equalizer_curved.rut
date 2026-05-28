@@ -1,0 +1,211 @@
+;;; gl_equalizer_curved.rut
+;;;
+;;; 3D equalizer on a curved Bézier surface.  The flat box grid is
+;;; warped by a bicubic Bézier patch evaluated in the vertex shader.
+;;; Control point coordinates are packed into mat4 uniforms.
+
+(load stdlib.rut)
+
+;;; Parameters
+(def {nBars} 16)
+(def {barSpacing} 1.2)
+(def {barWidth} 0.9)
+(def {gridSize} (* nBars barSpacing))
+(def {halfGrid} (* 0.5 gridSize))
+
+;;; Generate box geometry
+(def {box}      (col-gen-box-grid nBars nBars barSpacing barWidth))
+(def {vertices} (eval (head box)))
+(def {box}      (tail box))
+(def {indices}  (eval (head box)))
+(def {box}      (tail box))
+(def {normals}  (eval (head box)))
+
+(def {ctx} (gl-viewer "Curved Equalizer"))
+(def {mesh} (gl-mesh vertices indices normals))
+
+;;; ---------------------------------------------------------------
+;;; Bézier control points — 4×4 grid packed into mat4 uniforms.
+;;; A gentle bowl/saddle shape.  OpenGL mat4 is column-major, so
+;;; element [col][row] = index col*4+row.
+;;; Grid spans u,v ∈ [0,1], mapped from the flat box positions.
+;;; ---------------------------------------------------------------
+
+;;; X control points: linear left-to-right (-10 to +10)
+(gl-set-mat4 mesh "uCPx"
+  {-10.0 -10.0 -10.0 -10.0
+    -3.3  -3.3  -3.3  -3.3
+     3.3   3.3   3.3   3.3
+    10.0  10.0  10.0  10.0})
+
+;;; Y control points: dome shape (edges down, center up)
+(gl-set-mat4 mesh "uCPy"
+  {-2.0 -0.7 -0.7 -2.0
+   -0.7  1.0  1.0 -0.7
+   -0.7  1.0  1.0 -0.7
+   -2.0 -0.7 -0.7 -2.0})
+
+;;; Z control points: linear front-to-back (-10 to +10)
+(gl-set-mat4 mesh "uCPz"
+  {-10.0  -3.3   3.3  10.0
+   -10.0  -3.3   3.3  10.0
+   -10.0  -3.3   3.3  10.0
+   -10.0  -3.3   3.3  10.0})
+
+;;; ---------------------------------------------------------------
+;;; Vertex shader: maps flat grid onto Bézier surface, then extends
+;;; bars along the surface normal.
+;;; ---------------------------------------------------------------
+(def {vert-src}
+  (glsl-vert
+    {(uniform float uTime)
+     (uniform float uSpacing)
+     (uniform float uHalf)
+     (uniform float uNBars)
+     (uniform float uBarW)
+     (uniform mat4 uCPx)
+     (uniform mat4 uCPy)
+     (uniform mat4 uCPz)
+     (varying vec3 vPos)
+     (varying float vHeight)
+     (varying float vLocX)
+     (varying float vLocY)
+     (varying float vLocZ)}
+    {do
+      (= {vec3 pos} (.xyz gl_Vertex))
+      (= {float hw} (* uBarW 0.5))
+
+      ;;; which bar cell?
+      (= {float cx} (floor (/ (+ (.x pos) uHalf) uSpacing)))
+      (= {float cz} (floor (/ (+ (.z pos) uHalf) uSpacing)))
+      (set! cx (clamp cx 0.0 (- uNBars 1.0)))
+      (set! cz (clamp cz 0.0 (- uNBars 1.0)))
+
+      ;;; bar center
+      (= {float bcx} (- (* (+ cx 0.5) uSpacing) uHalf))
+      (= {float bcz} (- (* (+ cz 0.5) uSpacing) uHalf))
+
+      ;;; bar-local coords
+      (set! vLocX (/ (+ (- (.x pos) bcx) hw) (* 2.0 hw)))
+      (set! vLocY (.y pos))
+      (set! vLocZ (/ (+ (- (.z pos) bcz) hw) (* 2.0 hw)))
+
+      ;;; map BAR CENTER to u,v ∈ [0,1] (not the vertex!)
+      (= {float u} (/ (+ bcx uHalf) (* 2.0 uHalf)))
+      (= {float v} (/ (+ bcz uHalf) (* 2.0 uHalf)))
+      (set! u (clamp u 0.0 1.0))
+      (set! v (clamp v 0.0 1.0))
+
+      ;;; cubic Bernstein basis
+      (= {float u1} (- 1.0 u))
+      (= {float v1} (- 1.0 v))
+      (= {vec4 Bu} (vec4 (* u1 u1 u1)
+                         (* 3.0 u u1 u1)
+                         (* 3.0 u u u1)
+                         (* u u u)))
+      (= {vec4 Bv} (vec4 (* v1 v1 v1)
+                         (* 3.0 v v1 v1)
+                         (* 3.0 v v v1)
+                         (* v v v)))
+
+      ;;; Bernstein derivatives for normal
+      (= {vec4 dBu} (vec4 (* -3.0 u1 u1)
+                          (- (* 3.0 u1 u1) (* 6.0 u u1))
+                          (- (* 6.0 u u1) (* 3.0 u u))
+                          (* 3.0 u u)))
+      (= {vec4 dBv} (vec4 (* -3.0 v1 v1)
+                          (- (* 3.0 v1 v1) (* 6.0 v v1))
+                          (- (* 6.0 v v1) (* 3.0 v v))
+                          (* 3.0 v v)))
+
+      ;;; evaluate surface: P = Bu^T * CP * Bv
+      (= {float sx} (dot Bu (* uCPx Bv)))
+      (= {float sy} (dot Bu (* uCPy Bv)))
+      (= {float sz} (dot Bu (* uCPz Bv)))
+
+      ;;; tangent dP/du
+      (= {float tux} (dot dBu (* uCPx Bv)))
+      (= {float tuy} (dot dBu (* uCPy Bv)))
+      (= {float tuz} (dot dBu (* uCPz Bv)))
+
+      ;;; tangent dP/dv
+      (= {float tvx} (dot Bu (* uCPx dBv)))
+      (= {float tvy} (dot Bu (* uCPy dBv)))
+      (= {float tvz} (dot Bu (* uCPz dBv)))
+
+      ;;; surface normal
+      (= {vec3 T} (vec3 tux tuy tuz))
+      (= {vec3 B} (vec3 tvx tvy tvz))
+      (= {vec3 N} (normalize (cross B T)))
+
+      ;;; superposed traveling waves at bar center
+      (= {float h} 0.0)
+      (+= h       (sin (+ (* 0.5 bcx) (* 2.0 uTime))))
+      (+= h       (sin (- (* 0.7 bcz) (* 1.5 uTime))))
+      (+= h       (sin (+ (* 0.3 (+ bcx bcz)) (* 3.0 uTime))))
+      (+= h (* 0.6 (sin (- (* 1.1 (- bcx bcz)) (* 2.5 uTime)))))
+      (= {float height} (max (+ 2.5 (* 1.8 h)) 0.05))
+
+      ;;; normalized tangent vectors for local frame
+      (= {vec3 tU} (normalize (vec3 tux tuy tuz)))
+      (= {vec3 tV} (normalize (vec3 tvx tvy tvz)))
+
+      ;;; bar-local offsets mapped through tangent frame
+      (= {float dx} (- (.x pos) bcx))
+      (= {float dz} (- (.z pos) bcz))
+      (= {vec3 base} (+ (vec3 sx sy sz) (* dx tU) (* dz tV)))
+      (= {vec3 newPos} (+ base (* (.y pos) height N)))
+
+      (set! vHeight height)
+      (set! vPos (.xyz (* gl_ModelViewMatrix (vec4 newPos 1.0))))
+      (set! gl_Position (* gl_ModelViewProjectionMatrix (vec4 newPos 1.0)))
+      (set! gl_FrontColor gl_Color)}))
+
+;;; ---------------------------------------------------------------
+;;; Fragment shader: same cel shading + wireframe as flat equalizer
+;;; ---------------------------------------------------------------
+(def {frag-src}
+  (glsl-frag
+    {(varying vec3 vPos)
+     (varying float vHeight)
+     (varying float vLocX)
+     (varying float vLocY)
+     (varying float vLocZ)}
+    {do
+      (= {vec3 N} (normalize (cross (dFdx vPos) (dFdy vPos))))
+      (= {vec3 L} (normalize (- vPos)))
+      (= {float raw} (abs (dot N L)))
+      (= {float diff} (+ (* (floor (* raw 4.0)) 0.25 0.7) 0.3))
+
+      (= {float dx} (min vLocX (- 1.0 vLocX)))
+      (= {float dy} (min vLocY (- 1.0 vLocY)))
+      (= {float dz} (min vLocZ (- 1.0 vLocZ)))
+      (= {float dMin} (min dx (min dy dz)))
+      (= {float dMax} (max dx (max dy dz)))
+      (= {float dMid} (- (+ dx dy dz) dMin dMax))
+      (= {float lineW} (max (* (fwidth dMid) 1.5) 0.08))
+      (= {float outline} (- 1.0 (smoothstep 0.0 lineW dMid)))
+
+      (= {float t} (clamp (/ vHeight 8.0) 0.0 1.0))
+      (= {vec3 lo} (mix (vec3 0.05 0.1 0.7) (vec3 0.0 0.85 0.3) (clamp (* t 3.0) 0.0 1.0)))
+      (= {vec3 baseColor} (mix lo (vec3 1.0 0.2 0.05) (clamp (- (* t 3.0) 1.5) 0.0 1.0)))
+      (= {vec3 color} (mix (* baseColor diff) (vec3 1.0 1.0 1.0) outline))
+
+      (set! gl_FragColor (vec4 color 1.0))}))
+
+(gl-shader mesh vert-src frag-src)
+(gl-set-float mesh "uSpacing" barSpacing)
+(gl-set-float mesh "uHalf"    halfGrid)
+(gl-set-float mesh "uBarW"    barWidth)
+(gl-set-float mesh "uNBars"   (* 1.0 nBars))
+
+;;; Add to scene
+(gl-add ctx mesh 0.3 0.6 0.9 1.0)
+(gl-reset-camera ctx)
+(gl-redraw ctx)
+
+(gl-auto-rotate ctx 0.005 0.0 0.25 0.0)
+
+(print "Curved Equalizer (Bezier surface)")
+(print (concat "  " (str (* nBars nBars)) " bars on bicubic Bezier patch"))
+(print "  Control points define a bowl shape.")

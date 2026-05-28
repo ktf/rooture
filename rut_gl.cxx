@@ -4,6 +4,7 @@
 /// shaders for GPU-side animation (e.g. oscillating torus).
 
 #include "rooture.h"
+#include <array>
 
 #ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
@@ -82,6 +83,8 @@ class RutGLMesh : public TGLLogicalShape {
   std::chrono::steady_clock::time_point fTimeStart;
   mutable std::unordered_map<std::string, float> fPendingUniforms;
   mutable std::unordered_map<std::string, std::pair<GLint, float>> fUniforms;
+  mutable std::unordered_map<std::string, std::array<float,16>> fPendingMat4;
+  mutable std::unordered_map<std::string, std::pair<GLint, std::array<float,16>>> fMat4Uniforms;
 
 public:
   RutGLMesh(TObject* id, RutColumnPtr v, RutColumnPtr i, RutColumnPtr n)
@@ -105,6 +108,10 @@ public:
     fPendingUniforms[name] = val;
   }
 
+  void SetUniformMat4(const char* name, const std::array<float,16>& m) {
+    fPendingMat4[name] = m;
+  }
+
   void DirectDraw(TGLRnrCtx& /*rnrCtx*/) const override {
     // Lazy shader compilation — GL context is guaranteed current here
     if (!fShaderReady && !fVertSrc.empty()) {
@@ -122,6 +129,11 @@ public:
         fUniforms[name] = {loc, val};
       }
       fPendingUniforms.clear();
+      for (auto& [name, val] : fPendingMat4) {
+        GLint loc = fProgram ? glGetUniformLocation(fProgram, name.c_str()) : -1;
+        fMat4Uniforms[name] = {loc, val};
+      }
+      fPendingMat4.clear();
       fShaderReady = true;
     }
 
@@ -140,6 +152,10 @@ public:
       for (auto& [name, locval] : fUniforms) {
         if (locval.first >= 0)
           glUniform1f(locval.first, locval.second);
+      }
+      for (auto& [name, locval] : fMat4Uniforms) {
+        if (locval.first >= 0)
+          glUniformMatrix4fv(locval.first, 1, GL_TRUE, locval.second.data());
       }
     }
 
@@ -303,6 +319,29 @@ static lval* builtin_gl_set_float(lenv* /*e*/, lval* a) {
   return lval_sexpr();
 }
 
+// (gl-set-mat4 mesh name {v0 v1 ... v15}) — set a mat4 uniform from 16 floats
+static lval* builtin_gl_set_mat4(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("gl-set-mat4", a, 3);
+  LASSERT_TYPE("gl-set-mat4", a, 0, LVAL_TOBJ);
+  LASSERT_TYPE("gl-set-mat4", a, 1, LVAL_STR);
+  LASSERT_TYPE("gl-set-mat4", a, 2, LVAL_QEXPR);
+  LASSERT(a, a->cell[2]->count == 16,
+    "'gl-set-mat4' needs 16 values, got %d", a->cell[2]->count);
+  auto* mesh = (RutGLMesh*)a->cell[0]->obj;
+  const char* name = a->cell[1]->str;
+  std::array<float,16> m;
+  for (int i = 0; i < 16; i++) {
+    lval* v = a->cell[2]->cell[i];
+    if (v->type == LVAL_FLOAT)      m[i] = (float)v->floating;
+    else if (v->type == LVAL_NUM)   m[i] = (float)v->num;
+    else { lval_del(a); return lval_err("'gl-set-mat4' values must be numbers"); }
+  }
+  std::string n(name);
+  lval_del(a);
+  mesh->SetUniformMat4(n.c_str(), m);
+  return lval_sexpr();
+}
+
 // (gl-add ctx mesh [r g b a])
 static lval* builtin_gl_add(lenv* /*e*/, lval* a) {
   LASSERT(a, a->count == 2 || a->count == 6,
@@ -441,6 +480,7 @@ void lenv_add_builtins_gl(lenv* e) {
   lenv_add_builtin(e, "gl-mesh",         builtin_gl_mesh);
   lenv_add_builtin(e, "gl-shader",       builtin_gl_shader);
   lenv_add_builtin(e, "gl-set-float",    builtin_gl_set_float);
+  lenv_add_builtin(e, "gl-set-mat4",     builtin_gl_set_mat4);
   lenv_add_builtin(e, "gl-add",          builtin_gl_add);
   lenv_add_builtin(e, "gl-redraw",       builtin_gl_redraw);
   lenv_add_builtin(e, "gl-reset-camera", builtin_gl_reset_camera);

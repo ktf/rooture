@@ -1917,6 +1917,113 @@ static lval* builtin_col_gen_tri_grid(lenv* /*e*/, lval* a) {
 }
 
 // ---------------------------------------------------------------------------
+// col-gen-box-grid — generate box geometry for an nX × nZ grid of bars
+// (col-gen-box-grid nX nZ spacing width) → {vertices indices normals uvs}
+//   vertices: interleaved float32 xyz, 8 corners per box
+//   indices:  int32, 10 triangles (5 faces, no bottom) per box
+//   normals:  interleaved float32 xyz, dummy (0,1,0) — use dFdx/dFdy
+//   uvs:      interleaved float32 xyz, bar-local coords 0..1
+// ---------------------------------------------------------------------------
+static lval* builtin_col_gen_box_grid(lenv* /*e*/, lval* a) {
+  LASSERT_NUM("col-gen-box-grid", a, 4);
+  LASSERT_TYPE("col-gen-box-grid", a, 0, LVAL_NUM);
+  LASSERT_TYPE("col-gen-box-grid", a, 1, LVAL_NUM);
+  int nX = (int)a->cell[0]->num;
+  int nZ = (int)a->cell[1]->num;
+  auto to_f = [](lval* v) -> float {
+    return (v->type == LVAL_FLOAT) ? (float)v->floating : (float)v->num;
+  };
+  float spacing = to_f(a->cell[2]);
+  float width   = to_f(a->cell[3]);
+  lval_del(a);
+
+  float hw    = width * 0.5f;
+  float halfX = nX * spacing * 0.5f;
+  float halfZ = nZ * spacing * 0.5f;
+  int nBoxes  = nX * nZ;
+  size_t nVerts = (size_t)nBoxes * 8;
+  size_t nIdx   = (size_t)nBoxes * 30;
+
+  // Corner layout (k = 0..7, k4 = k%4):
+  //   bottom (k<4, y=0):  0(-hw,0,-hw) 1(+hw,0,-hw) 2(+hw,0,+hw) 3(-hw,0,+hw)
+  //   top    (k>=4, y=1): 4(-hw,1,-hw) 5(+hw,1,-hw) 6(+hw,1,+hw) 7(-hw,1,+hw)
+  static const float kXSign[4] = {-1, 1, 1, -1};
+  static const float kZSign[4] = {-1, -1, 1, 1};
+
+  // 30 local indices per box (reversed winding for correct face culling)
+  static const int kBoxIdx[30] = {
+    4,6,5, 4,7,6,   // top
+    0,5,1, 0,4,5,   // front (-z)
+    1,6,2, 1,5,6,   // right (+x)
+    2,7,3, 2,6,7,   // back  (+z)
+    3,4,0, 3,7,4    // left  (-x)
+  };
+
+  // --- vertices (interleaved xyz) ---
+  auto colV = std::make_shared<RutColumn>();
+  colV->dtype = COL_FLOAT32;
+  colV->n     = nVerts * 3;
+  colV->data  = col_alloc(colV->n * sizeof(float));
+  float* pv   = (float*)colV->data;
+
+  // --- normals (dummy 0,1,0) ---
+  auto colN = std::make_shared<RutColumn>();
+  colN->dtype = COL_FLOAT32;
+  colN->n     = nVerts * 3;
+  colN->data  = col_alloc(colN->n * sizeof(float));
+  float* pn   = (float*)colN->data;
+
+  // --- uvs (interleaved locX, locY, locZ) ---
+  auto colU = std::make_shared<RutColumn>();
+  colU->dtype = COL_FLOAT32;
+  colU->n     = nVerts * 3;
+  colU->data  = col_alloc(colU->n * sizeof(float));
+  float* pu   = (float*)colU->data;
+
+  size_t vi = 0;
+  for (int b = 0; b < nBoxes; b++) {
+    int col = b % nX;
+    int row = b / nX;
+    float cx = (col + 0.5f) * spacing - halfX;
+    float cz = (row + 0.5f) * spacing - halfZ;
+    for (int k = 0; k < 8; k++) {
+      int k4    = k % 4;
+      float top = (k >= 4) ? 1.0f : 0.0f;
+      pv[vi]     = cx + kXSign[k4] * hw;       // x
+      pv[vi + 1] = top;                         // y
+      pv[vi + 2] = cz + kZSign[k4] * hw;       // z
+      pn[vi]     = 0.0f;                        // nx
+      pn[vi + 1] = 1.0f;                        // ny
+      pn[vi + 2] = 0.0f;                        // nz
+      pu[vi]     = (kXSign[k4] + 1.0f) * 0.5f; // locX (0 or 1)
+      pu[vi + 1] = top;                         // locY (0 or 1)
+      pu[vi + 2] = (kZSign[k4] + 1.0f) * 0.5f; // locZ (0 or 1)
+      vi += 3;
+    }
+  }
+
+  // --- indices ---
+  auto colI = std::make_shared<RutColumn>();
+  colI->dtype = COL_INT32;
+  colI->n     = nIdx;
+  colI->data  = col_alloc(nIdx * sizeof(int32_t));
+  int32_t* pi = (int32_t*)colI->data;
+  size_t ii = 0;
+  for (int b = 0; b < nBoxes; b++) {
+    int base = b * 8;
+    for (int j = 0; j < 30; j++)
+      pi[ii++] = base + kBoxIdx[j];
+  }
+
+  lval* result = lval_qexpr();
+  lval_add(result, lval_column(std::move(colV)));
+  lval_add(result, lval_column(std::move(colI)));
+  lval_add(result, lval_column(std::move(colN)));
+  lval_add(result, lval_column(std::move(colU)));
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 void lenv_add_builtins_column(lenv* e) {
@@ -1975,6 +2082,7 @@ void lenv_add_builtins_column(lenv* e) {
   lenv_add_builtin(e, "jitfn-ptr",         builtin_jitfn_ptr);
   lenv_add_builtin(e, "col-interleave",    builtin_col_interleave);
   lenv_add_builtin(e, "col-gen-tri-grid",  builtin_col_gen_tri_grid);
+  lenv_add_builtin(e, "col-gen-box-grid",  builtin_col_gen_box_grid);
 
   // Register the col-kernel call dispatcher (needs RutColumn access).
   g_kerneljitfn_dispatch = [](lval* fn, lval* args) -> lval* {
