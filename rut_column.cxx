@@ -2038,8 +2038,9 @@ void lenv_add_builtins_column(lenv* e) {
     rut_dispatch_work([]{ rut_file_cache_clear(); });
     return lval_sexpr();
   });
-  // (as-col tarray) → zero-copy column wrapping TArrayF/TArrayD/TArrayI/TArrayL64
-  // Note: TArray does NOT inherit from TObject, so we use TClass name, not dynamic_cast.
+  // (as-col obj) → zero-copy column wrapping TArrayF/TArrayD/TArrayI/TArrayL64
+  // Also accepts any class that inherits from these (e.g. TH1F inherits TArrayF).
+  // Uses TClass::DynamicCast for correct pointer adjustment under multiple inheritance.
   lenv_add_builtin(e, "as-col", [](lenv*, lval* a) -> lval* {
     LASSERT_NUM("as-col", a, 1);
     LASSERT_TYPE("as-col", a, 0, LVAL_TOBJ);
@@ -2049,29 +2050,39 @@ void lenv_add_builtins_column(lenv* e) {
     lval_del(a);
     auto col = std::make_shared<RutColumn>();
     col->parent = std::shared_ptr<void>(ptr, [](void*){});
-    if (cn == "TArrayF") {
-      auto* af = (TArrayF*)ptr;
+
+    // Helper: resolve a TArray base pointer (handles multiple inheritance via DynamicCast)
+    auto resolve = [&](const char* baseName) -> void* {
+      if (cn == baseName) return ptr;  // exact match — no adjustment needed
+      if (!cls || !cls->InheritsFrom(baseName)) return nullptr;
+      TClass* baseCls = TClass::GetClass(baseName);
+      return baseCls ? cls->DynamicCast(baseCls, ptr) : nullptr;
+    };
+
+    void* base;
+    if ((base = resolve("TArrayF"))) {
+      auto* af = (TArrayF*)base;
       col->dtype = COL_FLOAT32;
       col->n     = af->GetSize();
       col->data  = (void*)af->GetArray();
-    } else if (cn == "TArrayD") {
-      auto* ad = (TArrayD*)ptr;
+    } else if ((base = resolve("TArrayD"))) {
+      auto* ad = (TArrayD*)base;
       col->dtype = COL_FLOAT64;
       col->n     = ad->GetSize();
       col->data  = (void*)ad->GetArray();
-    } else if (cn == "TArrayI") {
-      auto* ai = (TArrayI*)ptr;
+    } else if ((base = resolve("TArrayI"))) {
+      auto* ai = (TArrayI*)base;
       col->dtype = COL_INT32;
       col->n     = ai->GetSize();
       col->data  = (void*)ai->GetArray();
-    } else if (cn == "TArrayL64") {
-      auto* al = (TArrayL64*)ptr;
+    } else if ((base = resolve("TArrayL64"))) {
+      auto* al = (TArrayL64*)base;
       col->dtype = COL_INT64;
       col->n     = al->GetSize();
       col->data  = (void*)al->GetArray();
     } else {
       col->parent.reset();
-      return lval_err("as-col: unsupported type '%s' (expected TArrayF/D/I/L64)", cn.c_str());
+      return lval_err("as-col: unsupported type '%s' (expected TArrayF/D/I/L64 or subclass)", cn.c_str());
     }
     return lval_column(std::move(col));
   });

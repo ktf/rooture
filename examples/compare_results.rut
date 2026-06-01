@@ -1,13 +1,14 @@
 ;;; compare_results.rut
 ;;;
-;;; Compare two AnalysisResults.root files element-by-element.
-;;; Reads CorrelationContainer objects using MakeProject-generated
-;;; dictionaries, then uses field / field-at / as-col to navigate
-;;; the StepTHn arrays and compare via column operations.
+;;; Compare two ROOT files element-by-element.
+;;; Recursively walks all directories, comparing histograms bin-by-bin
+;;; via as-col + column ops.  For files containing CorrelationContainer
+;;; objects, generates dictionaries via MakeProject and compares
+;;; StepTHn arrays and THnSparse prototypes.
 ;;;
 ;;; Usage:
-;;;   (def {file1} "/path/to/AnalysisResults.root")
-;;;   (def {file2} "/path/to/AnalysisResults-2.root")
+;;;   (def {file1} "/path/to/file1.root")
+;;;   (def {file2} "/path/to/file2.root")
 ;;;   (load "examples/compare_results.rut")
 ;;;   (run)
 
@@ -15,31 +16,100 @@
 
 (fun {run} {do
 
-  ;;; Generate dictionary from streamer info if needed
-  (def {ftmp} (new TFile file1))
-  (.MakeProject ftmp "/tmp/corrcontainer" "*" "RECREATE+")
-  (.Close ftmp)
-  (. Load gSystem "/tmp/corrcontainer/corrcontainer.so")
+  (def {f1} (new TFile file1))
+  (def {f2} (new TFile file2))
+
+  ;;; Check if file contains classes needing MakeProject dictionaries
+  (def {needs-dict} 0)
+  (def {topkeys-pre} (.GetListOfKeys f1))
+  (def {ntop-pre} (.GetEntries topkeys-pre))
+  (dotimes {i} ntop-pre {do
+    (= {key} (.At topkeys-pre i))
+    (= {cn} (.GetClassName key))
+    (if (== cn "TDirectoryFile")
+      {do
+        (= {dir} (.Get f1 (.GetName key)))
+        (= {dkeys} (.GetListOfKeys dir))
+        (= {nd} (.GetEntries dkeys))
+        (dotimes {j} nd {do
+          (= {dk} (.At dkeys j))
+          (if (== (.GetClassName dk) "CorrelationContainer")
+            {def {needs-dict} 1}
+            {})
+        })}
+      {})
+  })
+  (.Close f1)
+
+  (if (== needs-dict 1)
+    {do
+      (= {ftmp} (new TFile file1))
+      (.MakeProject ftmp "/tmp/corrcontainer" "*" "RECREATE+")
+      (.Close ftmp)
+      (. Load gSystem "/tmp/corrcontainer/corrcontainer.so")}
+    {})
 
   (def {f1} (new TFile file1))
   (def {f2} (new TFile file2))
 
-  ;;; jit-fns for comparison
-  (def {diff-fn} (jit-fn float (\{{float a} {float b}} {(::Abs TMath (- a b))})))
-  (def {diff-ptr} (jitfn-ptr diff-fn))
-  (def {sum-fn} (jit-fn float (\{{float acc} {float x}} {(+ acc x)})))
-  (def {sum-ptr} (jitfn-ptr sum-fn))
+  ;;; jit-fns for comparison (float32)
+  (def {diff-fn-f} (jit-fn float (\{{float a} {float b}} {(::Abs TMath (- a b))})))
+  (def {diff-ptr-f} (jitfn-ptr diff-fn-f))
+  (def {sum-fn-f} (jit-fn float (\{{float acc} {float x}} {(+ acc x)})))
+  (def {sum-ptr-f} (jitfn-ptr sum-fn-f))
+  (def {neq-fn-f} (jit-fn float (\{{float a} {float b}} {(if (!= a b) {1.0} {0.0})})))
+  (def {neq-ptr-f} (jitfn-ptr neq-fn-f))
+
+  ;;; jit-fns for comparison (float64)
+  (def {diff-fn-d} (jit-fn double (\{{double a} {double b}} {(::Abs TMath (- a b))})))
+  (def {diff-ptr-d} (jitfn-ptr diff-fn-d))
+  (def {sum-fn-d} (jit-fn double (\{{double acc} {double x}} {(+ acc x)})))
+  (def {sum-ptr-d} (jitfn-ptr sum-fn-d))
+  (def {neq-fn-d} (jit-fn double (\{{double a} {double b}} {(if (!= a b) {1.0} {0.0})})))
+  (def {neq-ptr-d} (jitfn-ptr neq-fn-d))
 
   ;;; ---------------------------------------------------------------
-  ;;; Helper: compare a single standard histogram by path
+  ;;; Helper: compare two histogram objects bin-by-bin
   ;;; ---------------------------------------------------------------
-  (def {compare-hist} (\ {path} {do
-    (= {h1} (.Get f1 path))
-    (= {h2} (.Get f2 path))
-    (= {i1} (.Integral h1))
-    (= {i2} (.Integral h2))
-    (print (concat path ": " (str i1) " vs " (str i2)
-      (if (== i1 i2) {" IDENTICAL"} {" DIFFERENT"})))
+  (def {compare-cols} (\ {path c1 c2 neq-p diff-p sum-p} {do
+    (= {neqs} (col-zip-ptr neq-p c1 c2))
+    (= {ndiff} (col-reduce-ptr sum-p 0.0 neqs))
+    (= {diffs} (col-zip-ptr diff-p c1 c2))
+    (= {total} (col-reduce-ptr sum-p 0.0 diffs))
+    (print (concat path ": diffBins=" (str ndiff) "/" (str (col-length c1))
+      " absdiff=" (str total)
+      (if (== ndiff 0.0) {" IDENTICAL"} {" DIFFERENT"})))
+  }))
+
+  (def {compare-hist-objs} (\ {path h1 h2} {do
+    (= {c1} (as-col h1))
+    (= {c2} (as-col h2))
+    (= {dt} (col-dtype c1))
+    (if (== dt "double")
+      {compare-cols path c1 c2 neq-ptr-d diff-ptr-d sum-ptr-d}
+      {compare-cols path c1 c2 neq-ptr-f diff-ptr-f sum-ptr-f})
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Helper: is this a histogram class name?
+  ;;; ---------------------------------------------------------------
+  (def {is-hist} (\ {cn} {do
+    (or (or (or (== cn "TH1F") (== cn "TH1D"))
+            (or (== cn "TH2F") (== cn "TH2D")))
+        (or (== cn "TH3F") (== cn "TH3D")))
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Helper: compare a single object by class name
+  ;;; ---------------------------------------------------------------
+  (def {compare-obj} (\ {dir1 dir2 name cn path} {do
+    (if (is-hist cn)
+      {compare-hist-objs path (.Get dir1 name) (.Get dir2 name)}
+      {if (== cn "CorrelationContainer")
+        {do
+          (print (concat "\n=== CorrelationContainer: " path " ==="))
+          (compare-container path (.Get dir1 name) (.Get dir2 name))}
+        {print (concat path ": [" cn "] skipped")}})
   }))
 
   ;;; ---------------------------------------------------------------
@@ -49,6 +119,19 @@
     (= {ns} (field mNSteps ph1))
     (print (concat "\n=== " label " (" (str ns) " steps, "
       (str (field mNBins ph1)) " bins) ==="))
+
+    ;;; Compare THnSparse prototype
+    (= {proto1} (field mPrototype ph1))
+    (= {proto2} (field mPrototype ph2))
+    (= {pe1} (.GetEntries proto1))
+    (= {pe2} (.GetEntries proto2))
+    (= {pn1} (.GetNbins proto1))
+    (= {pn2} (.GetNbins proto2))
+    (print (concat "  prototype: entries=" (str pe1) " vs " (str pe2)
+      ", nBins=" (str pn1) " vs " (str pn2)
+      (if (and (== pe1 pe2) (== pn1 pn2)) {" IDENTICAL"} {" DIFFERENT"})))
+
+    ;;; Compare mValues TArrays per step
     (dotimes {i} ns {do
       (= {v1} (field-at mValues ph1 i))
       (= {v2} (field-at mValues ph2 i))
@@ -57,68 +140,72 @@
         {do
           (= {c1} (as-col v1))
           (= {c2} (as-col v2))
-          (= {diffs} (col-zip-ptr diff-ptr c1 c2))
-          (= {total} (col-reduce-ptr sum-ptr 0.0 diffs))
-          (= {s1} (col-reduce-ptr sum-ptr 0.0 c1))
+          (= {dt} (col-dtype c1))
+          (= {neq-p} (if (== dt "double") {neq-ptr-d} {neq-ptr-f}))
+          (= {diff-p} (if (== dt "double") {diff-ptr-d} {diff-ptr-f}))
+          (= {sum-p} (if (== dt "double") {sum-ptr-d} {sum-ptr-f}))
+          (= {neqs} (col-zip-ptr neq-p c1 c2))
+          (= {ndiff} (col-reduce-ptr sum-p 0.0 neqs))
+          (= {diffs} (col-zip-ptr diff-p c1 c2))
+          (= {total} (col-reduce-ptr sum-p 0.0 diffs))
+          (= {s1} (col-reduce-ptr sum-p 0.0 c1))
           (print (concat "  step " (str i) ": sum=" (str s1)
+            " diffBins=" (str ndiff) "/" (str (col-length c1))
             " absdiff=" (str total)
-            (if (< total 0.001) {" IDENTICAL"} {" DIFFERENT"})))
+            (if (== ndiff 0.0) {" IDENTICAL"} {" DIFFERENT"})))
         })
     })
   }))
 
   ;;; ---------------------------------------------------------------
-  ;;; Compare standard histograms
+  ;;; Helper: compare a CorrelationContainer by path
   ;;; ---------------------------------------------------------------
-  (print "=== Standard histograms ===")
-  (def {ct1} (.Get f1 "correlation-task"))
-  (def {ct2} (.Get f2 "correlation-task"))
+  (def {compare-container} (\ {prefix obj1 obj2} {do
+    (compare-steps (concat prefix "/mPairHist")
+      (field mPairHist obj1) (field mPairHist obj2))
+    (compare-steps (concat prefix "/mTriggerHist")
+      (field mTriggerHist obj1) (field mTriggerHist obj2))
+    (compare-steps (concat prefix "/mTrackHistEff")
+      (field mTrackHistEfficiency obj1) (field mTrackHistEfficiency obj2))
+    (= {ec1} (field mEventCount obj1))
+    (= {ec2} (field mEventCount obj2))
+    (= {ei1} (.Integral ec1))
+    (= {ei2} (.Integral ec2))
+    (print (concat "  mEventCount: " (str ei1) " vs " (str ei2)
+      (if (== ei1 ei2) {" IDENTICAL"} {" DIFFERENT"})))
+  }))
 
-  ;;; Enumerate all histogram keys in correlation-task
-  (def {keys} (.GetListOfKeys ct1))
-  (def {nk} (.GetEntries keys))
-  (dotimes {i} nk {do
-    (= {key} (.At keys i))
+  ;;; ---------------------------------------------------------------
+  ;;; Helper: recursively compare all objects in a TDirectoryFile
+  ;;; ---------------------------------------------------------------
+  (def {compare-dir} (\ {dir1 dir2 prefix} {do
+    (= {keys} (.GetListOfKeys dir1))
+    (= {nk} (.GetEntries keys))
+    (dotimes {i} nk {do
+      (= {key} (.At keys i))
+      (= {name} (.GetName key))
+      (= {cn} (.GetClassName key))
+      (= {path} (concat prefix "/" name))
+      (if (== cn "TDirectoryFile")
+        {compare-dir (.Get dir1 name) (.Get dir2 name) path}
+        {compare-obj dir1 dir2 name cn path})
+    })
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Walk all top-level objects, comparing everything
+  ;;; ---------------------------------------------------------------
+  (print "=== Comparing files ===")
+  (def {topkeys} (.GetListOfKeys f1))
+  (def {ntop} (.GetEntries topkeys))
+  (dotimes {i} ntop {do
+    (= {key} (.At topkeys i))
     (= {cn} (.GetClassName key))
-    (if (or (== cn "TH1F") (== cn "TH1D") (== cn "TH2F") (== cn "TH3F"))
-      {compare-hist (concat "correlation-task/" (.GetName key))}
-      {})
+    (= {name} (.GetName key))
+    (if (== cn "TDirectoryFile")
+      {compare-dir (.Get f1 name) (.Get f2 name) name}
+      {compare-obj f1 f2 name cn name})
   })
-
-  ;;; Event selection histograms
-  (compare-hist "eventselection-run2/eventselection/hColCounterAll")
-  (compare-hist "eventselection-run2/eventselection/hColCounterAcc")
-
-  ;;; ---------------------------------------------------------------
-  ;;; Compare CorrelationContainer objects
-  ;;; ---------------------------------------------------------------
-  (def {same1} (.Get ct1 "sameEvent"))
-  (def {same2} (.Get ct2 "sameEvent"))
-  (def {mixed1} (.Get ct1 "mixedEvent"))
-  (def {mixed2} (.Get ct2 "mixedEvent"))
-
-  (compare-steps "sameEvent/mPairHist"
-    (field mPairHist same1) (field mPairHist same2))
-  (compare-steps "sameEvent/mTriggerHist"
-    (field mTriggerHist same1) (field mTriggerHist same2))
-  (compare-steps "sameEvent/mTrackHistEff"
-    (field mTrackHistEfficiency same1) (field mTrackHistEfficiency same2))
-
-  (compare-steps "mixedEvent/mPairHist"
-    (field mPairHist mixed1) (field mPairHist mixed2))
-  (compare-steps "mixedEvent/mTriggerHist"
-    (field mTriggerHist mixed1) (field mTriggerHist mixed2))
-  (compare-steps "mixedEvent/mTrackHistEff"
-    (field mTrackHistEfficiency mixed1) (field mTrackHistEfficiency mixed2))
-
-  ;;; mEventCount (TH2F)
-  (print "\n=== mEventCount (TH2F) ===")
-  (print (concat "  sameEvent: "
-    (str (.Integral (field mEventCount same1))) " vs "
-    (str (.Integral (field mEventCount same2)))))
-  (print (concat "  mixedEvent: "
-    (str (.Integral (field mEventCount mixed1))) " vs "
-    (str (.Integral (field mEventCount mixed2)))))
 
   (print "\n=== DONE ===")
 })
