@@ -140,6 +140,22 @@ Return types: void → `()`, pointer → TOBJ, float → float, int → integer.
 6. Use `mcp__rooture__list_symbols` to inspect the environment.
 7. Use `mcp__rooture__get_canvas` to view plots (returns PNG inline).
 
+### Built-in timing — no `TStopwatch` needed
+
+Every `eval` reply ends with a `; eval: <time>` line giving the wall-clock time
+the evaluation took (ms below 1 s, else seconds); `load` ends with `; load: <time>`.
+`eval_async` results include an `elapsed_ms` field in the `task_result` JSON.
+
+```
+eval expr="(run)"
+→ ...analysis output...
+  ; eval: 15.794 s
+```
+
+Use this to find slow operations directly — there is no need to wrap code in
+`(new TStopwatch)` / `.Start` / `.Stop` / `.RealTime` just to measure it. Reach
+for `TStopwatch` only when you need to time a *sub-section* of a single eval.
+
 ### `provide` system
 
 Library scripts declare their public API with `(provide {sym1 sym2 ...})` at the end.
@@ -175,3 +191,7 @@ Use indices ≥ 6000 to avoid clashing with ROOT's built-in palette.
 - Float literals need a decimal point: `10.` not `10`
 - `Clone` returns `TObject*` — use `@cloneName` to retrieve with real class
 - Enum constants (`kLHintsCenterX` etc.) are not in scope — use numeric values
+
+For the full list of language quirks (symbol→string auto-conversion, `.Method`
+name shadowing, `def` vs `=`, `if` Q-expressions, ...) see the
+**`rooture-quirks`** skill.

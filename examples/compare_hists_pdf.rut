@@ -1,0 +1,221 @@
+;;; compare_hists_pdf.rut
+;;;
+;;; Visual comparison of two ROOT files containing histograms.
+;;; Recursively walks all directories; for every histogram found it
+;;; renders one row of three pads: OLD | NEW | DIFF (new - old).
+;;;   TH1*        -> one row, line plots
+;;;   TH2*        -> one row, COLZ
+;;;   TH3*        -> three rows, one per 1D axis projection
+;;;   THn(Sparse) -> one row per 1D axis projection
+;;; Pages of 3 rows are appended to a multi-page PDF.
+;;;
+;;; Usage:
+;;;   (def {file-old} "/path/to/reference.root")
+;;;   (def {file-new} "/path/to/candidate.root")
+;;;   (def {out-pdf}  "/path/to/comparison.pdf")
+;;;   (load "examples/compare_hists_pdf.rut")
+;;;   (run)
+
+(load stdlib.rut)
+
+(fun {run} {do
+
+  (def {f1} (new TFile file-old))
+  (def {f2} (new TFile file-new))
+
+  (.SetOptStat gStyle 10)        ; entries only, no histogram name
+
+  ;;; jit-fns for exact bin-level comparison (as in compare_results.rut)
+  (def {neq-fn-f} (jit-fn float (\{{float a} {float b}} {(if (!= a b) {1.0} {0.0})})))
+  (def {neq-ptr-f} (jitfn-ptr neq-fn-f))
+  (def {sum-fn-f} (jit-fn float (\{{float acc} {float x}} {(+ acc x)})))
+  (def {sum-ptr-f} (jitfn-ptr sum-fn-f))
+  (def {neq-fn-d} (jit-fn double (\{{double a} {double b}} {(if (!= a b) {1.0} {0.0})})))
+  (def {neq-ptr-d} (jitfn-ptr neq-fn-d))
+  (def {sum-fn-d} (jit-fn double (\{{double acc} {double x}} {(+ acc x)})))
+  (def {sum-ptr-d} (jitfn-ptr sum-fn-d))
+
+  (def {cnv} (new TCanvas "c_cmp" "comparison" 1500 1200))
+  (def {rows-per-page} 3)
+  (def {row-idx} 0)
+  (def {uid} 0)
+  (def {n-pages} 0)
+  (def {n-ident} 0)
+  (def {n-diff} 0)
+  (def {n-skip} 0)
+
+  (.Print cnv (concat out-pdf "["))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Render one comparison row: OLD | NEW | DIFF (new - old)
+  ;;; ---------------------------------------------------------------
+  (def {render-row} (\ {label h1 h2 opt} {do
+    (if (== row-idx 0)
+      {do (.Clear cnv) (.Divide cnv 3 rows-per-page)}
+      {})
+    (def {uid} (+ uid 1))
+    (= {c1} (.Clone h1 (concat "cmp_old_" (str uid))))
+    (= {c2} (.Clone h2 (concat "cmp_new_" (str uid))))
+    (= {hdiff} (.Clone h2 (concat "cmp_diff_" (str uid))))
+    (.SetDirectory c1 0)
+    (.SetDirectory c2 0)
+    (.SetDirectory hdiff 0)
+    (.Add hdiff c1 -1.0)
+    ;; exact bin-level diff via columns (includes under/overflow bins)
+    (= {col1} (as-col c1))
+    (= {col2} (as-col c2))
+    (= {dt} (col-dtype col1))
+    (= {neq-p} (if (== dt "double") {neq-ptr-d} {neq-ptr-f}))
+    (= {sum-p} (if (== dt "double") {sum-ptr-d} {sum-ptr-f}))
+    (= {ndiff} (col-reduce-ptr sum-p 0.0 (col-zip-ptr neq-p col1 col2)))
+    (= {nbins} (col-length col1))
+    (= {dmax} (.GetMaximum hdiff))
+    (= {dmin} (.GetMinimum hdiff))
+    (.SetTitle c1 (concat label " OLD"))
+    (.SetTitle c2 (concat label " NEW"))
+    (.SetTitle hdiff (concat label " DIFF bins=" (str ndiff) "/" (str nbins)
+      " max=" (str dmax) " min=" (str dmin)))
+    (if (== ndiff 0.0)
+      {do
+        (def {n-ident} (+ n-ident 1))
+        (print (concat label ": IDENTICAL"))}
+      {do
+        (def {n-diff} (+ n-diff 1))
+        (print (concat label ": DIFFERENT diffBins=" (str ndiff) "/" (str nbins)
+          " max=" (str dmax) " min=" (str dmin)))})
+    (.cd cnv (+ (* row-idx 3) 1))
+    (.Draw c1 opt)
+    (.cd cnv (+ (* row-idx 3) 2))
+    (.Draw c2 opt)
+    (.cd cnv (+ (* row-idx 3) 3))
+    (if (== opt "") {.SetLineColor hdiff 2} {})
+    (.Draw hdiff opt)
+    (def {row-idx} (+ row-idx 1))
+    (if (== row-idx rows-per-page)
+      {do
+        (.cd cnv 0)
+        (.Update cnv)
+        (.Print cnv out-pdf)
+        (def {row-idx} 0)
+        (def {n-pages} (+ n-pages 1))}
+      {})
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Render a one-row textual note (unsupported / missing objects)
+  ;;; ---------------------------------------------------------------
+  (def {render-note} (\ {line1 line2} {do
+    (if (== row-idx 0)
+      {do (.Clear cnv) (.Divide cnv 3 rows-per-page)}
+      {})
+    (def {uid} (+ uid 1))
+    (.cd cnv (+ (* row-idx 3) 1))
+    (= {pt} (new TPaveText 0.02 0.3 0.98 0.7 "NDC"))
+    (doto pt
+      {SetFillColor 0}
+      {SetBorderSize 1}
+      {SetTextAlign 12}
+      {AddText line1}
+      {AddText line2}
+      {Draw ""})
+    (def {row-idx} (+ row-idx 1))
+    (if (== row-idx rows-per-page)
+      {do
+        (.cd cnv 0)
+        (.Update cnv)
+        (.Print cnv out-pdf)
+        (def {row-idx} 0)
+        (def {n-pages} (+ n-pages 1))}
+      {})
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Dispatch one object pair by its actual class
+  ;;; ---------------------------------------------------------------
+  (def {render-obj} (\ {o1 o2 path} {do
+    (if (.InheritsFrom o1 "THnBase")
+      {do
+        (= {nd} (.GetNdimensions o1))
+        (dotimes {d} nd {do
+          (def {uid} (+ uid 1))
+          (= {axt} (.GetTitle (.GetAxis o1 d)))
+          (= {p1} (.Projection o1 d ""))
+          (.SetName p1 (concat "pj_old_" (str uid)))
+          (= {p2} (.Projection o2 d ""))
+          (.SetName p2 (concat "pj_new_" (str uid)))
+          (render-row (concat path " ax" (str d) " " axt) p1 p2 "")
+        })}
+      {if (.InheritsFrom o1 "TH3")
+        {do
+          (def {uid} (+ uid 1))
+          (= {px1} (.Project3D o1 "x"))
+          (.SetName px1 (concat "p3x_old_" (str uid)))
+          (= {px2} (.Project3D o2 "x"))
+          (.SetName px2 (concat "p3x_new_" (str uid)))
+          (render-row (concat path " projX") px1 px2 "")
+          (= {py1} (.Project3D o1 "y"))
+          (.SetName py1 (concat "p3y_old_" (str uid)))
+          (= {py2} (.Project3D o2 "y"))
+          (.SetName py2 (concat "p3y_new_" (str uid)))
+          (render-row (concat path " projY") py1 py2 "")
+          (= {pz1} (.Project3D o1 "z"))
+          (.SetName pz1 (concat "p3z_old_" (str uid)))
+          (= {pz2} (.Project3D o2 "z"))
+          (.SetName pz2 (concat "p3z_new_" (str uid)))
+          (render-row (concat path " projZ") pz1 pz2 "")}
+        {if (.InheritsFrom o1 "TH2")
+          {render-row path o1 o2 "COLZ"}
+          {if (.InheritsFrom o1 "TH1")
+            {render-row path o1 o2 ""}
+            {do
+              (def {n-skip} (+ n-skip 1))
+              (print (concat path ": NOT SUPPORTED (" (.ClassName o1) ")"))
+              (render-note path
+                (concat "[" (.ClassName o1) "] not supported by this comparison"))}}}})
+  }))
+
+  ;;; ---------------------------------------------------------------
+  ;;; Recursive directory walk
+  ;;; ---------------------------------------------------------------
+  (def {walk-dir} (\ {d1 d2 prefix} {do
+    (= {keys} (.GetListOfKeys d1))
+    (= {nk} (.GetEntries keys))
+    (dotimes {i} nk {do
+      (= {key} (.At keys i))
+      (= {name} (.GetName key))
+      (= {cn} (.GetClassName key))
+      (= {path} (concat prefix "/" name))
+      (if (== cn "TDirectoryFile")
+        {walk-dir (.Get d1 name) (.Get d2 name) path}
+        {do
+          (= {onew} (.Get d2 name))
+          (if (== onew {})
+            {do
+              (def {n-skip} (+ n-skip 1))
+              (print (concat path ": MISSING in new file"))
+              (render-note path "MISSING in new file")}
+            {render-obj (.Get d1 name) onew path})
+        })
+    })
+  }))
+
+  (print (concat "=== OLD: " file-old))
+  (print (concat "=== NEW: " file-new))
+  (walk-dir f1 f2 "")
+
+  ;;; flush a partially filled last page
+  (if (!= row-idx 0)
+    {do
+      (.cd cnv 0)
+      (.Update cnv)
+      (.Print cnv out-pdf)
+      (def {n-pages} (+ n-pages 1))}
+    {})
+  (.Print cnv (concat out-pdf "]"))
+
+  (print (concat "=== DONE: " (str n-ident) " identical, " (str n-diff)
+    " different, " (str n-skip) " noted (unsupported/missing), "
+    (str n-pages) " pages -> " out-pdf))
+})
+
+(provide {run})

@@ -1,0 +1,147 @@
+;;; examples/validate_aod_df.rut
+;;;
+;;; Compare two derived AO2D files time-frame by time-frame, to validate that a
+;;; code change leaves the derived data unchanged. Walks the DF_<id> directories
+;;; present in BOTH files (the common time-frame set) and compares every tree and
+;;; every branch element-by-element.
+;;;
+;;; Why per-DF and not whole-file: Hyperloop wagon tests are time-limited, so a
+;;; faster build (e.g. one carrying a perf fix) processes MORE time-frames in the
+;;; window. A merged AnalysisResults.root therefore differs by statistics alone;
+;;; the meaningful check is the derived data on the DF set BOTH runs produced.
+;;;
+;;; Reuses inspect_aod.rut's structure helpers (tfile-key-names-of-class,
+;;; tree-branch-names) and compare_results.rut's column-diff pattern.
+;;;
+;;; Usage:
+;;;   (def {aod-a} "/tmp/AO2D_<baseline_train>.root")   ; baseline (e.g. daily)
+;;;   (def {aod-b} "/tmp/AO2D_<candidate_train>.root")  ; candidate (the fix)
+;;;   (load "examples/validate_aod_df.rut")
+;;;   (run)
+
+(load stdlib.rut)
+(load rootlib.rut)
+
+;; not-equal counters (1.0 per differing element) + float accumulator, one per
+;; AO2D column dtype (col-dtype string -> jit-fn with the matching formal type).
+(def {vaod-sum} (jitfn-ptr (jit-fn float (\{{Float_t acc} {Float_t x}} {(+ acc x)}))))
+(def {vaod-nf}  (jitfn-ptr (jit-fn float (\{{Float_t a}    {Float_t b}}    {(if (!= a b) {1.0} {0.0})}))))
+(def {vaod-nd}  (jitfn-ptr (jit-fn float (\{{Double_t a}   {Double_t b}}   {(if (!= a b) {1.0} {0.0})}))))
+(def {vaod-ni}  (jitfn-ptr (jit-fn float (\{{Int_t a}      {Int_t b}}      {(if (!= a b) {1.0} {0.0})}))))
+(def {vaod-nu}  (jitfn-ptr (jit-fn float (\{{UInt_t a}     {UInt_t b}}     {(if (!= a b) {1.0} {0.0})}))))
+(def {vaod-nl}  (jitfn-ptr (jit-fn float (\{{ULong64_t a}  {ULong64_t b}}  {(if (!= a b) {1.0} {0.0})}))))
+(def {vaod-ns}  (jitfn-ptr (jit-fn float (\{{UShort_t a}   {UShort_t b}}   {(if (!= a b) {1.0} {0.0})}))))
+(def {vaod-nc}  (jitfn-ptr (jit-fn float (\{{Char_t a}     {Char_t b}}     {(if (!= a b) {1.0} {0.0})}))))
+(def {vaod-nuc} (jitfn-ptr (jit-fn float (\{{UChar_t a}    {UChar_t b}}    {(if (!= a b) {1.0} {0.0})}))))
+
+;; col-dtype string -> the matching neq jit-fn pointer (nil if unsupported)
+(fun {vaod-neq-for dt} {
+  if (== dt "float")              {vaod-nf}
+  {if (== dt "double")             {vaod-nd}
+  {if (== dt "int")                {vaod-ni}
+  {if (== dt "unsigned int")        {vaod-nu}
+  {if (== dt "unsigned long long")  {vaod-nl}
+  {if (== dt "unsigned short")      {vaod-ns}
+  {if (== dt "char")                {vaod-nc}
+  {if (== dt "unsigned char")       {vaod-nuc}
+  {nil}}}}}}}}})
+
+;; Branch-name cache, keyed by tree type (e.g. "O2hf2prong_001"). Every DF
+;; carries the same schema for a given table, so we deserialize ONE tree per
+;; type to read its branch names, then reuse the list across all time-frames.
+;; This is the only place a TTree is materialised; row counts and contents come
+;; straight from the col framework (col-length / col-zip-ptr), never GetEntries.
+(def {vaod-brcache-k} nil)
+(def {vaod-brcache-v} nil)
+;; lookup k in parallel key/value lists, walking with tail; nil if absent
+(fun {vaod-lookup ks vs k} {
+  if (== (len ks) 0) {nil}
+  {if (== (fst ks) k) {fst vs}
+   {vaod-lookup (tail ks) (tail vs) k}}
+})
+(fun {vaod-branch-names f dfn tn} {do
+  (= {hit} (vaod-lookup vaod-brcache-k vaod-brcache-v tn))
+  (if (!= hit nil)
+    {hit}
+    {do
+      (= {brs} (tree-branch-names (. Get f (concat dfn "/" tn))))
+      (def {vaod-brcache-k} (join vaod-brcache-k (list tn)))
+      (def {vaod-brcache-v} (join vaod-brcache-v (list brs)))
+      brs})
+})
+
+(fun {run} {do
+
+  (def {fa} (::Open TFile aod-a))
+  (def {fb} (::Open TFile aod-b))
+
+  (def {dfs-a} (tfile-key-names-of-class fa "TDirectoryFile"))
+  (def {dfs-b} (tfile-key-names-of-class fb "TDirectoryFile"))
+  (def {vaod-brcache-k} nil)
+  (def {vaod-brcache-v} nil)
+
+  (def {nCommon} 0)
+  (def {nDiffTables} 0)
+  (def {nDiffBranches} 0)
+  (def {nSkip} 0)
+
+  (dotimes {iDf} (len dfs-a) {do
+    (= {dfn} (nth iDf dfs-a))
+    (if (not (elem dfn dfs-b))
+      {print (concat dfn ": only in A (extra TF in the other run) — skipped")}
+      {do
+        (def {nCommon} (+ nCommon 1))
+        ;; tree-name lists are cheap (key listing only — no tree deserialisation)
+        (= {trees}  (tfile-key-names-of-class (. Get fa dfn) "TTree"))
+        (= {treesB} (tfile-key-names-of-class (. Get fb dfn) "TTree"))
+        (dotimes {iT} (len trees) {do
+          (= {tn} (nth iT trees))
+          (if (not (elem tn treesB))
+            {do (print (concat dfn "/" tn ": tree missing in B — DIFFERENT"))
+                (def {nDiffTables} (+ nDiffTables 1))}
+            {do
+              (= {path} (concat dfn "/" tn))
+              (= {brs}  (vaod-branch-names fa dfn tn))
+              (dotimes {iB} (len brs) {do
+                (= {bn} (nth iB brs))
+                (= {ca} (load-branch aod-a path bn))
+                (= {cb} (load-branch aod-b path bn))
+                (= {la} (col-length ca))
+                (= {lb} (col-length cb))
+                (if (!= la lb)
+                  {do (print (concat path "." bn ": rows " (str la) " vs " (str lb) " — DIFFERENT"))
+                      (def {nDiffTables} (+ nDiffTables 1))}
+                  {if (== la 0) {} {do
+                    (= {p} (vaod-neq-for (col-dtype ca)))
+                    (if (== p nil)
+                      {do (print (concat "  ? " path "." bn ": dtype " (col-dtype ca) " unsupported — skipped"))
+                          (def {nSkip} (+ nSkip 1))}
+                      {do
+                        ;; out-dtype MUST be "float": the neq jit-fns return float
+                        ;; (0/1) while the inputs are typed; without this col-zip-ptr
+                        ;; would default the output to the input dtype and mis-read
+                        ;; the float return as an int (silent false "identical").
+                        ;; The != still happens in the input type, so equality is exact.
+                        (= {ndiff} (col-reduce-ptr vaod-sum 0.0 (col-zip-ptr p ca cb "float")))
+                        (if (!= ndiff 0.0)
+                          {do (print (concat "  X " path "." bn ": " (str ndiff) "/" (str la) " differing rows"))
+                              (def {nDiffBranches} (+ nDiffBranches 1))}
+                          {})})}})
+              })
+            })
+        })})
+  })
+
+  (. Close fa)
+  (. Close fb)
+
+  (print (concat "\n=== common DFs: " (str nCommon)
+                 ", differing tables: " (str nDiffTables)
+                 ", differing branches: " (str nDiffBranches)
+                 ", skipped: " (str nSkip) " ==="))
+  (if (and (== nDiffTables 0) (== nDiffBranches 0))
+    {print ">>> DERIVED DATA IDENTICAL on the common time-frame set"}
+    {print ">>> DERIVED DATA DIFFERS — investigate the X lines above"})
+})
+
+(provide {run vaod-neq-for vaod-branch-names})

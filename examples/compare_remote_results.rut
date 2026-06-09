@@ -1,0 +1,118 @@
+;;; compare_remote_results.rut
+;;;
+;;; Validate two AnalysisResults.root files that live on Hyperloop test
+;;; workdirs (or any HTTP location behind the alimonitor proxy) without
+;;; downloading them by hand. Resolves each train id to its workdir URL,
+;;; fetches the AnalysisResults.root through the local credential proxy into
+;;; /tmp, then delegates to the existing comparison scripts:
+;;;   - compare_results.rut    -> numeric bin-by-bin diff (IDENTICAL/DIFFERENT)
+;;;   - compare_hists_pdf.rut  -> visual OLD|NEW|DIFF multi-page PDF
+;;;
+;;; A Hyperloop test workdir is
+;;;   <proxy>/alimonitor/train-workdir/tests/<id//10000 :04>/<id :08>/AnalysisResults.root
+;;; and the test-workdir id IS the train id (see hyperloop-reproducers skill).
+;;;
+;;; Usage (by train id - the common case):
+;;;   (def {train-old} 695219)              ; daily baseline
+;;;   (def {train-new} 695224)              ; eulisse-local (change under test)
+;;;   (load "examples/compare_remote_results.rut")
+;;;   (run)                                 ; numeric diff (default)
+;;;   (run-pdf)                             ; + visual OLD|NEW|DIFF PDF
+;;;
+;;; Usage (explicit URLs, e.g. a non-train location):
+;;;   (def {url-old} "http://localhost:8888/alimonitor/.../AnalysisResults.root")
+;;;   (def {url-new} "http://.../AnalysisResults.root")
+;;;   (load "examples/compare_remote_results.rut")
+;;;   (run)
+;;;
+;;; Config knobs (all optional, sensible defaults):
+;;;   proxy-base   default "http://localhost:8888"
+;;;   proxy-token  default "jalien-secret"   (alimonitor route bearer)
+;;;   out-pdf      default "/tmp/compare_<old>_<new>.pdf"
+
+(load stdlib.rut)
+
+;;; ---- optional inputs: undefined symbols auto-stringify, so guard ----
+(default {train-old}  0)
+(default {train-new}  0)
+(default {url-old}    "")
+(default {url-new}    "")
+(default {proxy-base} "http://localhost:8888")
+(default {proxy-token} "jalien-secret")
+
+;;; zero-pad an integer to a given width (string)
+(fun {zpad} {n w} {do
+  (= {s} (str n))
+  (while (< (strlen s) w) {= {s} (concat "0" s)})
+  s
+})
+
+;;; train id -> workdir AnalysisResults.root URL through the alimonitor proxy
+(fun {workdir-url} {tid} {do
+  (= {bucket} (zpad (/ tid 10000) 4))
+  (= {full}   (zpad tid 8))
+  (concat proxy-base "/alimonitor/train-workdir/tests/"
+          bucket "/" full "/AnalysisResults.root")
+})
+
+;;; fetch a URL to a local path via curl + the proxy bearer (returns the path).
+;;; curl is the right tool here: it streams a multi-hundred-MB ROOT file to
+;;; disk with the auth header the proxy needs - fetch-url is for small CCDB
+;;; objects held in memory.
+(fun {fetch-to} {url path} {do
+  (= {auth} (concat "Authorization: Bearer " proxy-token))
+  (= {cmd} (concat "curl -fsSL -H '" auth "' -H 'Accept-Encoding: identity' "
+                   "'" url "' -o '" path "'"))
+  (print (concat "  fetch " url))
+  (= {rc} (system cmd))
+  (if (!= rc 0)
+    {do (print (concat "  ERROR: curl failed (rc=" (str rc) ") for " url)) (error "fetch failed")}
+    {})
+  path
+})
+
+;;; resolve {old,new} -> two local paths, fetching only when remote.
+;;; precedence: explicit url-old/url-new > train-old/train-new.
+(fun {resolve-inputs} {} {do
+  (= {tag-old} (if (!= url-old "") {"old"} {str train-old}))
+  (= {tag-new} (if (!= url-new "") {"new"} {str train-new}))
+  (= {p-old} (concat "/tmp/AnalysisResults_" tag-old ".root"))
+  (= {p-new} (concat "/tmp/AnalysisResults_" tag-new ".root"))
+  (= {u-old} (if (!= url-old "") {url-old} {workdir-url train-old}))
+  (= {u-new} (if (!= url-new "") {url-new} {workdir-url train-new}))
+  (if (and (== url-old "") (== train-old 0))
+    {error "define train-old (or url-old) before loading compare_remote_results.rut"} {})
+  (if (and (== url-new "") (== train-new 0))
+    {error "define train-new (or url-new) before loading compare_remote_results.rut"} {})
+  (fetch-to u-old p-old)
+  (fetch-to u-new p-new)
+  (list p-old p-new)
+})
+
+;;; ---- numeric bin-by-bin diff (default) ----
+(fun {run} {} {do
+  (= {paths} (resolve-inputs))
+  (print (concat "=== remote numeric comparison: " (fst paths)
+                 "  vs  " (fst (tail paths)) " ==="))
+  ;; hand the local paths to the generic numeric comparison
+  (def {file1} (fst paths))
+  (def {file2} (fst (tail paths)))
+  (load "examples/compare_results.rut")
+  (run)
+})
+
+;;; ---- visual OLD|NEW|DIFF PDF ----
+(fun {run-pdf} {} {do
+  (= {paths} (resolve-inputs))
+  (default {out-pdf}
+    (concat "/tmp/compare_"
+            (if (!= url-old "") {"old"} {str train-old}) "_"
+            (if (!= url-new "") {"new"} {str train-new}) ".pdf"))
+  (print (concat "=== remote visual comparison -> " out-pdf " ==="))
+  (def {file-old} (fst paths))
+  (def {file-new} (fst (tail paths)))
+  (load "examples/compare_hists_pdf.rut")
+  (run)
+})
+
+(provide {run run-pdf workdir-url fetch-to resolve-inputs})

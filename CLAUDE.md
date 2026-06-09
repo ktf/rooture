@@ -172,53 +172,16 @@ Rules:
 
 ## Rooture language quirks
 
-### Undefined symbols auto-convert to strings
-At the top level, any symbol not bound in the environment becomes a **string with the same spelling** (see `lenv_get`). Consequences:
-- `(load stdlib.rut)` works without quotes — `stdlib.rut` becomes `"stdlib.rut"`.
-- If a `def` is skipped (e.g. prior error short-circuits the expression), later uses of that variable silently become strings, causing `"Got String, expected Object"` errors in method calls.
+See the **`rooture-quirks` skill** (`.claude/skills/rooture-quirks/SKILL.md`)
+before writing any non-trivial rooture code. It covers, among others:
 
-### Lambda bodies: use `do` for multiple expressions
-`{expr1 expr2}` as a lambda body evaluates to `(expr1 expr2)` — calling expr1 as a function on expr2. For sequential execution:
-```
-(\{i} {do expr1 expr2})   ; evaluates both, returns last
-```
-Use `=` (not `def`) for local variables inside lambdas.
-
-### Static method calls
-`(::Method ClassName args...)` and `(:: Method ClassName args...)` are identical — the `::` prefix on the method symbol is syntactic sugar for the two-token form.
-
-### Namespaced C++ types need no quotes
-The symbol regex includes `:`, so `ROOT::RDF::TH1DModel` is a single symbol and auto-converts to the string `"ROOT::RDF::TH1DModel"`. Write:
-```
-(new ROOT::RDF::TH1DModel "name" "title" 512 2. 110.)
-(::FromCSV ROOT::RDF fileUrl)
-```
-No quoting needed for namespaced class or namespace names.
-
-### Use `doto` to reduce verbosity
-When making multiple method calls on the same object, always prefer `doto` over repeated `.Method` calls:
-```
-; preferred
-(def {sl}
-  (doto (new TGHSlider parent 160 3 -1)
-    {SetRange 1 50}
-    {SetPosition 10}))
-
-; avoid
-(def {sl} (new TGHSlider parent 160 3 -1))
-(.SetRange sl 1 50)
-(.SetPosition sl 10)
-```
-`doto` also works inside callbacks for sequential operations on an object:
-```
-(doto h {Reset} {FillRandom gf 5000})
-```
-
-### `if` branches must be Q-expressions
-```
-(if cond {true-val} {false-val})   ; correct
-(if cond  true-val   false-val)    ; Error: expected Q-Expression
-```
+- Undefined symbols auto-convert to strings (and the silent failures this causes)
+- Variables can shadow `.Method` sugar — never name a variable after a method
+  you call (e.g. a local `cd` breaks `(.cd cnv 1)`)
+- Lambda bodies need `do` for multiple expressions; `=` for locals, `def` for globals
+- `if` branches must be Q-expressions
+- `::Method` static-call sugar; namespaced C++ types need no quotes
+- Prefer `doto` for repeated method calls on the same object
 
 ## Script provide system — side-effect-free loading
 
@@ -281,9 +244,17 @@ in separate files within each skill's folder and referenced from `SKILL.md`.
 - `spectra-comparison` — running `spectra_tpc.rut` and comparing output to reference.
   Supporting files: `comparison.rut`, `pid-plot.rut`.
 
+- `compare-root-files` — generic comparison of any two ROOT files object-by-object:
+  numeric bin diff (`examples/compare_results.rut`) and visual OLD|NEW|DIFF PDF
+  (`examples/compare_hists_pdf.rut`).
+
 - `plot-conventions` — per-species ROOT color assignments and general style rules.
 
 - `rooture-lang` — language reference: syntax, semantics, MCP workflow, gotchas.
+
+- `rooture-quirks` — language quirks and gotchas: symbol→string auto-conversion,
+  `.Method` name shadowing, `def` vs `=`, `do` in lambda bodies, `if` Q-expressions,
+  `doto` style. Read before writing any non-trivial rooture code.
 
 - `rooture-gui` — building TGFrame-based GUIs. Supporting file: `hello-world.rut`.
 

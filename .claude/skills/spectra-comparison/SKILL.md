@@ -1,5 +1,5 @@
 ---
-description: Running spectra_tpc.rut and comparing output to AnalysisResults.root reference. Use when the user asks for spectra, a spectra comparison plot, a PID dE/dx plot, or wants to validate analysis output against the reference task.
+description: Running spectra_tpc.rut and comparing its output to the AnalysisResults.root reference task. Use when the user asks for spectra, a spectra comparison plot, a PID dE/dx plot, or wants to validate spectra analysis output against the reference task. For comparing two whole ROOT files object-by-object, see the compare-root-files skill.
 ---
 
 # spectra-comparison
@@ -57,6 +57,12 @@ Notes:
 - `pinner-c` = `fTPCInnerParam` — momentum at inner TPC wall, for BB evaluation
 - `p-c` = total momentum, for the `p > p-min-pid` validity cut only
 - `bb0`–`bb4` are already bound after `pid_tpc.rut` loads
+
+## Comparing whole ROOT files
+
+To compare two entire ROOT files object-by-object (numeric bin diff or a
+visual OLD|NEW|DIFF PDF) — not just spectra — use the **`compare-root-files`**
+skill (`examples/compare_results.rut` and `examples/compare_hists_pdf.rut`).
 
 ## Gotchas
 

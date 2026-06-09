@@ -53,6 +53,27 @@ TChain/RDataFrame are still useful for quick interactive exploration or one-off 
 but for production analysis loops use the column API. See `rooture-analysis-basics`
 for the full parallel analysis pattern.
 
+### Reach for the col framework first, for *any* per-row task
+
+Beyond reading, prefer the `col-*` framework over hand-rolled `TTree`/`TBranch`/`TLeaf`
+walking whenever a task is fundamentally per-row — comparing two files, counting,
+filtering, accumulating, deriving quantities. It is both faster and simpler:
+
+- **Row count** comes from `col-length` — never call `TTree::GetEntries` (which forces
+  a full tree deserialization) just to size or skip a branch. An empty branch loads as
+  a valid 0-length column.
+- **Element access** via `col-ref`; whole-column transforms via `col-map-ptr`; pairwise
+  comparison/combination via `col-zip-ptr`; folds via `col-reduce-ptr`.
+- Avoiding the `.Get`/`.GetEntries` structure walk removes the dominant cost (rooture
+  serializes every tree deserialization on the main thread).
+
+⚠️ **`col-zip-ptr` output dtype**: when the jit-fn's *return* type differs from the
+*input* column dtype (e.g. an `(Int_t,Int_t)->float` equality test), pass the output
+type explicitly as the trailing arg — `(col-zip-ptr fp a b "float")`. Without it the
+output defaults to the input dtype and the float return is mis-read as an int (a silent
+wrong result). The comparison itself still happens in the input type, so equality stays
+exact. See `examples/validate_aod_df.rut` for the file-comparison pattern.
+
 ---
 
 ## Iterating over directories

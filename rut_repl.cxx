@@ -1,5 +1,6 @@
 #include "rooture.h"
 #include <cstdarg>
+#include <chrono>
 #include <ctime>
 #include <execinfo.h>
 #include <signal.h>
@@ -27,9 +28,10 @@ static bool        g_capturing = false;
 static std::string g_capture_buf;
 static std::string g_screenshot_dir;  // directory to archive screenshots (git repo)
 
-// Async task map: task_id → {done, output}
+// Async task map: task_id → {done, output, elapsed_ms}
+struct AsyncTask { bool done; std::string output; double ms; };
 static std::mutex                              g_task_mu;
-static std::map<std::string, std::pair<bool,std::string>> g_task_map;
+static std::map<std::string, AsyncTask>        g_task_map;
 static std::atomic<int>                        g_task_counter{0};
 static time_t      g_start_time = 0; // set at start of main() for crash-loop detection
 
@@ -170,6 +172,7 @@ public:
       stderr_pipe[1] = -1;
     }
 
+    auto eval_t0 = std::chrono::steady_clock::now();
     if (mpc_parse(src, expr.c_str(), Lispy, &r)) {
       if (g_debug) mpc_ast_print((mpc_ast_t*)r.output);
       lval* prog = lval_read((mpc_ast_t*)r.output);
@@ -190,6 +193,10 @@ public:
       free(err_str);
       mpc_err_delete(r.error);
     }
+
+    double eval_ms =
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - eval_t0).count();
 
     if (mode >= 1) {
       g_capturing = false;
@@ -214,14 +221,15 @@ public:
       }
 
       if (mode == 1) {
-        // MCP sync: send reply on reply pipe
+        // MCP sync: send reply on reply pipe, followed by the eval wall time.
         uint32_t rlen = (uint32_t)g_capture_buf.size();
         write(g_mcp_reply_fds[1], &rlen, sizeof(rlen));
         if (rlen > 0) write(g_mcp_reply_fds[1], g_capture_buf.data(), rlen);
+        write(g_mcp_reply_fds[1], &eval_ms, sizeof(eval_ms));
       } else {
-        // MCP async: store result in task map
+        // MCP async: store result + wall time in task map
         std::lock_guard<std::mutex> lock(g_task_mu);
-        g_task_map[task_id] = {true, g_capture_buf};
+        g_task_map[task_id] = {true, g_capture_buf, eval_ms};
       }
     }
 
@@ -450,7 +458,7 @@ static void mcp_thread_fn() {
   using json = nlohmann::json;
 
   // Helper: send eval expression to main thread, block until result arrives.
-  auto eval_expr = [](const std::string& expr) -> std::string {
+  auto eval_expr = [](const std::string& expr, double* ms_out = nullptr) -> std::string {
     uint8_t mode = 1;  // MCP sync
     write(g_pipe_fds[1], &mode, 1);
     uint32_t len = (uint32_t)expr.size();
@@ -465,7 +473,20 @@ static void mcp_thread_fn() {
       if (n <= 0) break;
       got += n;
     }
+    // Trailing eval wall time (sent by the evaluator after the payload).
+    double ms = 0;
+    if (read(g_mcp_reply_fds[0], &ms, sizeof(ms)) == (ssize_t)sizeof(ms)) {
+      if (ms_out) *ms_out = ms;
+    }
     return result;
+  };
+
+  // Format an eval wall time for display (ms below 1s, else seconds).
+  auto fmt_ms = [](double ms) -> std::string {
+    char buf[64];
+    if (ms >= 1000.0) snprintf(buf, sizeof(buf), "%.3f s", ms / 1000.0);
+    else              snprintf(buf, sizeof(buf), "%.3f ms", ms);
+    return buf;
   };
 
   // Helper: write one JSON-RPC response line to the saved MCP output stream.
@@ -480,7 +501,9 @@ static void mcp_thread_fn() {
 
   json tools = json::array({
     {{"name", "eval"},
-     {"description", "Evaluate a rooture expression in ROOT (Lisp-like syntax)."},
+     {"description", "Evaluate a rooture expression in ROOT (Lisp-like syntax). "
+       "The reply ends with a '; eval: <time>' line giving the wall-clock time "
+       "the evaluation took — use it to spot slow operations without TStopwatch."},
      {"inputSchema", {{"type","object"},
        {"properties", {{"expr", {{"type","string"},{"description","Expression to evaluate"}}}}},
        {"required", {"expr"}}}}},
@@ -557,7 +580,8 @@ static void mcp_thread_fn() {
      {"description",
        "Poll the result of an eval_async task. "
        "Returns {\"status\":\"pending\"} while the task is still running, "
-       "{\"status\":\"done\",\"output\":\"...\"} when complete, "
+       "{\"status\":\"done\",\"output\":\"...\",\"elapsed_ms\":<wall time>} when complete "
+       "(elapsed_ms is the evaluation's wall-clock time in milliseconds), "
        "or {\"status\":\"not_found\"} for an unknown task ID."},
      {"inputSchema", {{"type","object"},
        {"properties", {{"id", {{"type","string"},{"description","Task ID returned by eval_async"}}}}},
@@ -620,7 +644,7 @@ static void mcp_thread_fn() {
         std::string task_id = "task_" + std::to_string(++g_task_counter);
         {
           std::lock_guard<std::mutex> lock(g_task_mu);
-          g_task_map[task_id] = {false, ""};
+          g_task_map[task_id] = {false, "", 0.0};
         }
         uint8_t amode = 2;
         write(g_pipe_fds[1], &amode, 1);
@@ -642,10 +666,11 @@ static void mcp_thread_fn() {
           auto it = g_task_map.find(task_id);
           if (it == g_task_map.end()) {
             result = "{\"status\":\"not_found\"}";
-          } else if (!it->second.first) {
+          } else if (!it->second.done) {
             result = "{\"status\":\"pending\"}";
           } else {
-            json r = {{"status","done"},{"output",it->second.second}};
+            json r = {{"status","done"},{"output",it->second.output},
+                      {"elapsed_ms",it->second.ms}};
             result = r.dump();
           }
         }
@@ -655,7 +680,10 @@ static void mcp_thread_fn() {
 
       } else if (tool == "eval") {
         std::string expr = args.value("expr","");
-        std::string result = eval_expr(expr);
+        double ms = 0;
+        std::string result = eval_expr(expr, &ms);
+        if (!result.empty() && result.back() != '\n') result += "\n";
+        result += "; eval: " + fmt_ms(ms);
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
           {"content", json::array({{{"type","text"},{"text",result}}})}
         }}});
@@ -817,7 +845,8 @@ static void mcp_thread_fn() {
           else if (c == '\\') escaped += "\\\\";
           else escaped += c;
         }
-        std::string raw = eval_expr("(load \"" + escaped + "\")");
+        double load_ms = 0;
+        std::string raw = eval_expr("(load \"" + escaped + "\")", &load_ms);
         // Split: everything before the last line is loading output;
         // the last non-empty line is lval_println of the provide manifest (or "()" / "Error: ...").
         std::string manifest, output;
@@ -843,6 +872,7 @@ static void mcp_thread_fn() {
           text = "Loaded: " + path + "\nExports: " + manifest;
           if (!output.empty()) text += "\n\nOutput:\n" + output;
         }
+        text += "\n; load: " + fmt_ms(load_ms);
         send_resp({{"jsonrpc","2.0"},{"id",id},{"result",{
           {"content", json::array({{{"type","text"},{"text",text}}})}
         }}});

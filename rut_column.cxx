@@ -260,9 +260,21 @@ static RutColumnPtr load_branch_impl(const char* path,
     dtype = branch_dtype(br);
     total = br->GetEntries();
   });
-  if (!tree || !br || dtype < 0 || total <= 0) return nullptr;
+  // A missing tree/branch or unknown dtype is a real failure; an *empty*
+  // branch (total == 0) is a valid zero-length column, not an error — so the
+  // caller can treat "branch with no rows" uniformly via col-length instead of
+  // pre-checking TTree::GetEntries.
+  if (!tree || !br || dtype < 0 || total < 0) return nullptr;
 
   size_t esz = col_dtype_size(dtype);
+  if (total == 0) {
+    auto col = std::make_shared<RutColumn>();
+    col->dtype = dtype;
+    col->n     = 0;
+    col->data  = col_alloc(esz);  // non-null 1-element placeholder
+    return col;
+  }
+
   void*  buf = col_alloc((size_t)total * esz);
   if (!buf) return nullptr;
 
@@ -649,6 +661,8 @@ static lval* col_zip_impl(void* fp, int ncols, lval* a, int first_col_idx,
     switch (idtype) {
       case COL_FLOAT32: CROSS_DISPATCH_ZIP(float);    break;
       case COL_FLOAT64: CROSS_DISPATCH_ZIP(double);   break;
+      case COL_INT64:   CROSS_DISPATCH_ZIP(int64_t);  break;
+      case COL_UINT64:  CROSS_DISPATCH_ZIP(uint64_t); break;
       case COL_INT32:   CROSS_DISPATCH_ZIP(int32_t);  break;
       case COL_UINT32:  CROSS_DISPATCH_ZIP(uint32_t); break;
       case COL_INT16:   CROSS_DISPATCH_ZIP(int16_t);  break;

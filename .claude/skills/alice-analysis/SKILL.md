@@ -11,6 +11,7 @@ Umbrella skill for ALICE analyses in rooture. Sub-skills to load:
 | Read AO2D files, understand data layout, use TChain / RDataFrame | `alice-aod` |
 | Full analysis setup: event sel, track cuts, DCA, PID, pmap | `rooture-analysis-basics` |
 | Run `spectra_tpc.rut`, compare to `AnalysisResults.root`, PID plot | `spectra-comparison` |
+| Compare two whole ROOT files object-by-object (numeric diff or OLD\|NEW\|DIFF PDF) | `compare-root-files` |
 | Species colors, line widths, axis conventions for any plot | `plot-conventions` |
 | Fetch calibration/PID objects from CCDB via credential proxy | `ccdb-proxy` |
 | Light nuclei (He3/He4) PID, O2nucleitable, ITS cluster size, TOF m² | `alice-nuclei` |
